@@ -15,7 +15,7 @@ Tested on real hardware:
 Untested (view-only until you press **Allow changes** on the device page):
 
 - **Mice:** Pulsar (other models), Logitech (HID++ 2.0: Superlight, G502, G305…), Razer (DeathAdder, Viper, Basilisk, Cobra, Orochi), Lamzu, Vancer, LunaFury, Attack Shark, CRDRAKO, Orbital Pathfinder / Ghost, ATK, VXE / VGN, Kysona, Scyrox, Teevolution, Glorious wireless
-- **Keyboards:** any VIA-enabled keyboard — lighting and key remapping on every layer (Keychron, NuPhy, Lofree Flow 2, Zoom, Mode, CIDOO, Kzzi, Akko / Monsgeek / Epomaker VIA models and custom boards)
+- **Keyboards:** Lofree Hyzen, DAREU (80 boards on DAREU's own firmware, incl. A68 / A98 / EK series), any VIA-enabled keyboard — lighting and key remapping on every layer (Keychron, NuPhy, Lofree Flow 2, Zoom, Mode, CIDOO, Kzzi, Akko / Monsgeek / Epomaker VIA models and custom boards)
 
 ## Try it without a device
 

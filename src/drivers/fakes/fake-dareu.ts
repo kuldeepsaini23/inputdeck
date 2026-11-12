@@ -1,7 +1,8 @@
 // Simulated DAREU keyboard on TG firmware. Default: A68 (VID 260D PID 0175, magnetic, TravelVersion 2);
 // any other product from dareu-products.ts via `pid` (magnetic value layout follows its TravelVersion:
 // 0 = one byte per value, 1/2 = big-endian u16). Used by the tests.
-import { CLS, DEV, GET, LED, MAG, PAYLOAD, PFL, REPORT_SIZE, allowed, productFor } from '../dareu';
+import { CLS, DEV, GET, KEY, LED, MAG, MCO, PAYLOAD, PFL, REPORT_SIZE, allowed, capsFor, productFor } from '../dareu';
+import { usageOfKeyId } from '../dareu-keys';
 
 /** Fakes refuse anything the real device wouldn't accept, so bugs surface in tests. */
 const check = (ok: boolean, what: string) => {
@@ -60,6 +61,15 @@ export class FakeDareu {
   keys = new Map<number, FakeKey>();
   /** SOCD group per key id (absent = not SOCD) */
   socd = new Map<number, number>();
+  /** profile ids (1-based) */
+  profileIds = [1, 2, 3];
+  /** key assignment per `${profile}:${layer}:${key}`: [fid, d0..d4] (default: the key's own HID usage) */
+  assigns = new Map<string, number[]>();
+  /** MT / TGL / DKS parameters per key id, as the GET reply bytes after [1, key] */
+  adv = new Map<number, number[]>();
+  /** macro bytes per id */
+  macros = new Map<number, number[]>();
+  macroNames = new Map<number, string>();
   private reply: Uint8Array | undefined;
   private busyLeft = 0;
   private pending: { left: number; apply: () => void }[] = [];
@@ -90,6 +100,49 @@ export class FakeDareu {
   }
   addEventListener() {}
   removeEventListener() {}
+
+  /** default assignment: the key's own HID usage; Fn (107) is VendorKey 0x40 on both layers */
+  assign(key: number, layer: number, profile = this.profile): number[] {
+    const a = this.assigns.get(`${profile}:${layer}:${key}`);
+    if (a) return a;
+    if (key === 107) return [10, 0x40, 0, 0, 0, 0];
+    const u = usageOfKeyId(key);
+    return u > 0 ? (u >= 0xe0 && u <= 0xe7 ? [6, 1 << (u - 0xe0), 0, 0, 0, 0] : [6, 0, u, 0, 0, 0]) : [0, 0, 0, 0, 0, 0];
+  }
+
+  /** multi-packet GET reply (vendor GetMultiPacketCmd): first = total, then chunks */
+  private multi(f: Uint8Array, pre: number, w: number, data: number[]) {
+    const pl = Array.from(f.slice(PAYLOAD));
+    const num = (v: number) => (w === 1 ? [v & 0xff] : [(v >> 8) & 0xff, v & 0xff]);
+    const head = pl.slice(0, pre);
+    if (f[1] === 1) return this.answer(f, [...head, ...num(data.length)]);
+    const at = (i: number) => (w === 1 ? pl[i] : (pl[i] << 8) | pl[i + 1]);
+    const total = at(pre);
+    const off = at(pre + w);
+    check(total === data.length, 'multi-packet total');
+    const n = Math.min(48, total - off);
+    check(f[1] === n + pre + 2 * w, 'multi-packet size byte');
+    return this.answer(f, [...head, ...num(total), ...num(off), ...data.slice(off, off + n)]);
+  }
+
+  /** multi-packet SET (vendor SetMultiPacketCmd): returns the full data once the last chunk is in */
+  private partial = new Map<string, number[]>();
+  private multiSet(tag: string, pl: number[], pre: number, w: number, size: number): number[] | undefined {
+    const at = (i: number) => (w === 1 ? pl[i] : (pl[i] << 8) | pl[i + 1]);
+    const total = at(pre);
+    const off = at(pre + w);
+    const n = Math.min(48, total - off);
+    check(size === n + pre + 2 * w, 'multi-packet set size byte');
+    const buf = off === 0 ? new Array<number>(total).fill(0) : this.partial.get(tag);
+    check(!!buf && buf.length === total, 'multi-packet set order');
+    for (let i = 0; i < n; i++) buf![off + i] = pl[pre + 2 * w + i];
+    if (off + n < total) {
+      this.partial.set(tag, buf!);
+      return undefined;
+    }
+    this.partial.delete(tag);
+    return buf;
+  }
 
   key(id: number): FakeKey {
     return this.keys.get(id) ?? { func: 0, travel: 0, press: 0, release: 0 };
@@ -123,7 +176,52 @@ export class FakeDareu {
     const val = (at: number) => (wide ? (pl[at] << 8) | pl[at + 1] : pl[at]);
     const vw = wide ? 2 : 1;
     if (cls === CLS.DEVICE && cmd === DEV.FW_VER) return this.answer(f, this.fw);
-    if (cls === CLS.PROFILE && cmd === PFL.ACTIVE) return this.answer(f, [], this.profile);
+    if (cls === CLS.PROFILE && cmd === PFL.ACTIVE) {
+      if (get) return this.answer(f, [], this.profile);
+      check(this.profileIds.includes(f[4]), 'profile id');
+      if (w) this.profile = f[4];
+      return this.answer(f, [], this.profile);
+    }
+    if (cls === CLS.PROFILE && cmd === PFL.ID_LIST) return this.multi(f, 0, 1, this.profileIds);
+    if (cls === CLS.KEY && cmd === KEY.ASSIGN) {
+      const [key, layer] = pl;
+      check(f[4] === this.profile, 'key assign profile');
+      check(capsFor(productFor(this.productId)!).some((c) => c.index === key), 'key id');
+      if (get) return this.answer(f, [key, layer, ...this.assign(key, layer)]);
+      if (w) this.assigns.set(`${this.profile}:${layer}:${key}`, pl.slice(2, 8));
+      return this.answer(f, []);
+    }
+    if (cls === CLS.MACRO) {
+      const ids = [...this.macros.keys()].sort((a, b) => a - b);
+      if (cmd === MCO.ID_LIST && get) return this.multi(f, 0, 1, ids);
+      if (cmd === MCO.MEMORY && get) {
+        check(this.macros.has(pl[0]), 'macro id');
+        return this.multi(f, 1, 2, this.macros.get(pl[0])!);
+      }
+      if (cmd === MCO.CREATE) {
+        if (w) this.macros.set(pl[0], new Array<number>((pl[1] << 8) | pl[2]).fill(0));
+        return this.answer(f, []);
+      }
+      if (cmd === MCO.DELETE) {
+        check(f[1] === 0, 'macro delete size byte');
+        if (w) this.macros.delete(pl[0]);
+        return this.answer(f, []);
+      }
+      if (cmd === MCO.NAME) {
+        const b = this.multiSet(`n${pl[0]}`, pl, 1, 1, f[1]);
+        if (b && w) this.macroNames.set(pl[0], new TextDecoder().decode(new Uint8Array(b)));
+        return this.answer(f, []);
+      }
+      if (cmd === MCO.MEMORY) {
+        check(!w || this.macros.has(pl[0]), 'macro written before create');
+        const b = this.multiSet(`m${pl[0]}`, pl, 1, 2, f[1]);
+        if (b && w) {
+          check(b.length === this.macros.get(pl[0])!.length, 'macro length = created length');
+          if (w) this.macros.set(pl[0], b);
+        }
+        return this.answer(f, []);
+      }
+    }
     if (cls === CLS.DEVICE && cmd === DEV.POLLING) {
       check(f[4] === this.profile, 'polling profile');
       if (get) return this.answer(f, [this.usbType, this.rate]);
@@ -189,6 +287,26 @@ export class FakeDareu {
           out.push(id, this.key(id).func, g === undefined ? 0 : 1, g ?? 0xff);
         }
         return this.answer(f, out);
+      }
+      if (cmd === MAG.MT || cmd === MAG.TGL || cmd === MAG.DKS) {
+        const len = cmd === MAG.DKS ? 8 : cmd === MAG.MT ? 4 : 3;
+        check(pl[0] === 1 && f[1] === (cmd === MAG.DKS ? 10 : 5), 'MT/TGL/DKS layout');
+        const func = cmd === MAG.MT ? 3 : cmd === MAG.TGL ? 4 : 5;
+        if (get) return this.answer(f, [1, pl[1], ...(this.key(pl[1]).func === func ? (this.adv.get(pl[1]) ?? []) : new Array(len).fill(0))]);
+        if (w) {
+          this.adv.set(pl[1], pl.slice(2, 2 + len));
+          this.keys.set(pl[1], { func, travel: 0, press: 0, release: 0 });
+        }
+        return this.answer(f, []);
+      }
+      if (cmd === MAG.NORMAL_TRIGGER) {
+        check(!get && f[1] === pl[0] + 1, 'normal trigger layout');
+        for (let i = 0; i < pl[0]; i++) {
+          if (!w) continue;
+          this.keys.set(pl[1 + i], { func: 0, travel: 0, press: 0, release: 0 });
+          this.adv.delete(pl[1 + i]);
+        }
+        return this.answer(f, []);
       }
       const n = pl[0];
       const stride = (f[1] - 1) / n;

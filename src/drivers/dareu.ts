@@ -13,14 +13,33 @@
 //        [4] profile [5] 0 [6..] payload.
 //
 // NEVER sent (the allowlist refuses everything not listed in `allowed()`): DEVICE RESET (class 0
-// cmd 8 = factory reset), class 5 profile create/delete/reset, DFU (class 9), TEST (class 10, incl.
-// factory defaults), FLASH (class 12), magnetic calibration (class 13 cmd 10), normal-trigger
-// reset (13/1), global travel SET (13/7 - the vendor's own SetGlobalTravel can't run), key
-// assignment / macros / DKS / MT / TGL writes, and anything undocumented. SOCD (13/11) only as the
-// exact per-key set / remove frames below.
+// cmd 8 = factory reset), class 5 profile create/delete/name/reset, DFU (class 9), TEST (class 10,
+// incl. factory defaults), FLASH (class 12), magnetic calibration (class 13 cmd 10), bulk
+// normal-trigger reset (13/1 with more than one key), global travel SET (13/7 - the vendor's own
+// SetGlobalTravel can't run), key functions other than keys / media / power / mouse / wheel /
+// macro (WRITABLE_FIDS: never settings reset, pairing, RF test, ...), macro storage info, and
+// anything undocumented. SOCD (13/11) only as the exact per-key set / remove frames below.
+//
+// Written (each read back): polling rate, lighting effect / brightness, single / rapid trigger,
+// SOCD, RT self-adaptive (13/14), MT / TGL / DKS (13/4-6, removed with a one-key 13/1 like the
+// vendor), key assignments (1/3, base + Fn layer), macros (6/2-5) and the active profile (5/3).
 
 import { DAREU_LAYOUTS, DAREU_PRODUCTS, type DareuProduct } from './dareu-products';
-import type { Driver, DriverFactory, KeyCap, Setting, Socd, Value } from './types';
+import {
+  OPAQUE_BASE,
+  OPAQUE_MAX,
+  WRITABLE_FIDS,
+  assignKey,
+  assignOfCode,
+  codeOfAssign,
+  keyIdOfUsage,
+  lockedAssign,
+  sameAssign,
+  usageOfKeyId,
+  type Assign,
+} from './dareu-keys';
+import { MOUSE_MAX_DELAY, decodeMacro, encodeMacro } from '../lib/macros';
+import type { AdvancedKey, AdvancedKeys, DelayRange, Driver, DriverFactory, KeyCap, Setting, Socd, Value } from './types';
 import { sleep } from './types';
 
 export const VID = 0x260d;
@@ -30,13 +49,19 @@ export const GET = 0x80;
 const CMD_UP = 0x000c;
 const CMD_USAGE = 0x0001;
 
-export const CLS = { DEVICE: 0, LIGHTING: 3, PROFILE: 5, MAGNETIC: 13 } as const;
+export const CLS = { DEVICE: 0, KEY: 1, LIGHTING: 3, PROFILE: 5, MACRO: 6, MAGNETIC: 13 } as const;
+/** class 1 */
+export const KEY = { ASSIGN: 3 } as const;
+/** class 6 */
+export const MCO = { ID_LIST: 1, CREATE: 2, DELETE: 3, NAME: 4, MEMORY: 5 } as const;
+/** macro ids the vendor hands out (macro.html: lowest free id in 1..254) */
+export const MACRO_ID_MAX = 254;
 /** class 0 */
 export const DEV = { FW_VER: 0, POLLING: 4 } as const;
 /** class 3 */
 export const LED = { ID_LIST: 0, ATTRIBUTE: 1, EFFECT: 2, BRIGHTNESS: 3 } as const;
 /** class 5 */
-export const PFL = { ACTIVE: 3 } as const;
+export const PFL = { ID_LIST: 0, ACTIVE: 3 } as const;
 /** class 13 */
 export const MAG = {
   KEY_FUNCTION: 0,
@@ -113,8 +138,26 @@ export const EFFECTS: [number, string][] = [
 /** 13..18 are custom / streaming frames: never offered or sent. */
 const isEffect = (e: number) => e >= 0 && e <= 32 && !(e >= 13 && e <= 18);
 const MAX_COLORS = 17;
-/** Brightness is shown as 0..BRI_STEPS (device: 0..255). */
-const BRI_STEPS = 5;
+/** Brightness is shown in percent like the vendor: floor(raw * 100 / 255); written as the smallest raw for it. */
+export const briPercent = (raw: number) => Math.floor((raw * 100) / 255);
+export const briRaw = (pct: number) => Math.ceil((clamp(Math.round(pct), 0, 100) * 255) / 100);
+/** effect flag bit 1: reverse direction (vendor offers it for Wave only) */
+export const FLAG_REVERSE = 0x02;
+const WAVE = 5;
+/** Mod-Tap / Toggle hold time ranges of the vendor sliders (ms) */
+export const MT_DELAY: DelayRange = { min: 100, max: 1000, step: 10, default: 200 };
+export const TGL_DELAY: DelayRange = { min: 200, max: 1000, step: 10, default: 200 };
+/** macro slots offered (ids 1..n); the firmware's real limit isn't in the vendor code */
+export const MACRO_SLOTS = 16;
+
+type Keymap = Extract<Value, { kind: 'keymap' }>;
+type Macros = Extract<Value, { kind: 'macros' }>;
+/** MT / TGL / DKS as stored (vendor key ids) */
+type RawAdv =
+  | { mode: 'mt'; hold: number; tap: number; delay: number }
+  | { mode: 'tgl'; kc: number; delay: number }
+  | { mode: 'dks'; keys: number[]; conds: number[] };
+const NORMAL_TRIG = { func: 0, travel: 0, press: 0, release: 0 };
 
 /** Timings (ms). Mutable only so tests can shorten them. */
 export const dareuTiming = {
@@ -221,14 +264,54 @@ export function allowed(f: ArrayLike<number>): boolean {
     }
     return zeroFrom(1 + stride * n);
   };
+  /**
+   * Vendor multi-packet GET (TgHidDevice.GetMultiPacketCmd) with `pre` prefix bytes and `w`-byte
+   * total / offset: first frame size 1 with just the prefix, then [prefix, total, offset] frames
+   * asking for min(48, total - offset) bytes (size byte = that count + prefix + 2w).
+   */
+  const multiGet = (pre: number, w: number) => {
+    if (size === 1) return zeroFrom(pre);
+    const num = (at: number) => (w === 1 ? pl(at) : (pl(at) << 8) | pl(at + 1));
+    const total = num(pre);
+    const off = num(pre + w);
+    return total >= 1 && off < total && size === Math.min(48, total - off) + pre + 2 * w && zeroFrom(pre + 2 * w);
+  };
+  /** Vendor multi-packet SET (SetMultiPacketCmd): [prefix, total, offset, data] frames. */
+  const multiSet = (pre: number, w: number) => {
+    const num = (at: number) => (w === 1 ? pl(at) : (pl(at) << 8) | pl(at + 1));
+    const total = num(pre);
+    const off = num(pre + w);
+    const r = Math.min(48, total - off);
+    return total >= 1 && off < total && size === r + pre + 2 * w && zeroFrom(pre + 2 * w + r);
+  };
+  const macroId = (id: number) => id >= 1 && id <= MACRO_ID_MAX;
   switch (cls) {
+    case CLS.KEY:
+      // key assignment [key, layer (0 base / 1 Fn), function, d0..d4], one key per frame
+      if (cmd !== KEY.ASSIGN || size !== 8 || !profOk || pl(0) === 0 || pl(1) > 1) return false;
+      if (get) return zeroFrom(2);
+      return WRITABLE_FIDS.has(pl(2)) && zeroFrom(8);
+    case CLS.MACRO:
+      if (prof !== 0) return false;
+      if (get && cmd === MCO.ID_LIST) return multiGet(0, 1);
+      if (get && cmd === MCO.MEMORY) return macroId(pl(0)) && multiGet(1, 2);
+      if (!get && cmd === MCO.MEMORY) return macroId(pl(0)) && multiSet(1, 2);
+      if (!get && cmd === MCO.NAME) return macroId(pl(0)) && multiSet(1, 1);
+      if (!get && cmd === MCO.CREATE) return size === 3 && macroId(pl(0)) && zeroFrom(3);
+      // delete: size byte 0 although the id follows (vendor quirk, copied exactly)
+      if (!get && cmd === MCO.DELETE) return size === 0 && macroId(pl(0)) && zeroFrom(1);
+      return false;
     case CLS.DEVICE:
       if (get && cmd === DEV.FW_VER) return size === 3 && prof === 0 && zeroFrom(0);
       if (get && cmd === DEV.POLLING) return size === 2 && profOk && zeroFrom(0);
       if (!get && cmd === DEV.POLLING) return size === 2 && profOk && (pl(0) === 0 || pl(0) === 1) && RATE_IDS.has(pl(1)) && zeroFrom(2);
       return false;
     case CLS.PROFILE:
-      return get && cmd === PFL.ACTIVE && size === 0 && prof === 0 && zeroFrom(0);
+      if (get && cmd === PFL.ACTIVE) return size === 0 && prof === 0 && zeroFrom(0);
+      // switch profile: id (1-based) in the header, no payload
+      if (!get && cmd === PFL.ACTIVE) return size === 0 && prof >= 1 && prof < 16 && zeroFrom(0);
+      if (get && cmd === PFL.ID_LIST) return prof === 0 && multiGet(0, 1);
+      return false;
     case CLS.LIGHTING:
       if (get && cmd === LED.ID_LIST) {
         if (prof !== 0) return false;
@@ -261,6 +344,19 @@ export function allowed(f: ArrayLike<number>): boolean {
       }
       if (prof !== 0) return false;
       if (cmd === MAG.RT_ADAPTIVE) return size === 1 && (get ? zeroFrom(0) : pl(0) <= 1 && zeroFrom(1));
+      // MT / TGL / DKS, one key: [1, key, ...]
+      if (cmd === MAG.MT || cmd === MAG.TGL || cmd === MAG.DKS) {
+        if (pl(0) !== 1 || pl(1) === 0 || size !== (cmd === MAG.DKS ? 10 : 5)) return false;
+        if (get) return zeroFrom(2);
+        // MT: size byte 5 although 6 bytes follow (vendor quirk, copied exactly)
+        if (cmd === MAG.MT) return zeroFrom(6);
+        if (cmd === MAG.TGL) return zeroFrom(5);
+        // DKS: 4 key ids + 4 seven-bit condition masks, at least one key
+        for (let i = 6; i < 10; i++) if (pl(i) > 0x7f) return false;
+        return (pl(2) || pl(3) || pl(4) || pl(5)) !== 0 && zeroFrom(10);
+      }
+      // RemoveBinding (normal trigger), one key at a time: only sent for MT / TGL / DKS keys
+      if (!get && cmd === MAG.NORMAL_TRIGGER) return size === 2 && pl(0) === 1 && pl(1) !== 0 && zeroFrom(2);
       if (get && cmd === MAG.GLOBAL_TRAVEL) return (size === 1 || size === 2) && zeroFrom(0);
       if (get && cmd === MAG.KEY_FUNCTION) return keyList({ 2: 28 }, 'zero');
       if (cmd === MAG.SINGLE_TRIGGER) return keyList({ 2: 18, 3: 18 }, get ? 'zero' : 'set');
@@ -285,6 +381,65 @@ export function allowed(f: ArrayLike<number>): boolean {
 
 export const fwVerPkt = () => frame(CLS.DEVICE, DEV.FW_VER | GET, 3, 0);
 export const activeProfilePkt = () => frame(CLS.PROFILE, PFL.ACTIVE | GET, 0, 0);
+/** switch to profile `id` (1-based; vendor SetActiveProfileId) */
+export const setProfilePkt = (id: number) => frame(CLS.PROFILE, PFL.ACTIVE, 0, id);
+
+/** Multi-packet GET frames (vendor GetMultiPacketCmd): first, then one per 48-byte chunk. */
+export const multiFirstPkt = (cls: number, cmd: number, pre: number[] = []) => frame(cls, cmd | GET, 1, 0, pre);
+export function multiChunkPkt(cls: number, cmd: number, pre: number[], w: number, total: number, off: number): Uint8Array<ArrayBuffer> {
+  const num = (v: number) => (w === 1 ? [v & 0xff] : [(v >> 8) & 0xff, v & 0xff]);
+  return frame(cls, cmd | GET, Math.min(48, total - off) + pre.length + 2 * w, 0, [...pre, ...num(total), ...num(off)]);
+}
+/** Multi-packet SET frames (vendor SetMultiPacketCmd); nothing for empty data, like the vendor. */
+export function multiSetPkts(cls: number, cmd: number, pre: number[], w: number, data: number[]): Uint8Array<ArrayBuffer>[] {
+  const num = (v: number) => (w === 1 ? [v & 0xff] : [(v >> 8) & 0xff, v & 0xff]);
+  const out: Uint8Array<ArrayBuffer>[] = [];
+  for (let off = 0; off < data.length; off += 48) {
+    const chunk = data.slice(off, off + 48);
+    out.push(frame(cls, cmd, chunk.length + pre.length + 2 * w, 0, [...pre, ...num(data.length), ...num(off), ...chunk]));
+  }
+  return out;
+}
+
+// --- key assignment (class 1 cmd 3)
+export const getAssignPkt = (profile: number, key: number, layer: number) => frame(CLS.KEY, KEY.ASSIGN | GET, 8, profile, [key, layer]);
+export const setAssignPkt = (profile: number, key: number, layer: number, a: Assign) =>
+  frame(CLS.KEY, KEY.ASSIGN, 8, profile, [key, layer, a.fid, ...a.data.slice(0, 5)]);
+export const parseAssign = (r: ArrayLike<number>): Assign => ({
+  fid: r[PAYLOAD + 2],
+  data: [3, 4, 5, 6, 7].map((i) => r[PAYLOAD + i]),
+});
+
+// --- macros (class 6)
+export const macroCreatePkt = (id: number, len: number) => frame(CLS.MACRO, MCO.CREATE, 3, 0, [id, (len >> 8) & 0xff, len & 0xff]);
+/** size byte 0 although the id follows (vendor MacroDelete) */
+export const macroDeletePkt = (id: number) => frame(CLS.MACRO, MCO.DELETE, 0, 0, [id]);
+/** vendor names every macro "Macro <id>" (UTF-8, no NUL) */
+export const macroNamePkts = (id: number) => multiSetPkts(CLS.MACRO, MCO.NAME, [id], 1, Array.from(new TextEncoder().encode(`Macro ${id}`)));
+export const macroDataPkts = (id: number, data: number[]) => multiSetPkts(CLS.MACRO, MCO.MEMORY, [id], 2, data);
+
+// --- MT / TGL / DKS (class 13 cmd 4 / 5 / 6) and their removal (cmd 1)
+/** MT / TGL delay: little-endian on TravelVersion 0, big-endian otherwise (vendor) */
+const delayBytes = (ms: number, tv: number) => (tv === 0 ? [ms & 0xff, (ms >> 8) & 0xff] : [(ms >> 8) & 0xff, ms & 0xff]);
+const delayOf = (r: ArrayLike<number>, at: number, tv: number) => (tv === 0 ? r[at] | (r[at + 1] << 8) : (r[at] << 8) | r[at + 1]);
+export const getMtPkt = (key: number) => frame(CLS.MAGNETIC, MAG.MT | GET, 5, 0, [1, key]);
+export const getTglPkt = (key: number) => frame(CLS.MAGNETIC, MAG.TGL | GET, 5, 0, [1, key]);
+export const getDksPkt = (key: number) => frame(CLS.MAGNETIC, MAG.DKS | GET, 10, 0, [1, key]);
+/** hold / tap are vendor key ids; size byte 5 although 6 bytes follow (vendor SetMtParameters) */
+export const setMtPkt = (tv: number, key: number, hold: number, tap: number, delay: number) =>
+  frame(CLS.MAGNETIC, MAG.MT, 5, 0, [1, key, hold, tap, ...delayBytes(delay, tv)]);
+export const setTglPkt = (tv: number, key: number, kc: number, delay: number) => frame(CLS.MAGNETIC, MAG.TGL, 5, 0, [1, key, kc, ...delayBytes(delay, tv)]);
+export const setDksPkt = (key: number, keys: number[], conds: number[]) =>
+  frame(CLS.MAGNETIC, MAG.DKS, 10, 0, [1, key, ...[0, 1, 2, 3].map((i) => keys[i] ?? 0), ...[0, 1, 2, 3].map((i) => (conds[i] ?? 0) & 0x7f)]);
+export const parseMt = (r: ArrayLike<number>, tv: number) => ({ hold: r[PAYLOAD + 2], tap: r[PAYLOAD + 3], delay: delayOf(r, PAYLOAD + 4, tv) });
+export const parseTgl = (r: ArrayLike<number>, tv: number) => ({ kc: r[PAYLOAD + 2], delay: delayOf(r, PAYLOAD + 3, tv) });
+export const parseDks = (r: ArrayLike<number>) => ({
+  keys: [2, 3, 4, 5].map((i) => r[PAYLOAD + i]),
+  conds: [6, 7, 8, 9].map((i) => r[PAYLOAD + i]),
+});
+/** RemoveBinding: back to a normal-trigger key (also drops its own actuation / RT values) */
+export const removeBindingPkt = (key: number) => frame(CLS.MAGNETIC, MAG.NORMAL_TRIGGER, 2, 0, [1, key]);
+
 export const getPollPkt = (profile: number) => frame(CLS.DEVICE, DEV.POLLING | GET, 2, profile);
 export const setPollPkt = (profile: number, usbType: number, rate: number) => frame(CLS.DEVICE, DEV.POLLING, 2, profile, [usbType, rate]);
 export const regionCountPkt = () => frame(CLS.LIGHTING, LED.ID_LIST | GET, 1, 0);
@@ -666,7 +821,7 @@ class Link {
       const dv = await this.dev.receiveFeatureReport(this.reportId);
       const r = normalizeReply(new Uint8Array(dv.buffer.slice(dv.byteOffset, dv.byteOffset + dv.byteLength)));
       if ((r[0] & 0x0f) === 2) return r;
-      await sleep(dareuTiming.poll);
+      if (dareuTiming.poll > 0) await sleep(dareuTiming.poll);
     }
     throw new Error(`no answer for ${hex2(f[2])}/${hex2(f[3])}`);
   }
@@ -712,6 +867,15 @@ class Dareu implements Driver {
   private rtAdaptive: boolean | undefined;
   /** layout positions without an adjustable switch (knob ids >= 170) */
   private readonly fixed: Set<number>;
+  /** key assignments [layer][position] */
+  private assigns: Assign[][] | undefined;
+  /** assignments without a QMK keycode, shown as OPAQUE_BASE + index */
+  private opaque: Assign[] = [];
+  /** MT / TGL / DKS per layout position */
+  private adv: Map<number, RawAdv> | undefined;
+  /** macro bytes per macro id */
+  private macros: Map<number, number[]> | undefined;
+  private profiles: number[] | undefined;
 
   constructor(
     private readonly link: Link,
@@ -948,9 +1112,24 @@ class Dareu implements Driver {
     }
     out.push(text('model', 'Model', 'Info', `${this.product.name} (${this.product.model})`));
     out.push(text('fw', 'Firmware', 'Info', this.fw!));
+    this.profiles = undefined;
     try {
       this.profile = await this.readProfile();
-      out.push(text('profile', 'Active profile', 'Info', String(this.profile)));
+      try {
+        const ids = await this.readProfiles();
+        if (ids.length && ids.includes(this.profile)) this.profiles = ids;
+      } catch {
+        // no profile list: show the active one only
+      }
+      if (this.profiles) {
+        out.push({
+          key: 'profile',
+          label: 'Profile',
+          group: 'Settings',
+          value: { kind: 'choice', options: this.profiles.map((id) => [`Profile ${id}`, id]), current: this.profile },
+          hint: 'Key map, lighting, polling rate and switch settings are stored per profile.',
+        });
+      } else out.push(text('profile', 'Active profile', 'Info', String(this.profile)));
     } catch {
       this.profile = 0;
     }
@@ -1039,6 +1218,43 @@ class Dareu implements Driver {
           // no answer: leave SOCD out
         }
       }
+
+      // --- MT / TGL / DKS
+      this.adv = undefined;
+      try {
+        const raw = await this.readAdvanced(keys);
+        this.adv = raw;
+        out.push({
+          key: 'advanced_keys',
+          label: 'Advanced keys (DKS / Mod-Tap / Toggle)',
+          group: 'Keys',
+          value: this.advancedValue(keys, raw),
+          hint: 'Removing one makes the key a normal key at the global actuation point again.',
+        });
+      } catch {
+        // didn't answer: leave it out
+      }
+    }
+
+    // --- key map (base layer + Fn layer)
+    this.assigns = undefined;
+    this.opaque = [];
+    try {
+      const as = await this.readAssigns();
+      this.assigns = as;
+      out.push({ key: 'keymap', label: 'Key map', group: 'Keys', value: this.keymapValue(as), hint: 'Layer 1 is what keys do while Fn is held.' });
+    } catch {
+      // no key assignment class
+    }
+
+    // --- macros
+    this.macros = undefined;
+    try {
+      const m = await this.readMacros();
+      this.macros = m;
+      out.push({ key: 'macros', label: 'Macros', group: 'Macros', value: this.macrosValue(m), hint: 'Put a macro on a key with M0, M1, … in the key map (plays once).' });
+    } catch {
+      // no macro class
     }
 
     // --- lighting
@@ -1063,12 +1279,16 @@ class Dareu implements Driver {
       const options: [string, number][] = list.map((e) => [effectName(e), e]);
       out.push({ key: 'light_power', label: 'Lights on', group: 'Lighting', value: { kind: 'toggle', on: l.effect !== 0 } });
       out.push({ key: 'light_mode', label: 'Effect', group: 'Lighting', value: { kind: 'choice', options, current: this.lastEffect } });
-      out.push({
-        key: 'light_bri',
-        label: 'Brightness',
-        group: 'Lighting',
-        value: { kind: 'number', min: 0, max: BRI_STEPS, current: Math.round((bri * BRI_STEPS) / 255), unit: '' },
-      });
+      out.push({ key: 'light_bri', label: 'Brightness', group: 'Lighting', value: { kind: 'number', min: 0, max: 100, current: briPercent(bri), unit: '%' } });
+      if (list.includes(WAVE)) {
+        out.push({
+          key: 'light_reverse',
+          label: 'Reverse direction',
+          group: 'Lighting',
+          value: { kind: 'toggle', on: (l.flag & FLAG_REVERSE) !== 0 },
+          hint: 'Wave effect only.',
+        });
+      }
       out.push({ key: 'light_speed', label: 'Speed', group: 'Lighting', value: { kind: 'number', min: 1, max: 3, current: l.speed === 0 ? 2 : clamp(l.speed, 1, 3), unit: '' } });
       out.push({ key: 'light_color', label: 'Colour', group: 'Lighting', value: { kind: 'color', rgb: this.lastColor } });
       out.push({ key: 'light_rainbow', label: 'Rainbow colours', group: 'Lighting', value: { kind: 'toggle', on: l.colors.length === 0 } });
@@ -1076,6 +1296,295 @@ class Dareu implements Driver {
       // no lighting (or it didn't answer): leave the tab out
     }
     return out;
+  }
+
+  // --- multi-packet reads, profiles, key assignments, advanced keys, macros
+
+  /** Vendor GetMultiPacketCmd: total first, then 48-byte chunks. */
+  private async multiRead(cls: number, cmd: number, pre: number[], w: number): Promise<number[]> {
+    const at = PAYLOAD + pre.length;
+    const first = await this.link.xfer(multiFirstPkt(cls, cmd, pre));
+    const total = w === 1 ? first[at] : (first[at] << 8) | first[at + 1];
+    const out: number[] = [];
+    for (let off = 0; off < total; ) {
+      const n = Math.min(48, total - off);
+      const r = await this.link.xfer(multiChunkPkt(cls, cmd, pre, w, total, off));
+      for (let i = 0; i < n; i++) out.push(r[at + 2 * w + i]);
+      off += n;
+    }
+    return out;
+  }
+
+  /** Every key's assignment on both layers ([layer][position]). */
+  private async readAssigns(): Promise<Assign[][]> {
+    const out: Assign[][] = [[], []];
+    // the vendor asks key by key, base layer then Fn layer (KeyboardBase.GetKeysFunction)
+    for (const c of this.caps) {
+      for (const layer of [0, 1]) out[layer].push(parseAssign(await this.link.xfer(getAssignPkt(this.profile, c.index, layer))));
+    }
+    return out;
+  }
+
+  private codeOf(a: Assign): number {
+    const kc = codeOfAssign(a);
+    if (kc !== undefined) return kc;
+    const k = assignKey(a);
+    let i = this.opaque.findIndex((x) => assignKey(x) === k);
+    if (i < 0 && this.opaque.length < OPAQUE_MAX) i = this.opaque.push({ fid: a.fid, data: a.data.slice() }) - 1;
+    return i < 0 ? OPAQUE_BASE + OPAQUE_MAX - 1 : OPAQUE_BASE + i;
+  }
+
+  private keymapValue(as: Assign[][]): Keymap {
+    return {
+      kind: 'keymap',
+      keys: this.caps,
+      layers: as.map((l) => l.map((a) => this.codeOf(a))),
+      codes: 'qmk-v2',
+      locked: as.map((l) => l.map((a, i) => (lockedAssign(a, this.caps[i].index) ? i : -1)).filter((i) => i >= 0)),
+    };
+  }
+
+  private async writeKeymap(v: Keymap): Promise<void> {
+    const cur = this.assigns;
+    if (!cur) throw new Error('press Re-read first');
+    if (v.layers.length !== 2 || v.layers.some((l) => l.length !== this.caps.length)) throw new Error("key map doesn't match the keyboard - press Re-read");
+    const curCodes = this.keymapValue(cur).layers;
+    const changes: [layer: number, pos: number, a: Assign][] = [];
+    v.layers.forEach((l, layer) =>
+      l.forEach((kc, i) => {
+        if (kc === curCodes[layer][i]) return;
+        const name = `${this.caps[i].label}${layer ? ' (Fn layer)' : ''}`;
+        if (lockedAssign(cur[layer][i], this.caps[i].index)) throw new Error(`${name} can't be changed on this keyboard`);
+        const o = kc - OPAQUE_BASE;
+        const a = o >= 0 && o < this.opaque.length ? this.opaque[o] : assignOfCode(kc);
+        if (!a || !WRITABLE_FIDS.has(a.fid)) throw new Error(`${name}: this keyboard can't send keycode 0x${kc.toString(16).padStart(4, '0')}`);
+        changes.push([layer, i, a]);
+      }),
+    );
+    const bad: string[] = [];
+    for (const [layer, i, a] of changes) {
+      const id = this.caps[i].index;
+      await this.link.xfer(setAssignPkt(this.profile, id, layer, a));
+      let got: Assign | undefined;
+      try {
+        got = parseAssign(await this.link.xfer(getAssignPkt(this.profile, id, layer)));
+        cur[layer][i] = got;
+      } catch {
+        got = undefined;
+      }
+      if (!got || !sameAssign(got, a)) {
+        bad.push(`${this.caps[i].label}${layer ? ' (Fn)' : ''}${got ? ` reads back ${got.fid}:[${got.data.join(' ')}]` : ''}`);
+      }
+    }
+    if (bad.length) throw new Error(`keyboard didn't take the key change for: ${bad.join(', ')}`);
+  }
+
+  /** MT / TGL / DKS parameters of the keys that have one ([position, raw entry]). */
+  private async readAdvanced(keys: KeyTrig[]): Promise<Map<number, RawAdv>> {
+    const tv = this.units?.tv ?? 1;
+    const out = new Map<number, RawAdv>();
+    for (let i = 0; i < keys.length; i++) {
+      const id = this.caps[i].index;
+      const f = keys[i].func;
+      if (f === FN_MT) out.set(i, { mode: 'mt', ...parseMt(await this.link.xfer(getMtPkt(id)), tv) });
+      else if (f === FN_TGL) out.set(i, { mode: 'tgl', ...parseTgl(await this.link.xfer(getTglPkt(id)), tv) });
+      else if (f === FN_DKS) out.set(i, { mode: 'dks', ...parseDks(await this.link.xfer(getDksPkt(id))) });
+    }
+    return out;
+  }
+
+  /** Raw (key-id) entry -> generic entry; undefined when an action has no HID usage. */
+  private advEntry(i: number, r: RawAdv): AdvancedKey | undefined {
+    const u = (k: number) => usageOfKeyId(k);
+    if (r.mode === 'mt') {
+      const [hold, tap] = [u(r.hold), u(r.tap)];
+      return hold < 0 || tap < 0 ? undefined : { key: i, mode: 'mt', hold, tap, delay: r.delay };
+    }
+    if (r.mode === 'tgl') {
+      const kc = u(r.kc);
+      return kc < 0 ? undefined : { key: i, mode: 'tgl', kc, delay: r.delay };
+    }
+    const actions = r.keys.map((k, j) => ({ kc: u(k), mask: r.conds[j] & 0x7f }));
+    if (actions.some((a) => a.kc < 0)) return undefined;
+    while (actions.length && actions[actions.length - 1].kc === 0 && actions[actions.length - 1].mask === 0) actions.pop();
+    return { key: i, mode: 'dks', actions };
+  }
+
+  /** Generic entry -> raw (key-id) entry; throws on what the firmware can't hold. */
+  private advRaw(e: AdvancedKey): RawAdv {
+    const name = this.caps[e.key]?.label ?? '?';
+    const k = (kc: number) => {
+      const id = keyIdOfUsage(kc);
+      if (id < 0) throw new Error(`${name}: key 0x${kc.toString(16)} can't be used here`);
+      return id;
+    };
+    const delay = (ms: number, r: DelayRange) => {
+      if (!(Number.isInteger(ms) && ms >= r.min && ms <= r.max)) throw new Error(`${name}: hold time must be ${r.min}-${r.max} ms`);
+      return ms;
+    };
+    if (e.mode === 'mt') return { mode: 'mt', hold: k(e.hold), tap: k(e.tap), delay: delay(e.delay, MT_DELAY) };
+    if (e.mode === 'tgl') return { mode: 'tgl', kc: k(e.kc), delay: delay(e.delay, TGL_DELAY) };
+    if (e.actions.length > 4) throw new Error(`${name}: DKS holds at most 4 keys`);
+    if (!e.actions.some((x) => x.kc)) throw new Error(`${name}: DKS needs at least one key`);
+    const keys = [0, 1, 2, 3].map((j) => (e.actions[j] ? k(e.actions[j].kc) : 0));
+    const conds = [0, 1, 2, 3].map((j) => {
+      const m = e.actions[j]?.mask ?? 0;
+      if (!(Number.isInteger(m) && m >= 0 && m <= 0x7f)) throw new Error(`${name}: DKS points must be a 7-bit mask`);
+      return m;
+    });
+    return { mode: 'dks', keys, conds };
+  }
+
+  private advUnavailable(keys: KeyTrig[], raw: Map<number, RawAdv>): number[] {
+    return this.caps
+      .map((_, i) => i)
+      .filter(
+        (i) =>
+          this.fixed.has(i) ||
+          keys[i].func === FN_SOCD ||
+          (this.socd?.[i] ?? -1) >= 0 ||
+          (raw.has(i) && !this.advEntry(i, raw.get(i)!)) ||
+          !(isEditable(keys[i].func) || FN_OTHER_SPECIAL.has(keys[i].func)),
+      );
+  }
+
+  private advancedValue(keys: KeyTrig[], raw: Map<number, RawAdv>): AdvancedKeys {
+    const entries: AdvancedKey[] = [];
+    for (const [i, r] of raw) {
+      const e = this.advEntry(i, r);
+      if (e) entries.push(e);
+    }
+    return {
+      kind: 'advancedKeys',
+      keys: this.caps,
+      modes: ['dks', 'mt', 'tgl'],
+      unavailable: this.advUnavailable(keys, raw),
+      mt: MT_DELAY,
+      tgl: TGL_DELAY,
+      dks: { actions: 4, points: 7 },
+      entries: entries.sort((a, b) => a.key - b.key),
+    };
+  }
+
+  private async writeAdvanced(v: AdvancedKeys): Promise<void> {
+    const keys = this.keyTrigs;
+    const cur = this.adv;
+    if (!keys || !cur || !this.units) throw new Error('press Re-read first');
+    const tv = this.units.tv;
+    const unavailable = new Set(this.advUnavailable(keys, cur));
+    const want = new Map<number, RawAdv>();
+    for (const e of v.entries) {
+      if (!(e.key >= 0 && e.key < this.caps.length)) throw new Error("advanced keys don't match the keyboard - press Re-read");
+      if (want.has(e.key)) throw new Error(`${this.caps[e.key].label} has two advanced functions`);
+      want.set(e.key, this.advRaw(e));
+    }
+    const same = (a?: RawAdv, b?: RawAdv) => JSON.stringify(a) === JSON.stringify(b);
+    const removes: number[] = [];
+    const sets: number[] = [];
+    for (let i = 0; i < this.caps.length; i++) {
+      const o = cur.get(i);
+      const n = want.get(i);
+      if (same(o, n)) continue;
+      // keys we can't show (e.g. an action without a HID usage) stay as they are
+      if (unavailable.has(i) && !n) continue;
+      if (unavailable.has(i)) throw new Error(`${this.caps[i].label} can't get an advanced function here`);
+      // the vendor deletes a binding before another kind can go on the key
+      if (o && (!n || n.mode !== o.mode)) removes.push(i);
+      if (n) sets.push(i);
+    }
+    for (const i of removes) {
+      await this.link.xfer(removeBindingPkt(this.caps[i].index));
+      keys[i] = { func: FN_NORMAL, travel: 0, press: 0, release: 0 };
+      cur.delete(i);
+    }
+    for (const i of sets) {
+      const id = this.caps[i].index;
+      const r = want.get(i)!;
+      if (r.mode === 'mt') await this.link.xfer(setMtPkt(tv, id, r.hold, r.tap, r.delay));
+      else if (r.mode === 'tgl') await this.link.xfer(setTglPkt(tv, id, r.kc, r.delay));
+      else await this.link.xfer(setDksPkt(id, r.keys, r.conds));
+    }
+    // read back: functions of every touched key, then the parameters of the ones that have one
+    const touched = [...new Set([...removes, ...sets])];
+    const bad: string[] = [];
+    if (touched.length) {
+      const funcs = await this.readFuncs(touched, false);
+      const fnOf = { mt: FN_MT, tgl: FN_TGL, dks: FN_DKS } as const;
+      for (let j = 0; j < touched.length; j++) {
+        const i = touched[j];
+        keys[i] = { func: funcs[j], travel: 0, press: 0, release: 0 };
+        const n = want.get(i);
+        const back = (await this.readAdvanced(this.caps.map((_, k) => (k === i ? keys[i] : NORMAL_TRIG)))).get(i);
+        if (back) cur.set(i, back);
+        else cur.delete(i);
+        const ok = n ? funcs[j] === fnOf[n.mode] && same(back, n) : !FN_OTHER_SPECIAL.has(funcs[j]);
+        if (!ok) bad.push(this.caps[i].label);
+      }
+    }
+    if (bad.length) throw new Error(`keyboard didn't take the advanced key change for: ${bad.join(', ')}`);
+  }
+
+  /** Macro ids on the board and the bytes of each. */
+  private async readMacros(): Promise<Map<number, number[]>> {
+    const ids = (await this.multiRead(CLS.MACRO, MCO.ID_LIST, [], 1)).filter((id) => id !== 0);
+    const out = new Map<number, number[]>();
+    for (const id of ids) out.set(id, await this.multiRead(CLS.MACRO, MCO.MEMORY, [id], 2));
+    return out;
+  }
+
+  private macrosValue(m: Map<number, number[]>): Macros {
+    const slots = Math.min(MACRO_ID_MAX, Math.max(MACRO_SLOTS, ...m.keys()));
+    return {
+      kind: 'macros',
+      slots,
+      format: 'dareu',
+      delays: true,
+      maxDelay: MOUSE_MAX_DELAY,
+      text: false,
+      mouse: true,
+      macros: Array.from({ length: slots }, (_, n) => decodeMacro(m.get(n + 1) ?? [], 'dareu')),
+    };
+  }
+
+  private async writeMacros(v: Macros): Promise<void> {
+    const cur = this.macros;
+    if (!cur) throw new Error('press Re-read first');
+    if (v.macros.length > MACRO_ID_MAX) throw new Error('too many macros');
+    const plan: [id: number, data: number[] | undefined][] = [];
+    v.macros.forEach((steps, n) => {
+      const id = n + 1;
+      const data = steps.length ? encodeMacro(steps, 'dareu') : undefined;
+      if (data && data.length > 0xffff) throw new Error(`M${n} is too long`);
+      const old = cur.get(id);
+      // what we read decodes to these steps: only rewrite macros that really changed
+      const oldSteps = old ? decodeMacro(old, 'dareu') : [];
+      if (JSON.stringify(oldSteps) === JSON.stringify(steps)) return;
+      if (!data && !old) return;
+      plan.push([id, data]);
+    });
+    for (const [id, data] of plan) {
+      if (!data) {
+        await this.link.xfer(macroDeletePkt(id));
+        continue;
+      }
+      // vendor DeviceBase.SetMacroData: create (id, length), name, memory
+      await this.link.xfer(macroCreatePkt(id, data.length));
+      for (const f of macroNamePkts(id)) await this.link.xfer(f);
+      for (const f of macroDataPkts(id, data)) await this.link.xfer(f);
+    }
+    if (!plan.length) return;
+    const back = await this.readMacros();
+    this.macros = back;
+    const bad = plan.filter(([id, data]) => {
+      const got = back.get(id);
+      return data ? !got || got.length !== data.length || got.some((b, i) => b !== data[i]) : got !== undefined;
+    });
+    if (bad.length) throw new Error(`keyboard didn't take the macro change for: ${bad.map(([id]) => `M${id - 1}`).join(', ')}`);
+  }
+
+  /** Profile ids the board has (vendor GetProfileIdList). */
+  private async readProfiles(): Promise<number[]> {
+    return (await this.multiRead(CLS.PROFILE, PFL.ID_LIST, [], 1)).filter((id) => id >= 1 && id < 16);
   }
 
   // --- writes
@@ -1266,9 +1775,35 @@ class Dareu implements Driver {
         const on = (v as Extract<Value, { kind: 'toggle' }>).on;
         return this.writeLight({ ...l, colors: on ? [] : [this.lastColor] });
       }
+      case 'light_reverse:toggle': {
+        const l = light();
+        const on = (v as Extract<Value, { kind: 'toggle' }>).on;
+        return this.writeLight({ ...l, flag: on ? FLAG_REVERSE : 0 });
+      }
+      case 'keymap:keymap':
+        return this.writeKeymap(v as Keymap);
+      case 'advanced_keys:advancedKeys':
+        return this.writeAdvanced(v as AdvancedKeys);
+      case 'macros:macros':
+        return this.writeMacros(v as Macros);
+      case 'profile:choice': {
+        const id = (v as Extract<Value, { kind: 'choice' }>).current;
+        if (!this.profiles) throw new Error('press Re-read first');
+        if (!this.profiles.includes(id)) throw new Error(`profile ${id} doesn't exist`);
+        if (id === this.profile) return;
+        await this.link.xfer(setProfilePkt(id));
+        const got = await this.readProfile();
+        this.profile = got;
+        // everything cached belongs to the old profile now
+        this.keyTrigs = undefined;
+        this.assigns = undefined;
+        this.light = undefined;
+        if (got !== id) throw new Error(`keyboard didn't switch profile (reads back ${got})`);
+        return;
+      }
       case 'light_bri:number': {
         const l = light();
-        const want = Math.round((clamp(Math.round((v as Extract<Value, { kind: 'number' }>).current), 0, BRI_STEPS) * 255) / BRI_STEPS);
+        const want = briRaw((v as Extract<Value, { kind: 'number' }>).current);
         await this.link.xfer(setBrightnessPkt(this.profile, l.region, want));
         const got = await this.readBrightness(l.region);
         if (got !== want) throw new Error(`brightness reads back as ${got}`);

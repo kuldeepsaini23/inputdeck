@@ -156,14 +156,15 @@ describe('packets', () => {
       frame(0, 2 | GET, 3, 0), // serial number (not needed)
       frame(5, 5, 0, 1), // profile reset
       frame(5, 1, 0, 0), // profile create
-      frame(5, 3, 0, 2), // profile switch
+      frame(5, 3, 0, 0), // profile switch to 'profile 0' (ids are 1-based)
+      frame(5, 3, 1, 2, [1]), // profile switch with junk
       frame(9, 5, 0, 0), // DFU entry
       frame(9, 0 | GET, 0, 0),
       frame(10, 0x40, 0, 0), // factory default
       frame(12, 2 | GET, 0, 0), // flash
       frame(13, 10, 1, 0, [1]), // calibration on
       frame(13, 10, 1, 0, [0]), // calibration off
-      frame(13, 1, 2, 0, [1, 41]), // normal trigger reset
+      frame(13, 1, 3, 0, [2, 41, 61]), // normal trigger reset of several keys (only one MT/TGL/DKS key at a time)
       frame(13, 7, 2, 0, [0, 200]), // global travel set
       frame(13, 9 | GET, 1, 0), // travel test
       frame(13, 6, 10, 0, [1, 41]), // DKS
@@ -291,7 +292,7 @@ describe('fake A68', () => {
     const mode = find(ss, 'light_mode').value as Extract<Value, { kind: 'choice' }>;
     expect(mode.current).toBe(1);
     expect(mode.options.map((o) => o[1])).toEqual([1, 2, 4, 11, 19, 20, 21, 22, 24, 25, 27, 28]);
-    expect(find(ss, 'light_bri').value).toMatchObject({ min: 0, max: 5, current: 4 });
+    expect(find(ss, 'light_bri').value).toMatchObject({ min: 0, max: 100, current: 80 }); // 204 -> floor(204 * 100 / 255)
     expect(find(ss, 'light_speed').value).toMatchObject({ current: 2 });
     expect(find(ss, 'light_color').value).toEqual({ kind: 'color', rgb: 0xff0040 });
     expect(find(ss, 'light_rainbow').value).toEqual({ kind: 'toggle', on: false });
@@ -343,8 +344,10 @@ describe('fake A68', () => {
     expect(f.effect.effect).toBe(0);
     await d.write(withValue(find(ss, 'light_power'), { kind: 'toggle', on: true }));
     expect(f.effect.effect).toBe(2);
-    await d.write(withValue(find(ss, 'light_bri'), { kind: 'number', min: 0, max: 5, current: 5, unit: '' }));
+    await d.write(withValue(find(ss, 'light_bri'), { kind: 'number', min: 0, max: 100, current: 100, unit: '%' }));
     expect(f.bri).toBe(255);
+    await d.write(withValue(find(ss, 'light_bri'), { kind: 'number', min: 0, max: 100, current: 50, unit: '%' }));
+    expect(f.bri).toBe(128); // vendor: smallest raw that shows 50 %
     const set = f.wrote(CLS.LIGHTING, LED.EFFECT);
     expect(set.every((p) => p[4] === 1)).toBe(true); // active profile
   });
@@ -493,7 +496,7 @@ describe('SOCD', () => {
       frame(13, 11, 12, 0, [11, ...Array.from({ length: 11 }, (_, i) => [i + 1, 0xff]).flat()]), // > 10 keys
       frame(13, 17, 2, 1, [1, A]), // FUNC_AND_SOCD is read-only
       frame(13, 17 | GET, 5, 1, [1, A, 0, 0, 0]), // FUNC_AND_SOCD with an "honest" size byte
-      frame(13, 1, 2, 0, [1, A]), // old-firmware removal = normal trigger reset
+      frame(13, 1, 11, 0, [10, ...Array.from({ length: 10 }, (_, i) => i + 1)]), // bulk normal-trigger reset
     ];
     for (const f of no) expect(allowed(f), head(f).join(' ')).toBe(false);
   });

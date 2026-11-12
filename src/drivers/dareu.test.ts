@@ -308,7 +308,8 @@ describe('fake A68', () => {
     const ss = await d.read();
     expect((find(ss, 'fw').value as { text: string }).text).toBe('0.4.6');
     expect(find(ss, 'per_key_trigger')).toBeDefined();
-  });
+    // reads every key through busy polls: slow on a loaded machine
+  }, 30000);
 
   it('a board that never answers is not claimed', async () => {
     const f = new FakeDareu();

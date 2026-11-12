@@ -4,6 +4,10 @@ import type { Driver, Setting, Value } from './types';
 import {
   ACT_RT,
   CMD,
+  DONGLE_BRI,
+  DONGLE_MODE,
+  DONGLE_RGB,
+  DONGLE_SPEED,
   HYZEN_CODES,
   KEY_SLOTS,
   L_BRI,
@@ -12,6 +16,10 @@ import {
   L_SPEED,
   POLL_WIRED,
   POLL_WIRELESS,
+  STRIP_BRI,
+  STRIP_MODE,
+  STRIP_RGB,
+  STRIP_SPEED,
   allowed,
   curveDisplay,
   curveLinear,
@@ -204,6 +212,16 @@ describe('fake Hyzen', () => {
     expect(find(ss, 'light_bri').value).toMatchObject({ current: 80 });
     expect(find(ss, 'light_speed').value).toMatchObject({ current: 3 });
     expect(find(ss, 'light_color').value).toEqual({ kind: 'color', rgb: 0x112233 });
+    // bottom light strip (preposition light)
+    expect(find(ss, 'strip_mode').value).toMatchObject({ current: 0x02 });
+    expect(find(ss, 'strip_bri').value).toMatchObject({ current: 80 });
+    expect(find(ss, 'strip_speed').value).toMatchObject({ current: 3 }); // SPEED_MAX(4) - byte 1
+    expect(find(ss, 'strip_color').value).toEqual({ kind: 'color', rgb: 0x445566 });
+    // receiver / dongle light
+    expect(find(ss, 'dongle_mode').value).toMatchObject({ current: 0x01 });
+    expect(find(ss, 'dongle_bri').value).toMatchObject({ current: 100 }); // 255/255
+    expect(find(ss, 'dongle_speed').value).toMatchObject({ current: 2 }); // SPEED_MAX(4) - byte 2
+    expect(find(ss, 'dongle_color').value).toEqual({ kind: 'color', rgb: 0x778899 });
     // nothing but reads (and transaction control) went out
     const writes = f.sent.filter((p) => [CMD.WRITE_FUNC, CMD.WRITE_ACT, CMD.WRITE_RT, CMD.LIVE_TRAVEL].includes(p[2] as never));
     expect(writes).toEqual([]);
@@ -254,6 +272,44 @@ describe('fake Hyzen', () => {
     expect(f.func.slice(base + 5, base + 9)).toEqual([1, 0xff, 0x80, 0x00]);
     expect(f.func[L_RGB]).toBe(0); // profile 0 untouched
     expect(f.frames(CMD.WRITE_FUNC).every((p) => (p[4] | (p[5] << 8)) >= base)).toBe(true);
+  });
+
+  it('light strip and receiver light write the active profile block with the hub byte map', async () => {
+    const [f, d] = await connect({ profile: 1 });
+    const ss = await d.read();
+    const base = 1 * 64;
+    // --- light strip (preposition): mode 38, brightness 31 (raw 0..100), speed 40 (4-ui), colour flag 42 + rgb 43..45
+    await d.write(withValue(find(ss, 'strip_mode'), { ...(find(ss, 'strip_mode').value as Extract<Value, { kind: 'choice' }>), current: 5 }));
+    expect(f.func[base + STRIP_MODE]).toBe(5);
+    await d.write(withValue(find(ss, 'strip_bri'), { kind: 'number', min: 0, max: 100, current: 42, unit: '%' }));
+    expect(f.func[base + STRIP_BRI]).toBe(42); // raw percent, no gamma
+    await d.write(withValue(find(ss, 'strip_speed'), { kind: 'number', min: 0, max: 4, current: 1, unit: '' }));
+    expect(f.func[base + STRIP_SPEED]).toBe(3); // 4 - 1
+    await d.write(withValue(find(ss, 'strip_color'), { kind: 'color', rgb: 0x10203040 & 0xffffff }));
+    expect(f.func.slice(base + STRIP_RGB - 1, base + STRIP_RGB + 3)).toEqual([1, 0x20, 0x30, 0x40]); // flag @42, rgb @43..45
+    // --- receiver light: mode 49, brightness 32 (ceil pct*255/100), speed 52 (4-ui), rgb 10..12 + flag 16
+    await d.write(withValue(find(ss, 'dongle_mode'), { ...(find(ss, 'dongle_mode').value as Extract<Value, { kind: 'choice' }>), current: 2 }));
+    expect(f.func[base + DONGLE_MODE]).toBe(2);
+    await d.write(withValue(find(ss, 'dongle_bri'), { kind: 'number', min: 0, max: 100, current: 50, unit: '%' }));
+    expect(f.func[base + DONGLE_BRI]).toBe(128); // ceil(50*255/100)
+    await d.write(withValue(find(ss, 'dongle_speed'), { kind: 'number', min: 0, max: 4, current: 4, unit: '' }));
+    expect(f.func[base + DONGLE_SPEED]).toBe(0); // 4 - 4
+    await d.write(withValue(find(ss, 'dongle_color'), { kind: 'color', rgb: 0xaabbcc }));
+    expect(f.func.slice(base + DONGLE_RGB, base + DONGLE_RGB + 3)).toEqual([0xaa, 0xbb, 0xcc]);
+    expect(f.func[base + 16]).toBe(1); // dongle colour flag
+    // profile 0 untouched, and everything went to the active profile
+    expect(f.func[STRIP_MODE]).toBe(0);
+    expect(f.frames(CMD.WRITE_FUNC).every((p) => (p[4] | (p[5] << 8)) >= base)).toBe(true);
+  });
+
+  it('the wired-only "single" model has no receiver light', async () => {
+    const [, d] = await connect({ productId: 0x0029 });
+    const ss = await d.read();
+    expect(ss.find((s) => s.key === 'strip_mode')).toBeDefined();
+    expect(ss.find((s) => s.key === 'dongle_mode')).toBeUndefined();
+    await expect(
+      d.write({ key: 'dongle_mode', label: '', group: '', value: { kind: 'choice', options: [['Static', 0]], current: 0 } }),
+    ).rejects.toThrow(/no receiver light/);
   });
 
   it('reports ignored writes', async () => {

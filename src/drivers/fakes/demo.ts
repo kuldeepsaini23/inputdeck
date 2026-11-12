@@ -19,7 +19,7 @@ export function demoDevices(): HIDDevice[] {
     new FakeLogitech({ wired: true }).asHid(),
     new FakeRazer().asHid(),
     new FakeLofree().asDevice(),
-    new FakeDareu().asDevice(),
+    new FakeDareu({ stream: true }).asDevice(),
   ]
   return devices
 }

@@ -41,9 +41,6 @@ const LIGHT_MODES: [number, string][] = [
   [15, 'Marquee'], [16, 'Fireworks'],
 ];
 
-/** Rapid Trigger sensitivity choices, in hundredths of a mm. */
-const RT_SENS = [2, 4, 6, 8, 10, 20, 30, 40, 50, 100];
-
 /** Key indices (row * 22 + col) of every magnetic switch on the W75 (knob = 15 excluded). */
 export const W75_KEYS: number[] = [
   0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
@@ -277,7 +274,11 @@ export function setLightPkt(l: Light): number[] {
   return [0x07, 0, 0, 0, 0x0e, l.mode, l.bri, l.speed, ...l.fg, ...l.bg, l.dir, l.fullColor, l.power].map((b) => b & 0xff);
 }
 
-/** Set trigger mode/travel/RT sensitivities (device units) for every key in `keys`. */
+/**
+ * Set trigger mode/travel/RT sensitivities (device units) for every key in `keys` - the official
+ * setAnyTriggerValue frame. Mode and distances go in one frame (no separate RT switch or save).
+ * Never confirmed on hardware, so every trigger write is read back key by key (`18 05`).
+ */
 export function setTrigPkt(mode: number, travel: number, press: number, release: number, keys: number[]): number[] {
   if (!(mode === TRIG_FIXED || mode === TRIG_RT || mode === TRIG_RT_SPLIT)) {
     throw new Error(`trigger mode ${hex2(mode)} is not a set-mode`);
@@ -336,6 +337,18 @@ export function parseColorPage(d: ArrayLike<number>, table: Uint8Array): number 
   const end = Math.min(start + len, COLOR_TABLE);
   for (let i = start; i < end; i++) table[i] = d[5 + i - start];
   return pg;
+}
+
+/**
+ * Reply of `21 ..18 04` -> travel range, as the official readHidData parses it (non-table form):
+ * max = d9<<8 | d6, unit = d7 hundredths of a mm (0 -> 10), min = d10 (0 -> 3 at 0.04 mm units,
+ * else 1). E.g. the W75: `21 00 00 00 06 04 AA 02 02 00 05` -> 170 x 0.02 mm, min 5.
+ */
+export function parseMaxTravel(m: ArrayLike<number>): Pick<Trig, 'unit' | 'min' | 'max'> | undefined {
+  if (m.length < 11 || m[5] !== 0x04) return undefined;
+  const unit = m[7] === 0 ? 10 : m[7];
+  const min = m[10] !== 0 ? m[10] : unit === 4 ? 3 : 1;
+  return { unit, min, max: (m[9] << 8) | m[6] };
 }
 
 /** Reply of `21 ..18 05 row col` -> that key's trigger. */
@@ -401,10 +414,31 @@ const isRt = (mode: number) => mode === TRIG_RT || mode === TRIG_RT_SPLIT;
 const isSetMode = (mode: number) => mode === TRIG_FIXED || isRt(mode);
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const toUnits = (mm: number, unit: number) => clamp(Math.round((mm * 100) / unit), 0, 0xffff);
-/** Largest RT sensitivity offered in the UI (mm). */
-const sensMaxMm = () => Math.max(...RT_SENS) / 100;
-const sameTrig = (a: KeyTrig, b: KeyTrig) =>
-  a.mode === b.mode && a.travel === b.travel && a.press === b.press && a.release === b.release;
+/**
+ * Largest RT press/release distance (device units): the official driver's triggerDown/triggerUp
+ * sliders run from 1 unit to ceil(max travel / 2) (W75: 85 x 0.02 = 1.70 mm).
+ */
+export const sensMaxUnits = (t: Pick<Trig, 'max'>) => Math.max(1, Math.ceil(t.max / 2));
+
+/**
+ * Does the key's read-back trigger do what we sent? Compares only what the mode uses: the RT
+ * distances mean nothing in fixed mode, and plain RT (0C) only uses the press distance. A board
+ * that normalises an unused field must not be reported as "didn't take".
+ */
+export function sameTrig(got: KeyTrig, sent: KeyTrig): boolean {
+  if (got.mode !== sent.mode || got.travel !== sent.travel) return false;
+  if (isRt(sent.mode) && got.press !== sent.press) return false;
+  if (sent.mode === TRIG_RT_SPLIT && got.release !== sent.release) return false;
+  return true;
+}
+
+const MODE_NAMES: Record<number, string> = { [TRIG_FIXED]: 'fixed', [TRIG_RT]: 'RT', [TRIG_RT_SPLIT]: 'RT split' };
+/** "RT 1.00 mm, RT 0.10/0.10 mm" - one key's trigger for error messages. */
+export function describeTrig(k: KeyTrig, unit: number): string {
+  const mm = (v: number) => ((v * unit) / 100).toFixed(2);
+  const mode = MODE_NAMES[k.mode] ?? `mode ${hex2(k.mode)}`;
+  return `${mode} ${mm(k.travel)} mm, RT ${mm(k.press)}/${mm(k.release)} mm`;
+}
 
 export function perKeyTriggerValue(t: Trig, keys: KeyTrig[]): Value {
   const u = t.unit / 100;
@@ -419,7 +453,7 @@ export function perKeyTriggerValue(t: Trig, keys: KeyTrig[]): Value {
     max: t.max * u,
     step: u,
     sensMin: u,
-    sensMax: Math.max(sensMaxMm(), ...sens),
+    sensMax: Math.max(sensMaxUnits(t) * u, ...sens),
   };
 }
 
@@ -439,7 +473,7 @@ export function planKeyTrigs(
   if (travel.length !== n || rapid.length !== n || sens.length !== n) {
     throw new Error("per-key data doesn't match the keyboard layout - press Re-read");
   }
-  const sensMax = Math.max(toUnits(sensMaxMm(), t.unit), ...old.map((k) => k.press), 0);
+  const sensMax = Math.max(sensMaxUnits(t), ...old.map((k) => k.press), 0);
   const out: [number, KeyTrig][] = [];
   old.forEach((o, i) => {
     const tu = toUnits(travel[i], t.unit);
@@ -760,13 +794,10 @@ class Wraith implements Driver {
   }
 
   private async readTrig(): Promise<Trig> {
-    const m = await this.link.xfer(readMaxTravelPkt(), (d) => d[5] === 0x04);
-    if (m.length < 11) throw new Error('short reply');
-    const max = (m[9] << 8) | m[6];
-    const unit = m[7] === 0 ? 2 : m[7];
-    const min = Math.max(m[10], 1);
+    const range = parseMaxTravel(await this.link.xfer(readMaxTravelPkt(), (d) => d[5] === 0x04));
+    if (!range || range.max <= range.min) throw new Error('bad travel range reply');
     const k = await this.readKeyTrig(REF_KEY);
-    return { ...k, unit, min, max };
+    return { ...k, ...range };
   }
 
   /** Every layout key's trigger; a key that doesn't answer (twice) gets the global value `g`. */
@@ -879,37 +910,65 @@ class Wraith implements Driver {
   /** Send `changes` (layout position, new trigger) grouped by value, then read the keys back. */
   private async writeKeyTrigs(changes: [number, KeyTrig][]): Promise<void> {
     if (!this.keyTrigs) throw new Error('press Re-read first');
-    const cache = this.keyTrigs.slice();
     for (const [k, keys] of groupKeyTrigs(changes)) {
       await this.link.send(setTrigPkt(k.mode, k.travel, k.press, k.release, keys));
     }
     await sleep(wraithTiming.settle);
-    const bad: string[] = [];
-    for (const [i, want] of changes) {
-      const [key, label] = W75_LAYOUT[i];
-      try {
-        const got = await this.readKeyTrig(key);
-        cache[i] = got;
-        if (!sameTrig(got, want)) bad.push(label);
-      } catch {
-        bad.push(label);
-      }
-      if (key === REF_KEY && this.trig) {
-        const k = cache[i];
-        this.trig = { ...this.trig, mode: k.mode, travel: k.travel, press: k.press, release: k.release };
-      }
-    }
-    this.keyTrigs = cache;
-    if (bad.length) throw new Error(`keyboard didn't take the trigger change for: ${bad.join(', ')}`);
+    await this.verifyKeyTrigs(changes, false);
   }
 
+  /**
+   * Read back the keys of `sent` (layout position, trigger we sent), update the caches with what
+   * the board really has, and throw naming every key that differs plus sent vs read-back of the
+   * first one. `skipSilent`: a key that doesn't answer (twice) is skipped instead of failing.
+   */
+  private async verifyKeyTrigs(sent: [number, KeyTrig][], skipSilent: boolean): Promise<void> {
+    const unit = this.trig?.unit ?? 2;
+    const cache = this.keyTrigs?.slice();
+    const bad: string[] = [];
+    let first: string | undefined;
+    let answered = 0;
+    for (const [i, want] of sent) {
+      const [key, label] = W75_LAYOUT[i];
+      let got: KeyTrig | undefined;
+      for (let tries = 0; tries < 2 && !got; tries++) {
+        try {
+          got = await this.readKeyTrig(key);
+        } catch {
+          // asked again below
+        }
+      }
+      if (!got) {
+        if (skipSilent) continue;
+        bad.push(label);
+        first ??= `${label}: sent ${describeTrig(want, unit)}, no answer when read back`;
+        continue;
+      }
+      answered++;
+      if (cache) cache[i] = got;
+      if (key === REF_KEY && this.trig) this.trig = { ...this.trig, mode: got.mode, travel: got.travel, press: got.press, release: got.release };
+      if (!sameTrig(got, want)) {
+        bad.push(label);
+        first ??= `${label}: sent ${describeTrig(want, unit)}, reads back ${describeTrig(got, unit)}`;
+      }
+    }
+    if (cache) this.keyTrigs = cache;
+    if (bad.length) throw new Error(`keyboard didn't take the trigger change for: ${bad.join(', ')} (${first})`);
+    if (sent.length && !answered) throw new Error("keyboard didn't answer when reading the triggers back");
+  }
+
+  /** One trigger for every key ("all keys" settings), then read every key back. */
   private async writeTrig(t: Trig): Promise<void> {
     const travel = clamp(t.travel, t.min, t.max);
     const press = Math.max(t.press, 1);
     const release = Math.max(t.release, 1);
+    const sent: KeyTrig = { mode: t.mode, travel, press, release };
     await this.link.send(setTrigPkt(t.mode, travel, press, release, W75_KEYS));
-    this.trig = { ...t, travel, press, release };
-    if (this.keyTrigs) this.keyTrigs = this.keyTrigs.map(() => ({ mode: t.mode, travel, press, release }));
+    this.trig = { ...t, ...sent };
+    if (this.keyTrigs) this.keyTrigs = this.keyTrigs.map(() => ({ ...sent }));
+    await sleep(wraithTiming.settle);
+    // keys that don't answer the read are skipped, like on Re-read (they get the global value there)
+    await this.verifyKeyTrigs(W75_LAYOUT.map((_, i) => [i, sent] as [number, KeyTrig]), true);
   }
 
   private async writeLight(l: Light): Promise<void> {
@@ -1005,7 +1064,7 @@ class Wraith implements Driver {
           key: 'rt_sens',
           label: 'Rapid Trigger sensitivity',
           group: 'Switches',
-          value: { kind: 'float', min: u, max: sensMaxMm(), step: u, current: t.press * u, unit: ' mm' },
+          value: { kind: 'float', min: u, max: Math.max(sensMaxUnits(t), t.press) * u, step: u, current: t.press * u, unit: ' mm' },
         });
         const keys = await this.readKeyTrigs(t);
         out.push({ key: 'per_key_trigger', label: 'Per-key actuation', group: 'Per-key', value: perKeyTriggerValue(t, keys) });
@@ -1107,7 +1166,7 @@ class Wraith implements Driver {
       case 'rt_sens:float': {
         const t = trig();
         const mode = t.mode === TRIG_RT_SPLIT ? TRIG_RT : t.mode;
-        const u = Math.max(toUnits((v as Extract<Value, { kind: 'float' }>).current, t.unit), 1);
+        const u = clamp(toUnits((v as Extract<Value, { kind: 'float' }>).current, t.unit), 1, Math.max(sensMaxUnits(t), t.press));
         return this.writeTrig({ ...t, mode, press: u, release: u });
       }
       case 'light_mode:choice':

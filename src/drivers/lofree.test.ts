@@ -15,6 +15,7 @@ import {
   allowed,
   curveDisplay,
   curveLinear,
+  describeAct,
   endPkt,
   hyzenCaps,
   keyIndices,
@@ -129,6 +130,17 @@ describe('packets', () => {
       expect(Math.max(...r.map((c) => c.x + c.w))).toBe(16);
     }
     expect(new Set(HYZEN_CODES).size).toBe(67);
+  });
+
+  it('mm -> raw matches the official Zx (re-implemented from hyzen-index.js, 0.01..3.40 mm swept)', () => {
+    // actuation (curve), calibrated full travel 1000, 3.4 mm max
+    expect([0.05, 0.12, 0.3, 0.31, 1.2, 2.0, 3.4].map((mm) => mmToRaw(mm, 1000, 3.4, true))).toEqual([1, 3, 7, 9, 173, 352, 832]);
+    // near full travel the official code measures candidates unclamped: 1026, not 1027
+    expect(mmToRaw(3.4, 1234, 3.4, true)).toBe(1026);
+    expect(mmToRaw(1.5, 3000, 4, true)).toBe(600);
+    // RT distances (linear)
+    expect([0.01, 0.3, 0.5].map((mm) => mmToRaw(mm, 1000, 3.4, false))).toEqual([3, 88, 147]);
+    expect(mmToRaw(1, 1234, 4, false)).toBe(309);
   });
 
   it('travel curve round-trips', () => {
@@ -298,6 +310,68 @@ describe('fake Hyzen', () => {
     expect(m).toBeGreaterThan(n);
   });
 
+  it('round-trips Rapid Trigger on/off, actuation and sensitivity (all keys and per key)', async () => {
+    const [f, d] = await connect();
+    let ss = await d.read();
+    const float = (key: string, mm: number) => withValue(find(ss, key), { ...(find(ss, key).value as Extract<Value, { kind: 'float' }>), current: mm });
+    const cur = (key: string) => (find(ss, key).value as Extract<Value, { kind: 'float' }>).current;
+    const perKey = () => find(ss, 'per_key_trigger').value as Extract<Value, { kind: 'perKeyTrigger' }>;
+
+    await d.write(withValue(find(ss, 'rapid_trigger'), { kind: 'toggle', on: true }));
+    ss = await d.read();
+    expect(find(ss, 'rapid_trigger').value).toEqual({ kind: 'toggle', on: true });
+    expect(perKey().rapid.every(Boolean)).toBe(true);
+
+    await d.write(float('actuation', 2.05));
+    await d.write(float('rt_sens', 0.15));
+    ss = await d.read();
+    expect([cur('actuation'), cur('rt_sens')]).toEqual([2.05, 0.15]);
+    expect(perKey().travel.every((t) => t === 2.05)).toBe(true);
+    expect(perKey().sens.every((t) => t === 0.15)).toBe(true);
+    expect(find(ss, 'rapid_trigger').value).toEqual({ kind: 'toggle', on: true }); // actuation kept the RT bit
+
+    await d.write(withValue(find(ss, 'rapid_trigger'), { kind: 'toggle', on: false }));
+    ss = await d.read();
+    expect(find(ss, 'rapid_trigger').value).toEqual({ kind: 'toggle', on: false });
+    expect(perKey().rapid.some(Boolean)).toBe(false);
+    expect(cur('actuation')).toBe(2.05);
+    expect(act16(f, W) & ACT_RT).toBe(0);
+
+    // per key: two keys changed, everything reads back as written
+    const v = perKey();
+    const travel = v.travel.slice(), rapid = v.rapid.slice(), sens = v.sens.slice();
+    const a = v.keys.findIndex((k) => k.label === 'A');
+    const dd = v.keys.findIndex((k) => k.label === 'D');
+    travel[a] = 0.4;
+    rapid[a] = true;
+    sens[a] = 0.05;
+    travel[dd] = 3.1;
+    await d.write(withValue(find(ss, 'per_key_trigger'), { ...v, travel, rapid, sens }));
+    ss = await d.read();
+    expect(perKey().travel).toEqual(travel);
+    expect(perKey().rapid).toEqual(rapid);
+    expect(perKey().sens).toEqual(sens);
+  });
+
+  it("a refused trigger write names sent vs read-back of the first key", async () => {
+    const [, d] = await connect({ ignoreWrites: true });
+    const ss = await d.read();
+    const s = find(ss, 'rt_sens');
+    await expect(d.write(withValue(s, { ...(s.value as Extract<Value, { kind: 'float' }>), current: 0.5 }))).rejects.toThrow(
+      /^keyboard didn't take the trigger change for: Esc, 1, .* \(Esc: sent RT 0\.50\/0\.50 mm \(raw 147\/147\), reads back 0\.34\/0\.34 mm \(raw 100\/100\)\)$/,
+    );
+    const p = find(ss, 'per_key_trigger');
+    const v = p.value as Extract<Value, { kind: 'perKeyTrigger' }>;
+    const travel = v.travel.slice(), rapid = v.rapid.slice();
+    const w = v.keys.findIndex((k) => k.label === 'W');
+    travel[w] = 0.8;
+    rapid[w] = true;
+    await expect(d.write(withValue(p, { ...v, travel, rapid }))).rejects.toThrow(
+      `keyboard didn't take the trigger change for: W (W: sent actuation 0.80 mm, RT on (0x405F), reads back ${describeAct(500, 1000, 3.4)})`,
+    );
+    expect(describeAct(500, 1000, 3.4)).toMatch(/^\d\.\d\d mm \(0x01F4\)$/);
+  });
+
   it('live travel test', async () => {
     const [f, d] = await connect();
     await d.read();
@@ -463,6 +537,6 @@ describe('SOCD', () => {
     const [, d] = await connect({ ignoreWrites: true });
     const s = find(await d.read(), 'socd');
     const v = s.value as Socd;
-    await expect(d.write(withValue(s, { ...v, entries: [{ keys: [posOf(v, 'A'), posOf(v, 'D')], mode: 0, travel: 1, rapid: false }] }))).rejects.toThrow(/didn't take the SOCD change for: A, D/);
+    await expect(d.write(withValue(s, { ...v, entries: [{ keys: [posOf(v, 'A'), posOf(v, 'D')], mode: 0, travel: 1, rapid: false }] }))).rejects.toThrow(/didn't take the SOCD change for: A, D \(A: sent key type 26, reads back 20\)$/);
   });
 });

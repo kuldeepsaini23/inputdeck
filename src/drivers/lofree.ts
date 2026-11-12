@@ -222,22 +222,29 @@ export function curveDisplay(lin: number): number {
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const r2 = (v: number) => Math.round(v * 100) / 100;
 
+/** raw -> mm without the UI clamp (official rawToMmMapping `gn`) */
+const rawToMmRaw = (raw: number, full: number, uiMax: number, curve: boolean) => {
+  const lin = ((raw & 0x3fff) / full) * uiMax;
+  return Math.max(0, curve ? curveDisplay(lin) : lin);
+};
+
 /** raw position -> mm. `curve` = actuation points (non-linear), otherwise linear (RT distances). */
 export function rawToMm(raw: number, maxRaw: number, uiMax: number, curve: boolean): number {
-  const full = maxRaw || 1000;
-  const lin = ((raw & 0x3fff) / full) * uiMax;
-  return clamp(curve ? curveDisplay(lin) : lin, 0, uiMax);
+  return clamp(rawToMmRaw(raw, maxRaw || 1000, uiMax, curve), 0, uiMax);
 }
 
-/** mm -> raw position (best of floor/round/ceil, like the official Zx), 1..maxRaw */
+/**
+ * mm -> raw position, 1..maxRaw: best of floor/round/ceil like the official Zx, which measures
+ * each candidate with the unclamped `gn` (so near full travel the closer raw wins, as there).
+ */
 export function mmToRaw(mm: number, maxRaw: number, uiMax: number, curve: boolean): number {
   const full = maxRaw || 1000;
   const want = clamp(mm, 0, uiMax);
   const f = ((curve ? curveLinear(want) : want) / uiMax) * full;
   let best = clamp(Math.round(f), 1, full);
-  let err = Math.abs(rawToMm(best, full, uiMax, curve) - want);
+  let err = Math.abs(rawToMmRaw(best, full, uiMax, curve) - want);
   for (const c of [Math.max(1, Math.floor(f)), Math.max(1, Math.round(f)), Math.min(Math.ceil(f), full)]) {
-    const e = Math.abs(rawToMm(c, full, uiMax, curve) - want);
+    const e = Math.abs(rawToMmRaw(c, full, uiMax, curve) - want);
     if (e < err) {
       best = c;
       err = e;
@@ -248,6 +255,18 @@ export function mmToRaw(mm: number, maxRaw: number, uiMax: number, curve: boolea
 
 export const ACT_DEADZONE = 0x8000;
 export const ACT_RT = 0x4000;
+
+const hex4 = (v: number) => `0x${v.toString(16).toUpperCase().padStart(4, '0')}`;
+/** "1.20 mm, RT on (0x4136)" - one actuation word for error messages. */
+export function describeAct(w: number, maxRaw: number, maxMm: number): string {
+  const flags = `${w & ACT_RT ? ', RT on' : ''}${w & ACT_DEADZONE ? ', dead zone' : ''}`;
+  return `${rawToMm(w, maxRaw, maxMm, true).toFixed(2)} mm${flags} (${hex4(w)})`;
+}
+/** "0.30/0.30 mm (raw 88/88)" - one key's RT press/release distances for error messages. */
+export function describeRt(press: number, release: number, maxRaw: number, maxMm: number): string {
+  const mm = (v: number) => rawToMm(v, maxRaw, maxMm, false).toFixed(2);
+  return `${mm(press)}/${mm(release)} mm (raw ${press}/${release})`;
+}
 
 // ---------------------------------------------------------------------------------------------
 // packets
@@ -724,9 +743,19 @@ class Hyzen implements Driver {
     const got = { types: await this.readKeyTypes(), table: await this.readSocdTable() };
     m.socd = got;
     const bad = new Set<string>();
-    for (const [k, t] of typeWrites) if (got.types[k] !== t) bad.add(label(k));
-    for (const [k, bytes] of entryWrites) if (bytes.some((b, j) => got.table[k * 4 + j] !== b)) bad.add(label(k));
-    if (bad.size) throw new Error(`keyboard didn't take the SOCD change for: ${[...bad].join(', ')}`);
+    let first: string | undefined;
+    for (const [k, t] of typeWrites) {
+      if (got.types[k] === t) continue;
+      bad.add(label(k));
+      first ??= `${label(k)}: sent key type ${hex2(t)}, reads back ${hex2(got.types[k])}`;
+    }
+    for (const [k, bytes] of entryWrites) {
+      const now = got.table.slice(k * 4, k * 4 + 4);
+      if (bytes.every((b, j) => now[j] === b)) continue;
+      bad.add(label(k));
+      first ??= `${label(k)}: sent entry ${hexs(bytes)}, reads back ${hexs(now)}`;
+    }
+    if (bad.size) throw new Error(`keyboard didn't take the SOCD change for: ${[...bad].join(', ')} (${first})`);
   }
 
   private async readMagnetic(): Promise<Magnetic> {
@@ -909,9 +938,23 @@ class Hyzen implements Driver {
     m.rt = await this.readRt();
     const label = (k: number) => HYZEN_LAYOUT[m.idx.indexOf(k)]?.[1] ?? `#${k}`;
     const bad = new Set<string>();
-    for (const [k, w] of acts) if (u16(m.act, k * 2) !== w) bad.add(label(k));
-    for (const [k, [p, r]] of rts) if (u16(m.rt, k * 4) !== p || u16(m.rt, k * 4 + 2) !== r) bad.add(label(k));
-    if (bad.size) throw new Error(`keyboard didn't take the trigger change for: ${[...bad].join(', ')}`);
+    let first: string | undefined;
+    // the tables hold raw u16s that the firmware keeps as sent (the official app reads them back
+    // verbatim for display), so the comparison is exact at the device's own resolution
+    for (const [k, w] of acts) {
+      const got = u16(m.act, k * 2);
+      if (got === w) continue;
+      bad.add(label(k));
+      first ??= `${label(k)}: sent actuation ${describeAct(w, m.maxRaw[k], m.spec.maxMm)}, reads back ${describeAct(got, m.maxRaw[k], m.spec.maxMm)}`;
+    }
+    for (const [k, [p, r]] of rts) {
+      const gp = u16(m.rt, k * 4);
+      const gr = u16(m.rt, k * 4 + 2);
+      if (gp === p && gr === r) continue;
+      bad.add(label(k));
+      first ??= `${label(k)}: sent RT ${describeRt(p, r, m.maxRaw[k], m.spec.maxMm)}, reads back ${describeRt(gp, gr, m.maxRaw[k], m.spec.maxMm)}`;
+    }
+    if (bad.size) throw new Error(`keyboard didn't take the trigger change for: ${[...bad].join(', ')} (${first})`);
   }
 
   /** RT distances for a key that is switched to Rapid Trigger but has none stored yet. */

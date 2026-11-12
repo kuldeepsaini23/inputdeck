@@ -1,6 +1,8 @@
-// Guided hardware test for streamed per-key lighting (Driver.liveLight) on boards nobody has checked yet:
-// light one grid cell at a time with one colour byte set, and ask the tester which key lit and in what colour.
-// Five answers give the grid corners/middle (-> grid-to-key map) and the colour byte order.
+// Guided hardware test for streamed per-key lighting (Driver.liveLight) on boards nobody has checked yet.
+// Two pictures: three keys in pure red / green / blue, then one whole row in white. For each the tester
+// says whether the keyboard looks exactly like the picture (when the driver knows which cell is which
+// key, `map`), and if not, clicks every key that is lit and its colour. Nothing is guessed from it here:
+// the report goes to the developer.
 import { useEffect, useRef, useState } from 'react'
 import { Check, ClipboardCopy, FlaskConical } from 'lucide-react'
 import type { DeviceState } from '#/devices'
@@ -9,53 +11,85 @@ import { cn } from '#/lib/utils'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '#/components/ui/dialog'
 import { useDevices } from '#/lib/device-context'
 import { Card } from './kit'
-import { KeyboardView } from './KeyboardView'
+import { KeyboardView, type KeyLook } from './KeyboardView'
 
-interface Probe {
+export interface ProbeCell {
   row: number
   col: number
-  /** 3 bytes as sent */
+  /** 3 bytes as sent (0xAABBCC) */
   value: number
+}
+
+export interface Probe {
+  cells: ProbeCell[]
   what: string
 }
 
-const COLOURS = ['Red', 'Green', 'Blue', 'White', 'Other colour'] as const
-type Seen = (typeof COLOURS)[number]
+export const COLOURS = ['Red', 'Green', 'Blue', 'White', 'Other'] as const
+export type Seen = (typeof COLOURS)[number]
+const SWATCH: Record<Seen, string> = { Red: '#ff3b30', Green: '#34c759', Blue: '#3b82f6', White: '#f4f4f5', Other: '#a855f7' }
 
-export function probesFor(l: Pick<LiveLight, 'rows' | 'cols'>): Probe[] {
-  const r = l.rows - 1
-  const c = l.cols - 1
-  const mid = [Math.floor(l.rows / 2), Math.floor(l.cols / 2)]
+export interface Answer {
+  /** true = looked exactly like the picture; false = different (then `seen` / `none`) */
+  match?: boolean
+  /** layout position -> colour the tester saw there */
+  seen?: Record<number, Seen>
+  none?: boolean
+}
+
+type Grid = Pick<LiveLight, 'rows' | 'cols' | 'map'>
+
+/** The column at or right of `c` (then left of it) whose cell has a key in `map`; `c` when there's no map. */
+function keyed(l: Grid, row: number, c: number): number {
+  if (!l.map) return c
+  for (let d = 0; d < l.cols; d++) {
+    for (const x of [c + d, c - d]) if (x >= 0 && x < l.cols && l.map[row * l.cols + x] !== undefined) return x
+  }
+  return c
+}
+
+/** Three keys in different rows and columns in pure red / green / blue, then a whole row (the top one) in white. */
+export function probesFor(l: Grid): Probe[] {
+  const row = (k: number) => Math.min(k, l.rows - 1)
+  const rgb: ProbeCell[] = [
+    { row: row(1), col: Math.min(1, l.cols - 1), value: 0xff0000 },
+    { row: row(2), col: Math.floor(l.cols / 3), value: 0x00ff00 },
+    { row: row(3), col: Math.floor(l.cols / 2), value: 0x0000ff },
+  ].map((c) => ({ ...c, col: keyed(l, c.row, c.col) }))
+  const white = Array.from({ length: l.cols }, (_, col) => ({ row: 0, col, value: 0xffffff }))
+    .filter((c) => !l.map || l.map[c.col] !== undefined)
   return [
-    { row: 0, col: 0, value: 0xff0000, what: 'first colour byte only' },
-    { row: mid[0], col: mid[1], value: 0x00ff00, what: 'second colour byte only' },
-    { row: r, col: c, value: 0x0000ff, what: 'third colour byte only' },
-    { row: 0, col: c, value: 0xffffff, what: 'all bytes (white)' },
-    { row: r, col: 0, value: 0xffffff, what: 'all bytes (white)' },
+    { cells: rgb, what: 'three keys: red, green, blue' },
+    { cells: white, what: 'top row white' },
   ]
 }
 
-interface Answer {
-  key?: number
-  none?: boolean
-  many?: boolean
-  colour?: Seen
-}
+const hex = (v: number) => v.toString(16).padStart(6, '0').toUpperCase()
+const NAMES: Record<number, string> = { 0xff0000: 'red', 0x00ff00: 'green', 0x0000ff: 'blue', 0xffffff: 'white' }
 
-export function buildLiveReport(dev: DeviceState, l: Pick<LiveLight, 'rows' | 'cols'>, keys: KeyCap[], probes: Probe[], answers: Answer[], err?: string): string {
-  const hex = (v: number) => v.toString(16).padStart(6, '0').toUpperCase()
+/** layout position of a cell, when the driver knows it */
+const keyOf = (l: Grid, c: ProbeCell) => l.map?.[c.row * l.cols + c.col]
+
+export function buildLiveReport(dev: DeviceState, l: Grid, keys: KeyCap[], probes: Probe[], answers: Answer[], err?: string): string {
+  const name = (p: number) => `"${keys[p]?.label ?? '?'}" (#${p})`
   const lines = [
     `InputDeck live-lighting test — ${dev.driver.brand()} ${dev.driver.model()} (${dev.id})`,
-    `Grid ${l.rows} x ${l.cols}. Time: ${new Date().toISOString()}`,
+    `Grid ${l.rows} x ${l.cols}, ${l.map ? 'cell -> key map from the firmware' : 'no cell -> key map'}. Time: ${new Date().toISOString()}`,
   ]
   probes.forEach((p, i) => {
     const a = answers[i] ?? {}
-    const where = a.none ? 'nothing lit' : a.many ? 'several keys lit' : a.key !== undefined ? `key "${keys[a.key]?.label}" (layout #${a.key}, x ${keys[a.key]?.x}, y ${keys[a.key]?.y})` : 'no answer'
-    lines.push(`${i + 1}. cell row ${p.row} col ${p.col}, sent ${hex(p.value)} (${p.what}) -> ${where}, colour: ${a.colour ?? 'no answer'}`)
+    const sent = p.cells.map((c) => {
+      const k = keyOf(l, c)
+      return `${k === undefined ? '' : name(k) + ' '}r${c.row}c${c.col}=${hex(c.value)}`
+    })
+    let got = 'no answer'
+    if (a.match) got = 'looked exactly like the picture'
+    else if (a.none) got = 'nothing lit'
+    else if (a.seen && Object.keys(a.seen).length) {
+      got = 'saw ' + Object.entries(a.seen).map(([k, c]) => `${name(Number(k))} ${c}`).join(', ')
+    }
+    lines.push(`${i + 1}. ${p.what}: sent ${sent.join(', ')} -> ${got}`)
   })
-  // the first three probes each set one byte: their colours give the byte order
-  const order = answers.slice(0, 3).map((a) => (a.colour && ['Red', 'Green', 'Blue'].includes(a.colour) ? a.colour[0] : '?')).join('')
-  lines.push(`Byte order (from probes 1-3): ${order}`)
   if (err) lines.push(`Error: ${err}`)
   return lines.join('\n')
 }
@@ -70,7 +104,7 @@ export function LiveLightCard({ dev }: { dev: DeviceState }) {
       right={<span className="eyebrow rounded-full border border-white/20 px-2 py-0.5 !text-[8px]">{l.experimental ? 'Needs a test' : 'Live'}</span>}>
       <p className="hint m-0">
         This keyboard can show a different colour on every key while InputDeck is open (it can't store them).
-        {l.experimental ? ' Before that can be built, a 1-minute guided test has to find out which light is which key: InputDeck lights one key at a time and you say which one lit. Your lighting is put back afterwards.' : ''}
+        {l.experimental ? ' Before that can be built, a 1-minute guided test has to check that the right keys light up in the right colours: InputDeck shows two pictures and you say whether your keyboard matches. Your lighting is put back afterwards.' : ''}
       </p>
       {l.experimental && (
         <button type="button" disabled={!canWrite} onClick={() => setOpen(true)} title={canWrite ? undefined : 'Press "Allow changes" first'}
@@ -114,7 +148,7 @@ function LiveLightTest({ dev, l, onClose }: { dev: DeviceState; l: LiveLight; on
 
   const show = async (i: number) => {
     const cells = new Array<number>(l.rows * l.cols).fill(0)
-    if (i < probes.length) cells[probes[i].row * l.cols + probes[i].col] = probes[i].value
+    for (const c of probes[i].cells) cells[c.row * l.cols + c.col] = c.value
     await l.frame(cells)
   }
   const go = async (i: number) => {
@@ -142,7 +176,11 @@ function LiveLightTest({ dev, l, onClose }: { dev: DeviceState; l: LiveLight; on
   }
   const a = answers[step] ?? {}
   const setA = (v: Answer) => setAnswers((all) => { const n = all.slice(); n[step] = { ...all[step], ...v }; return n })
-  const answered = (a.key !== undefined || a.none || a.many) && (a.none || a.colour)
+  const seen = a.seen ?? {}
+  const hasMap = !!l.map && keys.length > 0
+  // with a map: first "does it look like this?"; without one (or after "no"): mark what is lit
+  const marking = !hasMap || a.match === false
+  const answered = a.match === true || ((a.match === false || !hasMap) && (a.none || Object.keys(seen).length > 0))
   const report = step >= probes.length ? buildLiveReport(dev, l, keys, probes, answers, err) : ''
   const copy = async () => {
     try {
@@ -153,42 +191,68 @@ function LiveLightTest({ dev, l, onClose }: { dev: DeviceState; l: LiveLight; on
     }
   }
 
+  const probe = step >= 0 && step < probes.length ? probes[step] : undefined
+  const expected: KeyLook[] = keys.map(() => ({}))
+  probe?.cells.forEach((c) => {
+    const k = keyOf(l, c)
+    if (k !== undefined && expected[k]) expected[k] = { color: `#${hex(c.value)}`, title: `${keys[k].label}: ${NAMES[c.value] ?? hex(c.value)}` }
+  })
+  const marked: KeyLook[] = keys.map((_, i) => (seen[i] ? { color: SWATCH[seen[i]], title: `${keys[i].label}: ${seen[i]}` } : {}))
+  // clicking a key cycles it Red -> Green -> Blue -> White -> Other -> not lit
+  const mark = (s: Set<number>) => {
+    const next = { ...seen }
+    for (const k of s) if (!(k in seen)) next[k] = 'Red'
+    for (const k of Object.keys(seen).map(Number)) {
+      if (s.has(k)) continue
+      const c = COLOURS.indexOf(seen[k]) + 1
+      if (c < COLOURS.length) next[k] = COLOURS[c]
+      else delete next[k]
+    }
+    setA({ seen: next, none: false })
+  }
+  const describe = (p: Probe) => {
+    const named = p.cells.map((c) => {
+      const k = keyOf(l, c)
+      return `${k === undefined ? `row ${c.row + 1} key ${c.col + 1}` : keys[k]?.label} ${NAMES[c.value] ?? hex(c.value)}`
+    })
+    return p.cells.length > 3 ? `the whole ${p.cells[0].row === 0 ? 'top' : `${p.cells[0].row + 1}.`} row in white` : named.join(', ')
+  }
+
   return (
     <Dialog open onOpenChange={(o) => !o && void close()}>
       <DialogContent className="rounded-3xl border-white/10 bg-[#111113]/95 p-7 backdrop-blur-xl sm:max-w-[760px]">
         <DialogHeader>
           <div className="eyebrow mb-1">Live lighting test · {dev.driver.model()}</div>
           <DialogTitle className="display text-[18px] font-semibold">
-            {step < 0 ? 'Find out which light is which key' : step < probes.length ? `Step ${step + 1} of ${probes.length}: which key lit up?` : err ? 'Test stopped' : 'Done — lighting put back'}
+            {step < 0 ? 'Check which keys light up, and in what colour' : probe ? `Picture ${step + 1} of ${probes.length}: ${describe(probe)}` : err ? 'Test stopped' : 'Done — lighting put back'}
           </DialogTitle>
           <DialogDescription className="leading-relaxed">
             {step < 0
-              ? `InputDeck will turn all key lights off and light one key at a time, ${probes.length} times. Look at the keyboard and click the key that lit up, then pick its colour. Your current lighting is restored at the end (or if you close this). Nothing is stored on the keyboard; unplugging it also resets the lights.`
-              : step < probes.length
-                ? 'Click the key that is lit on your keyboard, then pick the colour you see.'
+              ? `InputDeck will turn all key lights off and show ${probes.length} pictures on your keyboard. For each, say whether your keyboard looks exactly the same. Your current lighting is restored at the end (or if you close this). Nothing is stored on the keyboard; unplugging it also resets the lights.`
+              : probe
+                ? marking
+                  ? 'Click every key that is lit on your keyboard. Click it again to change its colour (red, green, blue, white, other, off).'
+                  : 'Do exactly these keys light up on your keyboard, in these colours, and no others?'
                 : err ? `Something went wrong: ${err}. The lighting was put back. Copy the result and send it to the developer.` : 'Thanks! Copy the result and send it to the developer.'}
           </DialogDescription>
         </DialogHeader>
 
-        {step >= 0 && step < probes.length && (
+        {probe && (
           <>
-            {keys.length > 0 && (
-              <KeyboardView keys={keys} looks={keys.map(() => ({}))} interactive maxWidth={700}
-                selected={new Set(a.key === undefined ? [] : [a.key])}
-                onSelect={(s) => { const k = [...s].find((x) => x !== a.key); setA({ key: k, none: false, many: false }) }} />
-            )}
-            <div className="flex flex-wrap gap-2">
-              <button type="button" className={cn('chip !text-[11px]', a.none && 'plat !border-transparent')} onClick={() => setA({ none: true, many: false, key: undefined, colour: undefined })}>Nothing lit</button>
-              <button type="button" className={cn('chip !text-[11px]', a.many && 'plat !border-transparent')} onClick={() => setA({ many: true, none: false, key: undefined })}>Several keys lit</button>
+            {keys.length > 0 && (marking
+              ? <KeyboardView keys={keys} looks={marked} interactive maxWidth={700} selected={new Set(Object.keys(seen).map(Number))} onSelect={mark} />
+              : <KeyboardView keys={keys} looks={expected} interactive={false} maxWidth={700} selected={new Set()} />)}
+            <div className="flex flex-wrap items-center gap-2">
+              {hasMap && (
+                <>
+                  <button type="button" className={cn('chip !text-[11px]', a.match === true && 'plat !border-transparent')} onClick={() => setA({ match: true, seen: {}, none: false })}>Yes, exactly like this</button>
+                  <button type="button" className={cn('chip !text-[11px]', a.match === false && 'plat !border-transparent')} onClick={() => setA({ match: false })}>No, it looks different</button>
+                </>
+              )}
+              {marking && (
+                <button type="button" className={cn('chip !text-[11px]', a.none && 'plat !border-transparent')} onClick={() => setA({ none: true, seen: {} })}>Nothing lit</button>
+              )}
             </div>
-            {!a.none && (
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="eyebrow mr-1">Colour</span>
-                {COLOURS.map((c) => (
-                  <button key={c} type="button" className={cn('chip !text-[11px]', a.colour === c && 'plat !border-transparent')} onClick={() => setA({ colour: c })}>{c}</button>
-                ))}
-              </div>
-            )}
           </>
         )}
 
@@ -199,7 +263,7 @@ function LiveLightTest({ dev, l, onClose }: { dev: DeviceState; l: LiveLight; on
         <div className="flex justify-end gap-2">
           {step < probes.length && <button type="button" className="chip" disabled={busy} onClick={() => void close()}>Cancel</button>}
           {step < 0 && <button type="button" className="plat display rounded-full px-5 py-2.5 text-[12px] font-semibold" disabled={busy} onClick={() => void go(0)}>{busy ? 'Starting…' : 'Start'}</button>}
-          {step >= 0 && step < probes.length && (
+          {probe && (
             <button type="button" className="plat display rounded-full px-5 py-2.5 text-[12px] font-semibold disabled:opacity-50" disabled={busy || !answered} onClick={() => void go(step + 1)}>
               {busy ? '…' : step + 1 < probes.length ? 'Next' : 'Finish and restore lighting'}
             </button>

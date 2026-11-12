@@ -27,6 +27,28 @@ const check = (ok: boolean, what: string) => {
   if (!ok) throw new Error('fake device: unexpected ' + what);
 };
 
+/*
+ * The A68 0.4.6 LED output path, copied from the firmware image independently of the driver (so the
+ * driver's LiveLight.map is checked against it): cell -> key id (0x08029340, byte 0 of each 4-byte
+ * entry; the entry's bytes 1/2 are the cell's own row / col, so the output buffer 0x20006c14 has the
+ * matrix layout), and the LED chain order (0x080296b0, [row, col] per LED, 68 LEDs, fed by 0x0801fc04).
+ */
+const FW_CELL_KEYS = [
+  [0x01, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1f, 0x20],
+  [0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35],
+  [0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x49, 0x22, 0x00],
+  [0x4e, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5b, 0x5c, 0x37, 0x00],
+  [0x61, 0x62, 0x63, 0x66, 0x6a, 0x6b, 0x6d, 0x6e, 0x6f, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00],
+];
+/** 0x080296b0: serpentine, row lengths 15 / 15 / 14 / 14 / 10 */
+const FW_CHAIN: [number, number][] = [
+  ...Array.from({ length: 15 }, (_, c) => [0, c] as [number, number]),
+  ...Array.from({ length: 15 }, (_, c) => [1, 14 - c] as [number, number]),
+  ...Array.from({ length: 14 }, (_, c) => [2, c] as [number, number]),
+  ...Array.from({ length: 14 }, (_, c) => [3, 13 - c] as [number, number]),
+  ...Array.from({ length: 10 }, (_, c) => [4, c] as [number, number]),
+];
+
 export interface FakeDareuOpts {
   pid?: number;
   /** feature report id the board uses (0 for FwType 0/6, 0x0A for FwType 1) */
@@ -134,7 +156,11 @@ export class FakeDareu {
     this.tv = p?.tv ?? 1;
     // product default global travel, in device units
     if (p?.gt) this.global = Math.round(p.gt[4] / (p.gt[5] * (this.tv >= 2 ? 0.5 : 1)));
-    if (o.stream) this.effects = [...this.effects, LIVE_EFFECT];
+    if (o.stream) {
+      this.effects = [...this.effects, LIVE_EFFECT];
+      // like the real A68 0.4.6: defaults set cfg+0x90a = 1 (0x08013f78) and GET 0x80 reports only it
+      this.regions = [1];
+    }
     const id = o.reportId ?? 0;
     this.collections = [
       { usagePage: 0x0c, usage: 0x01, type: 1, children: [], inputReports: [], outputReports: [], featureReports: [{ reportId: id, items: [] }] },
@@ -222,6 +248,26 @@ export class FakeDareu {
   /** the matrix as 0xAABBCC per cell (bytes in the order sent) */
   cells(): number[] {
     return Array.from({ length: this.rows * this.cols }, (_, i) => (this.matrix[3 * i] << 16) | (this.matrix[3 * i + 1] << 8) | this.matrix[3 * i + 2]);
+  }
+
+  /**
+   * What the keys show (A68 5 x 15 grid): the firmware's output path (0x0801d9e8 -> 0x0801fc04 ->
+   * 0x0801fb7c), brightness left out. Each chain LED gets its cell's bytes on the wire as b1, b0, b2,
+   * read by a GRB LED as G, R, B. Key id -> 0xRRGGBB, lit keys only.
+   */
+  lit(): Map<number, number> {
+    const out = new Map<number, number>();
+    for (const [r, c] of FW_CHAIN) {
+      const id = FW_CELL_KEYS[r]?.[c] ?? 0;
+      if (!id || r >= this.rows || c >= this.cols) continue; // 0x0801dad2: no key, no output
+      const at = (r * this.cols + c) * 3;
+      const [b0, b1, b2] = [this.matrix[at], this.matrix[at + 1], this.matrix[at + 2]];
+      const wire = [b1, b0, b2];
+      const [g, red, b] = wire;
+      const v = (red << 16) | (g << 8) | b;
+      if (v) out.set(id, v);
+    }
+    return out;
   }
 
   key(id: number): FakeKey {
@@ -325,6 +371,12 @@ export class FakeDareu {
       if (cmd === LED.EFFECT) {
         const n = pl[4];
         check(f[4] <= 3, 'effect profile'); // firmware rejects profile bytes over 3
+        if (this.o.stream && pl[0] !== this.regions[0]) {
+          // 0x08015770: another region than cfg+0x90a is refused
+          this.answer(f, []);
+          this.reply![0] = 0x03;
+          return;
+        }
         if (w) {
           const next = {
             effect: pl[1],

@@ -535,6 +535,23 @@ export function parseEffectList(r: ArrayLike<number>): number[] {
 //   effect's last picture stays until the first frame). Other effects redraw it every tick; effect
 //   0's init clears it (0x0801e514). Changing the effect away from 18 redraws from that effect.
 // - Brightness (live copy 0x20007361) scales every LED in the output routine 0x0801d9e8, frames too.
+// - Matrix -> LEDs (re-checked after hardware test #1): 0x0801d9e8 walks row 0..4 / col 0..14, skips
+//   cells whose key id (byte 0 of the 4-byte entry at 0x08029340 + (row*15+col)*4) is 0, and copies the
+//   cell's bytes 0/1/2 (scaled) to byte 0/1/2 of the cell [entry byte 1 = row, byte 2 = col] of the
+//   output buffer 0x20006c14 - bytes 1/2 of every entry are its own row/col, so this is the identity;
+//   byte 3 only flags Caps (indicator). 0x0801fc04 then feeds 68 LEDs (0x44) in the order of the
+//   [row, col] pairs at 0x080296b0 (serpentine: row 0 L->R, 1 R->L, 2 L->R, 3 R->L, 4 L->R), each as
+//   0x0801fb7c(i, b0 | b1 << 8 | b2 << 16, 0x50): 24 SPI bytes per LED (0xfc = 1, 0xc0 = 0, 0x0801fb2c),
+//   wire order b1, b0, b2 = G, R, B of a WS2812-style LED, every channel scaled by 0x50 / 256.
+//   So cell byte 0 is red, 1 green, 2 blue - the same matrix and order the effects paint: SET 2 stores
+//   its colours as sent (0x080157b2) and e.g. static copies colour 0 into every cell (0x0801e55c), and
+//   the vendor sends those R, G, B. Nothing in this image remaps bytes, cells or channels.
+// - Region: defaults set cfg+0x90a = 1 (0x08013f78) and GET 0x80 reports exactly that one id, so the
+//   driver sends region 1 on the A68 (FRAME and SET 2 both refuse any other, 0x0801eb30 / 0x08015770).
+// - Hardware test #1 (A68 0.4.6) does NOT match this: single-byte cells lit other keys (W / N / S
+//   for Esc / J / an empty cell) one channel "later" (R->G, G->B, B->R) and white cells showed one
+//   colour on the right key (Ins / Ctrl). No byte placement in this image explains all five (see
+//   dareu-live.test.ts); hence still experimental, and the guided test now checks named keys.
 // - SET 2 (effect, 0x0801575e) with profile byte 0 applies the effect live only (0x0801e464 + live
 //   config cfg+0x90d) and skips the per-profile store + flash save (0x08015868); GET 0x82 with
 //   profile 0 reads the live state 0x20006ac4 (0x0801eacc). So streaming never stores effect 18:
@@ -556,6 +573,34 @@ export function liveRowPkt(region: number, row: number, first: number, cells: nu
   const p = [region, LIVE_ROW_MODE, row, first, first + cells.length - 1];
   for (const c of cells) p.push((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
   return frame(CLS.LIGHTING, LED_PROBE.FRAME, p.length, 0, p);
+}
+
+/**
+ * A68 (0x0175) firmware 0.4.6 cell -> key id table (0x08029340, byte 0 of each 4-byte entry), row-major
+ * 5 x 15; 0 = no LED there. These are the key ids of the TK53H layout.
+ */
+export const A68_LED_KEYS: readonly number[] = [
+  0x01, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1f, 0x20,
+  0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,
+  0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x49, 0x22, 0x00,
+  0x4e, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5b, 0x5c, 0x37, 0x00,
+  0x61, 0x62, 0x63, 0x66, 0x6a, 0x6b, 0x6d, 0x6e, 0x6f, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/** Firmware cell -> key tables we have read, by product id (grid must match the attribute reply). */
+const LED_KEYS: Record<number, { rows: number; cols: number; ids: readonly number[] }> = {
+  0x0175: { rows: 5, cols: 15, ids: A68_LED_KEYS },
+};
+
+/** cell -> layout position (LiveLight.map), when the firmware table for this product and grid is known */
+export function liveMapFor(pid: number, rows: number, cols: number, caps: KeyCap[]): (number | undefined)[] | undefined {
+  const t = LED_KEYS[pid];
+  if (!t || t.rows !== rows || t.cols !== cols) return undefined;
+  const map = t.ids.map((id) => {
+    const i = id ? caps.findIndex((c) => c.index === id) : -1;
+    return i >= 0 ? i : undefined;
+  });
+  return map.some((i) => i !== undefined) ? map : undefined;
 }
 
 /** The requests for the given rows of a frame (cells = rows * cols, row-major), at most LIVE_CELLS each. */
@@ -1008,6 +1053,8 @@ class DareuLive implements LiveLight {
     fps: number,
     /** the driver's active profile (brightness is read / written for it) */
     private readonly profile: () => number,
+    /** cell -> layout position from the firmware table, when known */
+    readonly map?: (number | undefined)[],
   ) {
     this.interval = Math.ceil(1000 / fps);
   }
@@ -1702,7 +1749,8 @@ class Dareu implements Driver {
       const bri = await this.readBrightness(region);
       this.light = l;
       if (stream && !this.live?.active) {
-        this.live = new DareuLive(this.link, region, stream.rows, stream.cols, stream.fps, () => this.profile);
+        const map = liveMapFor(this.product.pid, stream.rows, stream.cols, this.caps);
+        this.live = new DareuLive(this.link, region, stream.rows, stream.cols, stream.fps, () => this.profile, map);
       }
       if (l.effect !== 0) this.lastEffect = l.effect;
       if (l.colors.length) this.lastColor = l.colors[0];

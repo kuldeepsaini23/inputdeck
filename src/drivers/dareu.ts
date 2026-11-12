@@ -23,6 +23,10 @@
 // Written (each read back): polling rate, lighting effect / brightness, single / rapid trigger,
 // SOCD, RT self-adaptive (13/14), MT / TGL / DKS (13/4-6, removed with a one-key 13/1 like the
 // vendor), key assignments (1/3, base + Fn layer), macros (6/2-5) and the active profile (5/3).
+//
+// Live lighting (liveLight, boards whose attribute reply lists effect 18): a second allowlist,
+// allowedStream(), used ONLY by that path, lets through the live-only (profile byte 0) effect switch
+// to 18 / back and FRAME (3/4) row writes. See the LIVE notes below for the firmware analysis.
 
 import { DAREU_LAYOUTS, DAREU_PRODUCTS, type DareuProduct } from './dareu-products';
 import {
@@ -39,7 +43,7 @@ import {
   type Assign,
 } from './dareu-keys';
 import { MOUSE_MAX_DELAY, decodeMacro, encodeMacro } from '../lib/macros';
-import type { AdvancedKey, AdvancedKeys, DelayRange, Driver, DriverFactory, KeyCap, Setting, Socd, Value } from './types';
+import type { AdvancedKey, AdvancedKeys, DelayRange, Driver, DriverFactory, KeyCap, LiveLight, Setting, Socd, Value } from './types';
 import { sleep } from './types';
 
 export const VID = 0x260d;
@@ -186,6 +190,8 @@ export const dareuTiming = {
   verifyRetries: 3,
   /** wait before each extra read-back */
   verifySettle: 150,
+  /** live lighting: rows that didn't change are skipped, but every row is resent this often */
+  liveKeyframe: 1000,
 };
 
 const hex2 = (b: number) => b.toString(16).toUpperCase().padStart(2, '0');
@@ -507,6 +513,102 @@ export function parseEffectList(r: ArrayLike<number>): number[] {
   return out;
 }
 
+// --- live lighting (effect 18 + FRAME)
+//
+// From the official A68 firmware 0.4.6 (app image at 0x08008000):
+// - Dispatcher 0x08014ad0 refuses any request whose size byte is over 0x3a (0x08014aec, status 3);
+//   class 3 handler 0x08015430 calls FRAME (SET 4) 0x0801eae0 with the payload (frame + 6) and turns
+//   a false result into status 3 (0x08015982); otherwise the dispatcher sets status 2 (0x08014bee).
+//   SET 4 never looks at the size or profile byte.
+// - FRAME payload [region, flags, ...]: region must equal the current region (cfg+0x90a, the only id
+//   GET 0x80 reports). flags & 0x7f = mode (jump table 0x0801eb44): 0/3 fill the whole matrix with
+//   one colour, 1 = [row <= 4, first <= last <= 14, 3 bytes per cell] (0x0801eb5c), 2 = the same by
+//   column, 4 = fill a row, 5 = fill a column. Cells go to the RAM matrix 0x20006b18 at
+//   row * 45 + col * 3, bytes copied as sent. Bit 7: afterwards, if the live effect isn't 18, switch
+//   to 18 live (0x0801ed78 -> 0x0801e464 with a zeroed struct). We never set it.
+// - 0x0801f60c (checked first) returns the start-up animation flag 0x20007360 (set once at power-up
+//   by 0x0801d860, cleared by the lighting tick 0x0801d3b0 when the animation ends). While it is set
+//   FRAME answers "done" but drops the data; when it ends with effect 18 the matrix is cleared to
+//   black (0x0801d42a). Hence the periodic full resend (dareuTiming.liveKeyframe).
+// - The handler doesn't check the effect, but only effect 18 leaves the matrix alone: its tick entry
+//   is a no-op (0x0801d716) and its init (0x0801e9bc) doesn't touch the matrix (so the previous
+//   effect's last picture stays until the first frame). Other effects redraw it every tick; effect
+//   0's init clears it (0x0801e514). Changing the effect away from 18 redraws from that effect.
+// - Brightness (live copy 0x20007361) scales every LED in the output routine 0x0801d9e8, frames too.
+// - SET 2 (effect, 0x0801575e) with profile byte 0 applies the effect live only (0x0801e464 + live
+//   config cfg+0x90d) and skips the per-profile store + flash save (0x08015868); GET 0x82 with
+//   profile 0 reads the live state 0x20006ac4 (0x0801eacc). So streaming never stores effect 18:
+//   a page that dies leaves the board on its last frame until stop() / unplug.
+//   (A stored effect 18 is replaced by Wave at power-up anyway, 0x0801d7ac.)
+// - Attribute reply (GET 0x81, 0x080154dc): [region, type 4, fps 33, rows 5, cols 15 (0x0801f5c8), n, effects].
+
+export const LIVE_EFFECT = 18;
+/** FRAME flags byte: mode 1 (one row, a run of cells), bit 7 clear */
+export const LIVE_ROW_MODE = 1;
+/** largest request size byte the dispatcher accepts */
+export const MAX_REQUEST_SIZE = 0x3a;
+/** cells per FRAME request: [region, flags, row, first, last] + 3 bytes each must fit MAX_REQUEST_SIZE */
+export const LIVE_CELLS = Math.floor((MAX_REQUEST_SIZE - 5) / 3);
+
+/** One FRAME row write: `cells` (0xAABBCC, sent as AA BB CC) starting at column `first`. Profile byte 0. */
+export function liveRowPkt(region: number, row: number, first: number, cells: number[]): Uint8Array<ArrayBuffer> {
+  if (cells.length < 1 || cells.length > LIVE_CELLS) throw new Error(`1..${LIVE_CELLS} cells per lighting frame request`);
+  const p = [region, LIVE_ROW_MODE, row, first, first + cells.length - 1];
+  for (const c of cells) p.push((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
+  return frame(CLS.LIGHTING, LED_PROBE.FRAME, p.length, 0, p);
+}
+
+/** The requests for the given rows of a frame (cells = rows * cols, row-major), at most LIVE_CELLS each. */
+export function liveFramePkts(region: number, cols: number, cells: number[], rows: number[]): Uint8Array<ArrayBuffer>[] {
+  const out: Uint8Array<ArrayBuffer>[] = [];
+  for (const r of rows) {
+    for (let c = 0; c < cols; c += LIVE_CELLS) out.push(liveRowPkt(region, r, c, cells.slice(r * cols + c, r * cols + Math.min(cols, c + LIVE_CELLS))));
+  }
+  return out;
+}
+
+/** Live-only effect write (profile byte 0: applied, never stored). */
+export const liveEffectPkt = (l: Light) => setEffectPkt(0, l);
+
+/**
+ * Allowlist of the live-lighting path only (Link calls that pass it; write() never does):
+ * - FRAME (3/4) in row mode, profile byte 0, size byte = exact payload length, nothing after it;
+ * - the live-only effect write (3/2 with profile byte 0) of any effect 0..32 (switch to 18, or put back
+ *   exactly the effect read before, which may be a custom one).
+ */
+export function allowedStream(f: ArrayLike<number>): boolean {
+  if (f.length !== REPORT_SIZE || f[0] !== 0 || f[5] !== 0 || f[2] !== CLS.LIGHTING || f[4] !== 0) return false;
+  const size = f[1];
+  const pl = (i: number) => f[PAYLOAD + i];
+  const zeroFrom = (i: number) => {
+    for (let k = PAYLOAD + i; k < f.length; k++) if (f[k] !== 0) return false;
+    return true;
+  };
+  if (f[3] === LED_PROBE.FRAME) {
+    const n = pl(4) - pl(3) + 1;
+    return (
+      pl(0) < 16 && pl(1) === LIVE_ROW_MODE && pl(2) < 16 && n >= 1 && n <= LIVE_CELLS &&
+      size === 5 + 3 * n && size <= MAX_REQUEST_SIZE && zeroFrom(5 + 3 * n)
+    );
+  }
+  if (f[3] === LED.EFFECT) {
+    const n = pl(4);
+    return pl(0) < 16 && pl(1) <= 32 && n <= MAX_COLORS && size === 5 + 3 * n && zeroFrom(5 + 3 * n);
+  }
+  return false;
+}
+
+/** Attribute reply -> the streaming grid, when effect 18 is listed. */
+export function parseStream(r: ArrayLike<number>): { rows: number; cols: number; fps: number } | undefined {
+  const at = (i: number) => r[PAYLOAD + i] ?? 0;
+  const n = at(5);
+  let has = false;
+  for (let i = 0; i < n && 6 + i < REPORT_SIZE - PAYLOAD; i++) if (at(6 + i) === LIVE_EFFECT) has = true;
+  const [fps, rows, cols] = [at(2), at(3), at(4)];
+  if (!has || rows < 1 || rows > 16 || cols < 1 || cols > 32) return undefined;
+  return { rows, cols, fps: fps > 0 ? Math.min(fps, 60) : 30 };
+}
+
 /** Region id list (multi-packet data): ids 0 and 1 are the same main region. */
 export function mergeRegions(ids: number[]): number[] {
   const out: number[] = [];
@@ -826,13 +928,14 @@ class Link {
     return r;
   }
 
-  private check(f: Uint8Array) {
-    if (!allowed(f)) throw new Error(`refusing to send ${hexs(f.slice(0, 10))}`);
+  /** `ok` is the allowlist: allowed() for everything except the live-lighting path (allowedStream). */
+  private check(f: Uint8Array, ok: (f: Uint8Array) => boolean) {
+    if (!ok(f)) throw new Error(`refusing to send ${hexs(f.slice(0, 10))}`);
   }
 
   /** Send one request and poll for its reply (status low nibble 2 = done). */
-  async xfer(f: Uint8Array<ArrayBuffer>): Promise<Uint8Array> {
-    this.check(f);
+  async xfer(f: Uint8Array<ArrayBuffer>, ok: (f: Uint8Array) => boolean = allowed): Promise<Uint8Array> {
+    this.check(f, ok);
     await this.dev.sendFeatureReport(this.reportId, f);
     for (let i = 0; i < dareuTiming.tries; i++) {
       const dv = await this.dev.receiveFeatureReport(this.reportId);
@@ -847,8 +950,8 @@ class Link {
    * Like xfer but for diagnose(): also returns error / unsupported replies (status 3 / 5 etc.)
    * instead of waiting them out, and never throws on silence (`status` -1, last bytes seen).
    */
-  async probe(f: Uint8Array<ArrayBuffer>): Promise<{ status: number; reply: Uint8Array }> {
-    this.check(f);
+  async probe(f: Uint8Array<ArrayBuffer>, ok: (f: Uint8Array) => boolean = allowed): Promise<{ status: number; reply: Uint8Array }> {
+    this.check(f, ok);
     await this.dev.sendFeatureReport(this.reportId, f);
     let last: Uint8Array = new Uint8Array(REPORT_SIZE);
     for (let i = 0; i < dareuTiming.tries; i++) {
@@ -864,15 +967,184 @@ class Link {
 
   /** Fire-and-forget write (the vendor sends the polling rate this way). */
   async send(f: Uint8Array<ArrayBuffer>): Promise<void> {
-    this.check(f);
+    this.check(f, allowed);
     await this.dev.sendFeatureReport(this.reportId, f);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// live lighting
+
+const sameLight = (a: Light, b: Light) =>
+  a.effect === b.effect && a.flag === b.flag && a.speed === b.speed &&
+  a.colors.length === b.colors.length && a.colors.every((c, i) => c === b.colors[i]);
+
+/**
+ * Streamed per-key lighting (effect 18 + FRAME rows). start() remembers the live effect and the
+ * brightness, switches the region to effect 18 live-only (profile byte 0, never stored) and blanks
+ * the matrix; frame() sends the newest picture at most `fps` times a second; stop() puts the
+ * remembered effect (and brightness, if it changed) back, each read back.
+ */
+class DareuLive implements LiveLight {
+  readonly experimental = true;
+  /** ms between frame starts: never faster than the firmware's fps */
+  readonly interval: number;
+  private on = false;
+  /** what stop() puts back; kept until that worked */
+  private saved: { light: Light; bri: number } | undefined;
+  /** newest frame not sent yet (older ones are dropped) */
+  private pending: number[] | undefined;
+  private pump: Promise<void> | undefined;
+  private nextAt = 0;
+  /** cells the board's matrix holds, when known (rows equal to them aren't resent) */
+  private shown: number[] | undefined;
+  private fullAt = 0;
+
+  constructor(
+    private readonly link: Link,
+    readonly region: number,
+    readonly rows: number,
+    readonly cols: number,
+    fps: number,
+    /** the driver's active profile (brightness is read / written for it) */
+    private readonly profile: () => number,
+  ) {
+    this.interval = Math.ceil(1000 / fps);
+  }
+
+  get active() {
+    return this.on;
+  }
+
+  start(): Promise<void> {
+    return this.link.lock(async () => {
+      if (this.on) return;
+      if (!this.link.dev.opened) throw new Error('keyboard is not connected');
+      const region = this.region;
+      let light = parseEffect(await this.link.xfer(getEffectPkt(0, region)), region);
+      if (light.effect === LIVE_EFFECT) {
+        // left on 18 by a page that never stopped: the stored effect is the user's
+        light = parseEffect(await this.link.xfer(getEffectPkt(this.profile(), region)), region);
+        if (light.effect === LIVE_EFFECT) light = { region, effect: 1, flag: 0, speed: 0, colors: [0xffffff] };
+      }
+      const bri = (await this.link.xfer(getBrightnessPkt(this.profile(), region)))[PAYLOAD + 1];
+      if (!allowedStream(liveEffectPkt(light))) throw new Error(`effect ${light.effect} couldn't be put back afterwards - not starting`);
+      this.saved = { light, bri };
+      try {
+        await this.switchTo({ region, effect: LIVE_EFFECT, flag: 0, speed: 0, colors: [] });
+        // effect 18 keeps the old effect's last picture: start from black
+        this.shown = undefined;
+        await this.send(new Array<number>(this.rows * this.cols).fill(0));
+      } catch (e) {
+        await this.restore().catch(() => undefined);
+        throw e;
+      }
+      this.on = true;
+      this.nextAt = Date.now() + this.interval;
+    });
+  }
+
+  frame(cells: number[]): Promise<void> {
+    if (!this.on) return Promise.reject(new Error('live lighting is not running'));
+    if (cells.length !== this.rows * this.cols) return Promise.reject(new Error(`a frame has ${this.rows * this.cols} cells, got ${cells.length}`));
+    this.pending = cells.map((c) => (Number.isFinite(c) ? c & 0xffffff : 0));
+    if (!this.pump) this.pump = this.run();
+    return this.pump;
+  }
+
+  /** Send pending frames, one per interval, until none is left (or stop()). */
+  private async run(): Promise<void> {
+    try {
+      while (this.pending && this.on) {
+        const wait = this.nextAt - Date.now();
+        if (wait > 0) await sleep(wait);
+        const cells = this.pending;
+        this.pending = undefined;
+        if (!cells || !this.on) break;
+        this.nextAt = Date.now() + this.interval;
+        await this.link.lock(() => (this.on ? this.send(cells) : Promise.resolve()));
+      }
+    } catch (e) {
+      this.pending = undefined;
+      throw e;
+    } finally {
+      this.pump = undefined;
+    }
+  }
+
+  stop(): Promise<void> {
+    this.on = false;
+    this.pending = undefined;
+    const pump = this.pump ? this.pump.catch(() => undefined) : Promise.resolve();
+    return pump.then(() =>
+      this.link.lock(async () => {
+        // a start() that was already queued has finished by now
+        this.on = false;
+        if (!this.saved) return;
+        // closed / unplugged: nothing to put back (the board forgets effect 18 when it powers up)
+        if (!this.link.dev.opened) {
+          this.saved = undefined;
+          return;
+        }
+        try {
+          await this.restore();
+        } catch (e) {
+          if (!this.link.dev.opened) {
+            this.saved = undefined;
+            return;
+          }
+          throw e;
+        }
+      }),
+    );
+  }
+
+  /** Live-only effect write + read-back. */
+  private async switchTo(l: Light): Promise<void> {
+    await this.link.xfer(liveEffectPkt(l), allowedStream);
+    const got = parseEffect(await this.link.xfer(getEffectPkt(0, l.region)), l.region);
+    if (!sameLight(got, l)) throw new Error(`keyboard didn't take the lighting change (reads back effect ${got.effect}, speed ${got.speed})`);
+  }
+
+  private async restore(): Promise<void> {
+    const s = this.saved;
+    if (!s) return;
+    this.shown = undefined;
+    await this.switchTo(s.light);
+    const p = this.profile();
+    const bri = (await this.link.xfer(getBrightnessPkt(p, this.region)))[PAYLOAD + 1];
+    if (bri !== s.bri) {
+      await this.link.xfer(setBrightnessPkt(p, this.region, s.bri));
+      const got = (await this.link.xfer(getBrightnessPkt(p, this.region)))[PAYLOAD + 1];
+      if (got !== s.bri) throw new Error(`brightness reads back as ${got}`);
+    }
+    this.saved = undefined;
+  }
+
+  /** Write the rows that differ from what the board shows (all rows every liveKeyframe ms). */
+  private async send(cells: number[]): Promise<void> {
+    const now = Date.now();
+    const full = !this.shown || now - this.fullAt >= dareuTiming.liveKeyframe;
+    const shown = this.shown;
+    const rows: number[] = [];
+    for (let r = 0; r < this.rows; r++) {
+      const a = r * this.cols;
+      if (full || !shown || cells.slice(a, a + this.cols).some((c, i) => c !== shown[a + i])) rows.push(r);
+    }
+    if (full) this.fullAt = now;
+    this.shown = undefined;
+    for (const f of liveFramePkts(this.region, this.cols, cells, rows)) {
+      const { status } = await this.link.probe(f, allowedStream);
+      if (status !== 2) throw new Error(status < 0 ? 'keyboard didn\'t answer a lighting frame' : `keyboard refused a lighting frame (status ${status})`);
+    }
+    this.shown = cells;
   }
 }
 
 // ---------------------------------------------------------------------------------------------
 // driver
 
-const text = (key: string, label: string, group: string, s: string): Setting => ({ key, label, group, value: { kind: 'text', text: s } });
+const text =(key: string, label: string, group: string, s: string): Setting => ({ key, label, group, value: { kind: 'text', text: s } });
 const effectName = (e: number) => EFFECTS.find((x) => x[0] === e)?.[1] ?? `Effect ${e}`;
 const DEFAULT_EFFECTS = [1, 2, 4, 9, 11, 19];
 
@@ -912,6 +1184,8 @@ class Dareu implements Driver {
   /** macro bytes per macro id */
   private macros: Map<number, number[]> | undefined;
   private profiles: number[] | undefined;
+  /** streamed lighting, when the attribute reply lists effect 18 (set by read()) */
+  private live: DareuLive | undefined;
 
   constructor(
     private readonly link: Link,
@@ -939,13 +1213,23 @@ class Dareu implements Driver {
     return this.caps;
   }
 
+  /** Live per-key lighting: only on boards whose attribute reply lists effect 18 (known after read()). */
+  get liveLight(): LiveLight | undefined {
+    return this.live;
+  }
+
   read(): Promise<Setting[]> {
     return this.link.lock(() => this.readInner());
   }
   write(s: Setting): Promise<void> {
+    // while streaming, effect / profile changes would fight the stream (and stop() would undo them)
+    if (this.live?.active && (s.key.startsWith('light_') || s.key === 'profile')) {
+      return Promise.reject(new Error('Live lighting is running - stop it first'));
+    }
     return this.link.lock(() => this.writeInner(s));
   }
   async close(): Promise<void> {
+    await this.live?.stop().catch(() => undefined);
     if (this.link.dev.opened) await this.link.dev.close();
   }
 
@@ -1400,18 +1684,26 @@ class Dareu implements Driver {
 
     // --- lighting
     this.light = undefined;
+    // a running stream keeps its object (and what it will put back)
+    if (!this.live?.active) this.live = undefined;
     try {
       const regions = await this.readRegions();
       const region = regions[0] ?? 0;
       let effects: number[] = [];
+      let stream: ReturnType<typeof parseStream>;
       try {
-        effects = parseEffectList(await this.link.xfer(attributePkt(region)));
+        const attr = await this.link.xfer(attributePkt(region));
+        effects = parseEffectList(attr);
+        stream = parseStream(attr);
       } catch {
         effects = [];
       }
       const l = await this.readEffect(region);
       const bri = await this.readBrightness(region);
       this.light = l;
+      if (stream && !this.live?.active) {
+        this.live = new DareuLive(this.link, region, stream.rows, stream.cols, stream.fps, () => this.profile);
+      }
       if (l.effect !== 0) this.lastEffect = l.effect;
       if (l.colors.length) this.lastColor = l.colors[0];
       let list = effects.filter((e) => e !== 0);

@@ -1,7 +1,25 @@
 // Simulated DAREU keyboard on TG firmware. Default: A68 (VID 260D PID 0175, magnetic, TravelVersion 2);
 // any other product from dareu-products.ts via `pid` (magnetic value layout follows its TravelVersion:
 // 0 = one byte per value, 1/2 = big-endian u16). Used by the tests.
-import { CLS, DEV, GET, KEY, LED, LED_PROBE, MAG, MCO, PAYLOAD, PFL, REPORT_SIZE, allowed, capsFor, productFor } from '../dareu';
+import {
+  CLS,
+  DEV,
+  GET,
+  KEY,
+  LED,
+  LED_PROBE,
+  LIVE_EFFECT,
+  MAG,
+  MAX_REQUEST_SIZE,
+  MCO,
+  PAYLOAD,
+  PFL,
+  REPORT_SIZE,
+  allowed,
+  allowedStream,
+  capsFor,
+  productFor,
+} from '../dareu';
 import { usageOfKeyId } from '../dareu-keys';
 
 /** Fakes refuse anything the real device wouldn't accept, so bugs surface in tests. */
@@ -34,6 +52,16 @@ export interface FakeDareuOpts {
    * 'data' = FRAME answers with bytes (to exercise the report)
    */
   ledProbe?: 'firmware' | 'silent' | 'data';
+  /** the attribute reply lists the streaming effect 18 (like the real A68 0.4.6) */
+  stream?: boolean;
+}
+
+/** effect state as the firmware keeps it */
+export interface FakeEffect {
+  effect: number;
+  flag: number;
+  speed: number;
+  colors: number[][];
 }
 
 /** One key's trigger in device units (A68 / TravelVersion 2: travel 0.005 mm, sensitivity 0.005 mm). */
@@ -57,8 +85,22 @@ export class FakeDareu {
   rate = 8;
   regions = [0, 1];
   effects = [0, 1, 2, 4, 11, 13, 14, 19, 20, 21, 22, 24, 25, 27, 28];
-  effect = { effect: 1, flag: 0, speed: 0, colors: [[0xff, 0x00, 0x40]] as number[][] };
+  /** the stored effect of the active profile (also the live one unless `live` is set) */
+  effect: FakeEffect = { effect: 1, flag: 0, speed: 0, colors: [[0xff, 0x00, 0x40]] };
+  /** effect applied live only (SET with profile byte 0, firmware 0x08015868): not stored */
+  live: FakeEffect | undefined;
   bri = 204;
+  /** LED grid of the attribute reply (A68 firmware 0x0801f5c8: 5 x 15) */
+  rows = 5;
+  cols = 15;
+  /** volatile LED matrix (RAM 0x20006b18): 3 bytes per cell at row * cols * 3 + col * 3, as sent */
+  matrix: number[] = new Array<number>(5 * 15 * 3).fill(0);
+  /** power-up animation still running (0x20007360): FRAME answers "done" but drops the data */
+  startup = false;
+  /** test hook: FRAME answers status 3 (rejected) */
+  rejectFrames = false;
+  /** effects whose init redrew the matrix (anything but 18), in order */
+  redraws: number[] = [];
   /** global travel, device units */
   global = 240; // 1.2 mm
   /** TravelVersion of the product (0 = 1-byte values) */
@@ -92,6 +134,7 @@ export class FakeDareu {
     this.tv = p?.tv ?? 1;
     // product default global travel, in device units
     if (p?.gt) this.global = Math.round(p.gt[4] / (p.gt[5] * (this.tv >= 2 ? 0.5 : 1)));
+    if (o.stream) this.effects = [...this.effects, LIVE_EFFECT];
     const id = o.reportId ?? 0;
     this.collections = [
       { usagePage: 0x0c, usage: 0x01, type: 1, children: [], inputReports: [], outputReports: [], featureReports: [{ reportId: id, items: [] }] },
@@ -150,6 +193,37 @@ export class FakeDareu {
     return buf;
   }
 
+  liveEffect(): FakeEffect {
+    return this.live ?? this.effect;
+  }
+
+  /** Effect init (0x0801e464): 18 leaves the matrix alone, 0 clears it, others draw over it. */
+  private applied(e: FakeEffect) {
+    if (e.effect === LIVE_EFFECT) return;
+    this.redraws.push(e.effect);
+    const c = e.effect === 0 ? [0, 0, 0] : (e.colors[0] ?? [0x10, 0x20, 0x30]);
+    for (let i = 0; i < this.matrix.length; i++) this.matrix[i] = c[i % 3];
+  }
+
+  /** FRAME row mode (0x0801eb5c): [region, flags, row, first, last, 3 bytes per cell]; false = rejected */
+  private frameWrite(pl: number[]): boolean {
+    const [region, flags, row, first, last] = pl;
+    if (region !== this.regions[0]) return false;
+    check((flags & 0x7f) === 1, 'FRAME mode (only row mode is sent)');
+    if (row >= this.rows || first > last || last >= this.cols) return false;
+    for (let c = first; c <= last; c++) {
+      for (let k = 0; k < 3; k++) this.matrix[row * this.cols * 3 + c * 3 + k] = pl[5 + 3 * (c - first) + k];
+    }
+    // bit 7: switch to 18 live when another effect runs (0x0801ed78)
+    if (flags & 0x80 && this.liveEffect().effect !== LIVE_EFFECT) this.live = { effect: LIVE_EFFECT, flag: 0, speed: 0, colors: [] };
+    return true;
+  }
+
+  /** the matrix as 0xAABBCC per cell (bytes in the order sent) */
+  cells(): number[] {
+    return Array.from({ length: this.rows * this.cols }, (_, i) => (this.matrix[3 * i] << 16) | (this.matrix[3 * i + 1] << 8) | this.matrix[3 * i + 2]);
+  }
+
   key(id: number): FakeKey {
     return this.keys.get(id) ?? { func: 0, travel: 0, press: 0, release: 0 };
   }
@@ -168,8 +242,8 @@ export class FakeDareu {
     check(id === (this.o.reportId ?? 0), 'report id');
     const f = new Uint8Array(data as Uint8Array);
     check(f.length === REPORT_SIZE, 'length');
-    // the driver must never put a disallowed frame on the wire
-    check(allowed(f), 'frame ' + Array.from(f.slice(0, 12)).join(' '));
+    // the driver must never put a disallowed frame on the wire (allowedStream: live-lighting path only)
+    check(allowed(f) || allowedStream(f), 'frame ' + Array.from(f.slice(0, 12)).join(' '));
     this.sent.push(f);
     this.reply = undefined;
     const w = !this.o.ignoreWrites;
@@ -241,22 +315,38 @@ export class FakeDareu {
         const [total, off] = pl;
         return this.answer(f, [total, off, ...this.regions.slice(off, off + 48)]);
       }
-      if (cmd === LED.ATTRIBUTE) return this.answer(f, [pl[0], 1, 30, 15, 5, this.effects.length, ...this.effects]);
+      // [region, type 4, fps 33, rows, cols, n, effects] (A68 0.4.6, 0x080154dc)
+      if (cmd === LED.ATTRIBUTE) return this.answer(f, [pl[0], 4, 33, this.rows, this.cols, this.effects.length, ...this.effects]);
       if (cmd === LED.EFFECT && get) {
-        const e = this.effect;
+        // profile 0 = the live state (0x0801eacc), otherwise the stored one
+        const e = f[4] === 0 ? this.liveEffect() : this.effect;
         return this.answer(f, [pl[0], e.effect, e.flag, e.speed, e.colors.length, ...e.colors.flat()]);
       }
       if (cmd === LED.EFFECT) {
         const n = pl[4];
+        check(f[4] <= 3, 'effect profile'); // firmware rejects profile bytes over 3
         if (w) {
-          this.effect = {
+          const next = {
             effect: pl[1],
             flag: pl[2],
             speed: pl[3],
             colors: Array.from({ length: n }, (_, i) => pl.slice(5 + 3 * i, 8 + 3 * i)),
           };
+          if (f[4] === 0) this.live = next; // live only (0x08015868: no store)
+          else {
+            this.effect = next;
+            this.live = undefined;
+          }
+          this.applied(next);
         }
         return this.answer(f, []);
+      }
+      if (cmd === LED_PROBE.FRAME && !get) {
+        // dispatcher 0x08014aec, then 0x0801eae0 (row mode only: the driver sends nothing else)
+        const ok = f[1] <= MAX_REQUEST_SIZE && (this.startup || this.frameWrite(pl));
+        this.answer(f, pl);
+        if (!ok || this.rejectFrames) this.reply![0] = 0x03;
+        return;
       }
       if (get && (Object.values(LED_PROBE) as number[]).includes(cmd)) {
         const mode = this.o.ledProbe ?? 'firmware';

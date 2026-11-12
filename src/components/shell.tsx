@@ -45,14 +45,14 @@ function DeviceTab({ d, active }: { d: DeviceState; active: boolean }) {
 }
 
 export function TopBar({ activeId, profile, onProfile }: { activeId?: string; profile?: Choice; onProfile?: (v: number) => void }) {
-  const { devices, connect, scan, scanning, supported } = useDevices()
+  const { devices, requestConnect, scan, scanning, supported } = useDevices()
   return (
     <header className="relative z-20 flex h-[76px] items-center justify-between px-10">
       <Link to="/" className="display text-[12px] tracking-[0.3em] text-[var(--text)] no-underline">INPUTDECK</Link>
       <nav aria-label="Devices" className="pill-glass absolute left-1/2 flex -translate-x-1/2 items-center gap-1 p-1">
         {devices.map((d) => <DeviceTab key={d.id} d={d} active={d.id === activeId} />)}
         {supported && (
-          <button type="button" onClick={() => void connect()} aria-label="Connect a device" title="Connect a device"
+          <button type="button" onClick={requestConnect} aria-label="Connect a device" title="Connect a device"
             className="grid size-10 place-items-center rounded-full border border-dashed border-white/20 text-[var(--text-2)] hover:text-[var(--text)]">
             <Plus className="size-4" />
           </button>

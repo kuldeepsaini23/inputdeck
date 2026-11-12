@@ -7,7 +7,7 @@ import { slug, useDevices } from '#/lib/device-context'
 export const Route = createFileRoute('/')({ component: Welcome })
 
 function Welcome() {
-  const { devices, connect, scanning, supported } = useDevices()
+  const { devices, requestConnect, scanning, supported } = useDevices()
   const navigate = useNavigate()
   // open the first device the first time one shows up (already-allowed devices reconnect by themselves)
   const opened = useRef(false)
@@ -30,7 +30,7 @@ function Welcome() {
             DPI, polling rate, buttons, per-key actuation, Rapid Trigger and lighting — saved straight to your mouse and keyboard. Nothing to install.
           </p>
           {supported ? (
-            <button type="button" onClick={() => void connect()} disabled={scanning}
+            <button type="button" onClick={requestConnect} disabled={scanning}
               className="plat display mt-8 flex items-center gap-2.5 rounded-full px-7 py-[15px] text-[13px] font-semibold shadow-[0_0_30px_rgb(230_232_236/0.3)] disabled:opacity-60">
               <Usb className="size-4" /> Connect a device
             </button>

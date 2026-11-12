@@ -60,6 +60,21 @@ export const MACRO_ID_MAX = 254;
 export const DEV = { FW_VER: 0, POLLING: 4 } as const;
 /** class 3 */
 export const LED = { ID_LIST: 0, ATTRIBUTE: 1, EFFECT: 2, BRIGHTNESS: 3 } as const;
+/**
+ * Lighting command ids the vendor JS defines but never sends (LED_CMD_FRAME 4, LED_CMD_CAL_DATA 5,
+ * LED_CMD_CUSTOM 8) plus the unnamed 6 / 7. diagnose() sends their GET forms (0x84..0x88) only.
+ *
+ * From the official A68 firmware 0.4.6 (TK53H_PID0175_FirmwareUpdater_v0.4.6, app image at
+ * 0x08008000, class-3 handler 0x08015430): SET ids 2..7 and GET ids 0x80..0x87 are dispatched,
+ * everything else falls to "unsupported" (status 5). GET 0x84 (FRAME read) = unsupported, GET 0x85
+ * = no-op (status 2, nothing written), GET 0x86 / 0x87 = unsupported, 0x88 (CUSTOM) = out of range =
+ * unsupported. So none of them can change anything on that build. SET 4 (FRAME, 0x0801eae0) writes a
+ * volatile 5 x 15 RGB buffer used by effect 18 (streaming); there is no way to read it back.
+ */
+export const LED_PROBE = { FRAME: 4, CAL_DATA: 5, CMD6: 6, CMD7: 7, CUSTOM: 8 } as const;
+const LED_PROBE_IDS: readonly number[] = Object.values(LED_PROBE);
+/** (pid, firmware) builds whose lighting handler was read from the official image: the only ones probed with 0x84..0x88 */
+export const LED_PROBE_BUILDS: readonly { pid: number; fw: string }[] = [{ pid: 0x0175, fw: '0.4.6' }];
 /** class 5 */
 export const PFL = { ID_LIST: 0, ACTIVE: 3 } as const;
 /** class 13 */
@@ -321,6 +336,8 @@ export function allowed(f: ArrayLike<number>): boolean {
         return total >= 1 && off < total && size === 2 + Math.min(48, total - off) && zeroFrom(2);
       }
       if (get && cmd === LED.ATTRIBUTE) return size === 1 && prof === 0 && zeroFrom(1);
+      // diagnose(): GET forms only of the never-used lighting ids (see LED_PROBE); [region]
+      if (get && LED_PROBE_IDS.includes(cmd)) return size === 1 && prof === 0 && pl(0) < 16 && zeroFrom(1);
       if (get && cmd === LED.EFFECT) return size === 1 && profOk && zeroFrom(1);
       if (get && cmd === LED.BRIGHTNESS) return size === 2 && profOk && zeroFrom(1);
       if (!get && cmd === LED.BRIGHTNESS) return size === 2 && profOk && zeroFrom(2);
@@ -826,6 +843,25 @@ class Link {
     throw new Error(`no answer for ${hex2(f[2])}/${hex2(f[3])}`);
   }
 
+  /**
+   * Like xfer but for diagnose(): also returns error / unsupported replies (status 3 / 5 etc.)
+   * instead of waiting them out, and never throws on silence (`status` -1, last bytes seen).
+   */
+  async probe(f: Uint8Array<ArrayBuffer>): Promise<{ status: number; reply: Uint8Array }> {
+    this.check(f);
+    await this.dev.sendFeatureReport(this.reportId, f);
+    let last: Uint8Array = new Uint8Array(REPORT_SIZE);
+    for (let i = 0; i < dareuTiming.tries; i++) {
+      const dv = await this.dev.receiveFeatureReport(this.reportId);
+      last = normalizeReply(new Uint8Array(dv.buffer.slice(dv.byteOffset, dv.byteOffset + dv.byteLength)));
+      const st = last[0] & 0x0f;
+      // 0 = nothing yet, 1 = busy; anything else is final. Only trust it if it echoes our class/command.
+      if (st > 1 && last[2] === f[2] && last[3] === f[3]) return { status: st, reply: last };
+      if (dareuTiming.poll > 0) await sleep(dareuTiming.poll);
+    }
+    return { status: -1, reply: last };
+  }
+
   /** Fire-and-forget write (the vendor sends the polling rate this way). */
   async send(f: Uint8Array<ArrayBuffer>): Promise<void> {
     this.check(f);
@@ -911,6 +947,111 @@ class Dareu implements Driver {
   }
   async close(): Promise<void> {
     if (this.link.dev.opened) await this.link.dev.close();
+  }
+
+  /**
+   * Read-only probe of the lighting commands behind per-key RGB (see LED_PROBE). Every frame is a
+   * GET (bit 0x80 of byte 3); the undocumented ids 0x84..0x88 go out only on builds listed in
+   * LED_PROBE_BUILDS, whose firmware handler we read and know to be side-effect free.
+   */
+  diagnose(onProgress?: (done: number, total: number) => void): Promise<string> {
+    return this.link.lock(() => this.diagnoseInner(onProgress));
+  }
+
+  private async diagnoseInner(onProgress?: (done: number, total: number) => void): Promise<string> {
+    const t0 = Date.now();
+    const budget = 9000;
+    const lines: string[] = [];
+    const d = this.link.dev;
+    lines.push(`InputDeck DAREU diagnose v1 - ${this.product.name} (${this.id}, FwType ${this.product.fw})`);
+    lines.push('Only GET (read) requests were sent. Format: request bytes -> status, reply bytes (trailing zeros cut), meaning.');
+    const STATUS: Record<number, string> = { [-1]: 'no answer', 0: 'idle', 1: 'busy', 2: 'done', 3: 'rejected', 4: 'status 4', 5: 'unsupported' };
+    const trim = (r: Uint8Array) => {
+      let n = r.length;
+      while (n > PAYLOAD && r[n - 1] === 0) n--;
+      return hexs(r.slice(0, n));
+    };
+    let done = 0;
+    let total = 6;
+    const tick = () => onProgress?.(++done, Math.max(total, done));
+    const ask = async (label: string, f: Uint8Array<ArrayBuffer>, explain: (p: Uint8Array) => string) => {
+      if (Date.now() - t0 > budget) {
+        lines.push(`${label}: skipped (time budget used up)`);
+        tick();
+        return undefined;
+      }
+      let res: { status: number; reply: Uint8Array };
+      try {
+        res = await this.link.probe(f);
+      } catch (e) {
+        lines.push(`${label}: ${hexs(f.slice(0, PAYLOAD + 2))} -> error: ${e instanceof Error ? e.message : String(e)}`);
+        tick();
+        return undefined;
+      }
+      const st = STATUS[res.status] ?? `status ${res.status}`;
+      let meaning = '';
+      if (res.status === 2) {
+        try {
+          meaning = explain(res.reply.slice(PAYLOAD));
+        } catch {
+          meaning = '(could not decode)';
+        }
+      }
+      lines.push(`${label}: ${hexs(f.slice(0, PAYLOAD + 2))} -> ${st}: ${trim(res.reply)}${meaning ? ` = ${meaning}` : ''}`);
+      tick();
+      return res.status === 2 ? res.reply : undefined;
+    };
+
+    const fwR = await ask('firmware', fwVerPkt(), (p) => `version ${p[0]}.${p[1]}.${p[2]}`);
+    const fw = fwR ? fwVersion(fwR) : this.fw;
+    const prR = await ask('active profile', activeProfilePkt(), () => 'see byte 4');
+    const profile = prR ? prR[4] : this.profile;
+    if (prR) lines[lines.length - 1] = lines[lines.length - 1].replace('see byte 4', `profile ${profile}`);
+
+    // regions (multi-packet, total at payload[0])
+    let regions: number[] = [];
+    const cnt = await ask('region count', regionCountPkt(), (p) => `${p[0]} region id(s)`);
+    if (cnt && cnt[PAYLOAD] > 0) {
+      const n = Math.min(cnt[PAYLOAD], 48);
+      const ch = await ask('region ids', regionChunkPkt(n, 0), (p) => `ids ${Array.from(p.slice(2, 2 + n)).join(', ')}`);
+      if (ch) regions = mergeRegions(Array.from(ch.slice(PAYLOAD + 2, PAYLOAD + 2 + n)));
+    } else tick();
+    const region = regions[0] ?? 0;
+    const extra = regions.slice(1, 3);
+    const probeBuild = LED_PROBE_BUILDS.some((b) => b.pid === d.productId && b.fw === fw);
+    total = done + 3 + extra.length + (probeBuild ? LED_PROBE_IDS.length : 0);
+
+    for (const rg of [region, ...extra]) {
+      await ask(`attribute r${rg}`, attributePkt(rg), (p) => {
+        const n = p[5];
+        const fx = Array.from(p.slice(6, 6 + n));
+        const custom = fx.filter((e) => e >= 13 && e <= 17);
+        const notes = [
+          custom.length ? `custom frame effect(s) ${custom.join(', ')} PRESENT` : 'no custom frame effect (13-17)',
+          fx.includes(18) ? 'streaming effect 18 PRESENT' : 'no streaming effect 18',
+        ];
+        return `type ${p[1]}, fps ${p[2]}, matrix ${p[3]} x ${p[4]}, ${n} effects [${fx.join(', ')}]; ${notes.join('; ')}`;
+      });
+    }
+    await ask(`effect r${region} p${profile}`, getEffectPkt(profile, region), (p) => {
+      const n = p[4];
+      return `effect ${p[1]} (${effectName(p[1])}), flag ${hex2(p[2])}, speed ${p[3]}, ${n} colour(s)`;
+    });
+    await ask(`brightness r${region} p${profile}`, getBrightnessPkt(profile, region), (p) => `${p[1]} / 255`);
+
+    if (probeBuild) {
+      const names: Record<number, string> = { 4: 'FRAME', 5: 'CAL_DATA', 6: 'cmd 6', 7: 'cmd 7', 8: 'CUSTOM' };
+      for (const cmd of LED_PROBE_IDS) {
+        const f = frame(CLS.LIGHTING, cmd | GET, 1, 0, [region]);
+        await ask(`GET ${names[cmd]} (03/${hex2(cmd | GET)}) r${region}`, f, (p) =>
+          p.some((b, i) => i > 0 && b !== 0) ? 'ANSWERED WITH DATA (unexpected - please send this report)' : 'answered, no data');
+      }
+      lines.push('Expected on A68 0.4.6 (from its firmware): FRAME/cmd 6/cmd 7/CUSTOM unsupported, CAL_DATA done with no data.');
+    } else {
+      lines.push(`Undocumented lighting GETs (03/84..88) not sent: only verified on ${LED_PROBE_BUILDS.map((b) => `PID ${b.pid.toString(16).padStart(4, '0')} fw ${b.fw}`).join(', ')}; this board is PID ${d.productId.toString(16).padStart(4, '0')} fw ${fw ?? '?'}.`);
+    }
+    lines.push(`took ${Date.now() - t0} ms`);
+    return lines.join('\n');
   }
 
   async identify(): Promise<string> {

@@ -20,6 +20,13 @@
 //   63    live travel test on/off (samples arrive on report 6)
 //   67/66 key type table (1 byte per key, 128 per profile): 20 normal, 24 DKS, 25 RS, 26 SOCD, 27 HT
 //   56/46 SOCD table (4 bytes per key, 512 per profile): [partner, prio<<4 | slot<<3 | rt, travel u16]
+//   1B    LED location (1 byte per key index = its LED index), read once at start-up (READ_DEFAULT_LIGHT)
+//   21    LED colours (ledLength 480 = 160 LEDs x R,G,B; LEDs 70..159 = side light strip, bytes 210..479).
+//         The official pollLedColor reads it for the on-screen preview, but the shipped app has it
+//         switched off (`const ok=!1`), so it is only used by diagnose().
+// Per-key colours: the Hyzen has none. Lofree HUB has no write for 1B/21 or any other colour table,
+// and every main-backlight effect (00..0B) is a whole-board effect with one colour or rainbow,
+// set through the function area (06). Only diagnose() reads 1B/21.
 //
 // NEVER send: 0D (factory reset), 40/44/50 (calibration), 1a / AA, firmware update (other
 // interfaces), or any write not listed in `allowed()`. Every frame is checked by `allowed()`.
@@ -68,7 +75,15 @@ export const CMD = {
   WRITE_KEY_TYPE: 0x66,
   READ_SOCD: 0x56,
   WRITE_SOCD: 0x46,
+  READ_LED_MAP: 0x1b,
+  READ_LED_COLORS: 0x21,
 } as const;
+
+/** LED colour table (official basicInfo.ledLength): 160 LEDs x 3 bytes R,G,B */
+export const LED_BYTES = 480;
+/** side light strip inside the LED colour table (official lightConfig.lightStrip) */
+export const STRIP_START = 210;
+export const STRIP_LEDS = 90;
 
 /** key types (table 67/66) */
 export const KEY_NORMAL = 0x20;
@@ -273,6 +288,13 @@ export function describeRt(press: number, release: number, maxRaw: number, maxMm
 
 const hex2 = (b: number) => b.toString(16).toUpperCase().padStart(2, '0');
 const hexs = (p: ArrayLike<number>) => Array.from(p, hex2).join(' ');
+/** A whole frame as hex, trailing zero bytes folded into a count. */
+export function rawHex(p: ArrayLike<number>): string {
+  let n = p.length;
+  while (n > 0 && p[n - 1] === 0) n--;
+  const zeros = p.length - n;
+  return `${hexs(Array.from(p).slice(0, n))}${zeros ? `${n ? ' ' : ''}+${zeros}x00` : ''}`;
+}
 
 /** [cmd, table size] of every read we use */
 const READS = new Map<number, number>([
@@ -286,6 +308,8 @@ const READS = new Map<number, number>([
   [CMD.READ_RT, KEY_SLOTS * 4 * PROFILES],
   [CMD.READ_KEY_TYPE, KEY_SLOTS * PROFILES],
   [CMD.READ_SOCD, KEY_SLOTS * 4 * PROFILES],
+  [CMD.READ_LED_MAP, KEY_SLOTS],
+  [CMD.READ_LED_COLORS, LED_BYTES],
 ]);
 /** [cmd, table size] of every write we use */
 const WRITES = new Map<number, number>([
@@ -482,34 +506,54 @@ class Link {
     });
   }
 
-  private async transaction(read: boolean, cmd: number, frames: number[][], offs: number[]): Promise<number[]> {
+  /**
+   * One START / frames / END transaction. With `trace`, every frame sent and every reply is logged
+   * raw, and a read that stops answering mid-way gets a best-effort END so the next one starts clean.
+   */
+  private async transaction(read: boolean, cmd: number, frames: number[][], offs: number[], trace?: string[]): Promise<number[]> {
     const name = `${read ? 'read' : 'write'} ${hex2(cmd)}`;
     // validate everything before the first byte goes out
     for (const f of [startPkt(read, this.size), ...frames, endPkt(read, this.size)]) {
       if (!allowed(f, this.size)) throw new Error(`refusing to send ${hexs(f.slice(0, 8))}`);
     }
-    await this.exchange(startPkt(read, this.size), (d) => d[2] === 0x01, `${name} start`);
+    const step = async (p: number[], want: (d: Uint8Array) => boolean, what: string) => {
+      trace?.push(`  > ${rawHex(p)}`);
+      try {
+        const d = await this.exchange(p, want, what);
+        trace?.push(`  < ${rawHex(d)}`);
+        return d;
+      } catch (e) {
+        trace?.push(`  < (${e instanceof Error ? e.message : String(e)})`);
+        throw e;
+      }
+    };
+    await step(startPkt(read, this.size), (d) => d[2] === 0x01, `${name} start`);
     const out: number[] = [];
     for (let i = 0; i < frames.length; i++) {
       const off = offs[i];
-      const d = await this.exchange(
-        frames[i],
-        (r) => (r[2] === cmd || r[2] === 0) && r.length >= 7 && (r[4] | (r[5] << 8)) === off,
-        name,
-      );
+      let d: Uint8Array;
+      try {
+        d = await step(frames[i], (r) => (r[2] === cmd || r[2] === 0) && r.length >= 7 && (r[4] | (r[5] << 8)) === off, name);
+      } catch (e) {
+        if (trace && read) {
+          trace.push('  closing the read:');
+          await step(endPkt(read, this.size), (r) => r[2] === 0x02, `${name} end`).catch(() => undefined);
+        }
+        throw e;
+      }
       if (read) {
         const len = Math.min(frames[i][3], d[3] || frames[i][3]);
         for (let k = 0; k < len; k++) out.push(d[7 + k] ?? 0);
       }
     }
-    await this.exchange(endPkt(read, this.size), (d) => d[2] === 0x02, `${name} end`);
+    await step(endPkt(read, this.size), (d) => d[2] === 0x02, `${name} end`);
     return out;
   }
 
-  /** Read `len` bytes of table `cmd` at byte offset `off`. */
-  async read(cmd: number, len: number, off = 0): Promise<number[]> {
+  /** Read `len` bytes of table `cmd` at byte offset `off` (`trace` collects the raw frames). */
+  async read(cmd: number, len: number, off = 0, trace?: string[]): Promise<number[]> {
     const frames = readFrames(cmd, len, off, this.size);
-    const d = await this.transaction(true, cmd, frames, frames.map((f) => f[4] | (f[5] << 8)));
+    const d = await this.transaction(true, cmd, frames, frames.map((f) => f[4] | (f[5] << 8)), trace);
     if (d.length < len) throw new Error(`short reply for ${hex2(cmd)}`);
     return d.slice(0, len);
   }
@@ -613,6 +657,106 @@ class Hyzen implements Driver {
       this.link.listeners.delete(l);
       await this.link.lock(() => this.link.write(CMD.LIVE_TRAVEL, []));
     };
+  }
+
+  /**
+   * Read-only probe of the lighting state: firmware, function area (effect bytes), key matrix,
+   * LED location map (1B) and LED colours (21, twice, to see whether it is a live frame).
+   * Sends only read transactions (START/END with 18, read commands from READS).
+   */
+  diagnose(onProgress?: (done: number, total: number) => void): Promise<string> {
+    return this.link.lock(() => this.diagnoseInner(onProgress));
+  }
+
+  private async diagnoseInner(onProgress?: (done: number, total: number) => void): Promise<string> {
+    const out: string[] = [
+      'Lofree Hyzen diagnostics (read-only)',
+      `model ${this.name}, pid ${hex4(this.pid)}, ${this.dongle ? '2.4G receiver' : 'wired'}, ${this.link.size}-byte frames`,
+    ];
+    const total = this.dongle ? 8 : 7;
+    let done = 0;
+    onProgress?.(0, total);
+    const probe = async (title: string, cmd: number, len: number, off = 0): Promise<number[] | undefined> => {
+      const trace: string[] = [];
+      out.push('', `## ${title}: read ${hex2(cmd)}, ${len} bytes at ${off}`);
+      try {
+        const d = await this.link.read(cmd, len, off, trace);
+        out.push(...trace);
+        return d;
+      } catch (e) {
+        out.push(...trace, `  FAILED: ${e instanceof Error ? e.message : String(e)}`);
+        return undefined;
+      } finally {
+        onProgress?.(++done, total);
+      }
+    };
+    const note = (s: string) => out.push(`  = ${s}`);
+    const rgbHex = (d: ArrayLike<number>, i: number) => `#${hex2(d[i])}${hex2(d[i + 1])}${hex2(d[i + 2])}`;
+
+    const ver = await probe('firmware version', CMD.READ_VERSION, 2);
+    if (ver) note(`firmware ${versionNumber(ver)}`);
+    if (this.dongle) {
+      const dv = await probe('receiver version', CMD.READ_DONGLE_VERSION, 2);
+      if (dv) note(`receiver firmware ${versionNumber(dv)}`);
+    }
+
+    const pb = await probe('active profile', CMD.READ_FUNC, 1, 0);
+    let profile = 0;
+    if (pb) {
+      if (pb[0] < PROFILES) profile = pb[0];
+      note(pb[0] < PROFILES ? `profile ${pb[0] + 1}` : `profile byte ${hex2(pb[0])} out of range, using profile 1 below`);
+    }
+    const block = await probe(`function area, profile ${profile + 1}`, CMD.READ_FUNC, PROFILE_SIZE, profile * PROFILE_SIZE);
+    if (block) {
+      const mode = block[L_MODE];
+      const name = LIGHT_MODES.find(([, m]) => m === mode)?.[0] ?? 'unknown';
+      note(`main backlight: effect ${hex2(mode)} (${name}), speed byte ${block[L_SPEED]}, colour flag ${block[L_CUSTOM]}, colour ${rgbHex(block, L_RGB)}, brightness ${block[L_BRI]}/${BRI_RAW_MAX}`);
+      note(`switch mode byte ${hex2(block[SWITCH_TYPE])} (01 mechanical, 02 magnetic)`);
+    }
+
+    const matrix = await probe('default key matrix', CMD.READ_DEF_MATRIX, MATRIX_SIZE);
+    const idx = matrix ? keyIndices(matrix) : this.idx;
+    if (matrix && idx) {
+      const missing = HYZEN_LAYOUT.filter((_, i) => idx[i] < 0).map(([, l]) => l);
+      note(`${idx.length - missing.length}/${idx.length} layout keys found${missing.length ? `, missing: ${missing.join(' ')}` : ''}`);
+    }
+
+    const map = await probe('LED location map (1B)', CMD.READ_LED_MAP, KEY_SLOTS);
+    if (map && idx) {
+      const leds = idx.map((k) => (k >= 0 ? map[k] : -1));
+      const used = leds.filter((l) => l >= 0);
+      const dup = used.filter((l, i) => used.indexOf(l) !== i);
+      note(`key -> LED: ${HYZEN_LAYOUT.map(([, l], i) => `${l}:${idx[i] < 0 ? '-' : `${idx[i]}->${leds[i]}`}`).join(' ')}`);
+      if (used.length) {
+        note(`${new Set(used).size} distinct LEDs for ${used.length} keys${dup.length ? `, shared: ${[...new Set(dup)].join(' ')}` : ''}; LED range ${Math.min(...used)}..${Math.max(...used)}`);
+      }
+    }
+
+    const c1 = await probe('LED colours (21)', CMD.READ_LED_COLORS, LED_BYTES);
+    if (c1) {
+      if (map && idx) {
+        const keyCol = HYZEN_LAYOUT.map(([, l], i) => {
+          const led = idx[i] >= 0 ? map[idx[i]] : -1;
+          return `${l}:${led >= 0 && led * 3 + 2 < LED_BYTES ? rgbHex(c1, led * 3) : '-'}`;
+        });
+        note(`key colours (R,G,B as Lofree HUB reads them): ${keyCol.join(' ')}`);
+      }
+      const strip = Array.from({ length: STRIP_LEDS }, (_, i) => rgbHex(c1, STRIP_START + i * 3));
+      note(`light strip (${STRIP_LEDS} LEDs from byte ${STRIP_START}): ${strip.join(' ')}`);
+      note(`${new Set(Array.from({ length: LED_BYTES / 3 }, (_, i) => rgbHex(c1, i * 3))).size} distinct colours over ${LED_BYTES / 3} LEDs`);
+    }
+    const c2 = await probe('LED colours again (live or stored?)', CMD.READ_LED_COLORS, LED_BYTES);
+    if (c1 && c2) {
+      const diff = c1.reduce((n, b, i) => n + (b !== c2[i] ? 1 : 0), 0);
+      note(diff ? `${diff} of ${LED_BYTES} bytes changed between the two reads: a live frame of the running effect` : 'identical to the first read (static effect, or a stored table)');
+    }
+
+    out.push(
+      '',
+      'Notes: Lofree HUB has no command that writes per-key colours for the Hyzen. It reads 1B once at start-up;',
+      'its 21 poll (pollLedColor) is switched off in the shipped app. Effects 00..0B use one colour or rainbow (function area).',
+    );
+    return out.join('\n');
   }
 
   async close(): Promise<void> {

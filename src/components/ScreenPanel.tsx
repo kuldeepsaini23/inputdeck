@@ -140,7 +140,8 @@ export function ScreenCards({ ed }: { ed: ScreenEditor }) {
           {Array.from({ length: sc.slots }, (_, i) => {
             const d = drafts[i]
             if (showStored && stored[i]) {
-              const p = lastSent[i]
+              // only trust our remembered previews when the receiver holds as many pictures as we last sent
+              const p = lastSent.length === stored.length ? lastSent[i] : undefined
               return (
                 <button key={`s${i}`} type="button" data-press disabled={busy} onClick={() => input.current?.click()} title={`On the receiver: ${stored[i]}. Add pictures to replace them.`}
                   aria-label={`Picture ${i + 1} on the receiver, ${stored[i]}. Add pictures to replace`}
@@ -197,7 +198,8 @@ export function ScreenCards({ ed }: { ed: ScreenEditor }) {
         {error && <p role="alert" className="mt-3 mb-0 text-[12px] text-[var(--err)]">{error}</p>}
       </Card>
       {lastSent.length > 0 && (
-        <Card title="Last sent from InputDeck">
+        <Card title="Last sent from this browser">
+          <p className="mt-0 mb-3 text-[11px] leading-snug text-[var(--text-3)]">Remembered here, not read from the receiver: if the screen was changed since (another browser, WLMouse's app), it may show something else.</p>
           <div className="flex gap-2">{lastSent.map((p, i) => <img key={i} src={p} alt={`Sent picture ${i + 1}`} className="size-12 rounded-full object-cover" />)}</div>
         </Card>
       )}

@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FAKE_DEF, FakeVia, type FakeViaOpts } from './fakes/fake-via';
 import type { Driver, Setting, Value } from './types';
 import {
@@ -24,6 +24,11 @@ import {
 let defs: Record<number, unknown> = {};
 const fetched: string[] = [];
 
+// tests shorten the shared timings; put the real ones back afterwards
+const realTiming = { ...viaConfig };
+afterAll(() => {
+  Object.assign(viaConfig, realTiming);
+});
 beforeAll(() => {
   viaConfig.reply = 40;
   viaConfig.fetch = async (url: string) => {

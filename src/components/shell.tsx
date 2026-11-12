@@ -1,6 +1,6 @@
 import { Link } from '@tanstack/react-router'
 import { Keyboard, Mouse, Plus, RefreshCw } from 'lucide-react'
-import { pendingChanges, type DeviceState } from '#/devices'
+import { exitDemo, pendingChanges, unitNumber, type DeviceState } from '#/devices'
 import { slug, useDevices } from '#/lib/device-context'
 import { cn } from '#/lib/utils'
 import { Segmented, type Choice } from './kit'
@@ -34,7 +34,7 @@ function DeviceTab({ d, active }: { d: DeviceState; active: boolean }) {
         {img ? <img src={img} alt="" className="h-[28px] w-auto object-contain" /> : d.driver.kind === 'mouse' ? <Mouse className="size-4 opacity-70" /> : <Keyboard className="size-4 opacity-70" />}
       </span>
       <span className="leading-tight">
-        <span className={cn('display block text-[10.5px] tracking-wide', active ? 'text-[var(--text)]' : 'text-[var(--text-2)]')}>{d.driver.model()}</span>
+        <span className={cn('display block text-[10.5px] tracking-wide', active ? 'text-[var(--text)]' : 'text-[var(--text-2)]')}>{d.driver.model()}{unitNumber(d.id) > 1 ? ` #${unitNumber(d.id)}` : ''}</span>
         <span className="display flex items-center gap-1.5 text-[10.5px] text-[rgb(242_242_245/0.5)]">
           <span className={cn('size-[5px] rounded-full', d.error ? 'bg-[var(--err)]' : d.busy ? 'bg-[var(--warn)]' : 'bg-[var(--ok)]')} />
           {sub}
@@ -45,10 +45,18 @@ function DeviceTab({ d, active }: { d: DeviceState; active: boolean }) {
 }
 
 export function TopBar({ activeId, profile, onProfile }: { activeId?: string; profile?: Choice; onProfile?: (v: number) => void }) {
-  const { devices, requestConnect, scan, scanning, supported } = useDevices()
+  const { devices, requestConnect, scan, scanning, supported, demo } = useDevices()
   return (
     <header className="relative z-20 flex h-[76px] items-center justify-between px-10">
-      <Link to="/" className="display text-[12px] tracking-[0.3em] text-[var(--text)] no-underline">INPUTDECK</Link>
+      <div className="flex flex-col items-start gap-1.5">
+        <Link to="/" className="display text-[12px] tracking-[0.3em] text-[var(--text)] no-underline">INPUTDECK</Link>
+        {demo && (
+          <button type="button" onClick={exitDemo} title="Leave demo mode and use your real devices"
+            className="display flex items-center gap-1.5 text-[10.5px] font-semibold text-[var(--text-3)] hover:text-[var(--text)]">
+            <span className="eyebrow rounded-full border border-white/20 px-1.5 py-0.5 !text-[7px]">Demo</span> Exit demo
+          </button>
+        )}
+      </div>
       <nav aria-label="Devices" className="pill-glass absolute left-1/2 flex -translate-x-1/2 items-center gap-1 p-1">
         {devices.map((d) => <DeviceTab key={d.id} d={d} active={d.id === activeId} />)}
         {supported && (

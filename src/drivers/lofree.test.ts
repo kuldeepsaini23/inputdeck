@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FakeLofree, fakeIndex, type FakeLofreeOpts } from './fakes/fake-lofree';
 import type { Driver, Setting, Value } from './types';
 import {
@@ -34,6 +34,11 @@ import type { Socd } from './types';
 const hex = (s: string) => s.split(/\s+/).filter(Boolean).map((b) => parseInt(b, 16));
 const pad = (b: number[], n = 63) => [...b, ...new Array(n - b.length).fill(0)];
 
+// tests shorten the shared timings; put the real ones back afterwards
+const realTiming = { ...lofreeTiming };
+afterAll(() => {
+  Object.assign(lofreeTiming, realTiming);
+});
 beforeAll(() => {
   Object.assign(lofreeTiming, { reply: 50, settle: 0 });
 });

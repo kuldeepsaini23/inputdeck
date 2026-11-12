@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FakeKeyboard, type FakeOpts } from './fakes/fake-keyboard';
 import type { Driver, Setting, Value } from './types';
 import {
@@ -42,6 +42,11 @@ import type { Socd } from './types';
 const hex = (s: string) => s.split(/\s+/).filter(Boolean).map((b) => parseInt(b, 16));
 const pos = (key: number) => W75_CAPS.findIndex((k) => k.index === key);
 
+// tests shorten the shared timings; put the real ones back afterwards
+const realTiming = { ...wraithTiming };
+afterAll(() => {
+  Object.assign(wraithTiming, realTiming);
+});
 beforeAll(() => {
   Object.assign(wraithTiming, { reply: 40, colors: 60, send: 0, page: 0, settle: 0, poll: 0 });
 });

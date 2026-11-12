@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FakeDareu, type FakeDareuOpts } from './fakes/fake-dareu';
 import type { Driver, Setting, Value } from './types';
 import { DAREU_PRODUCTS } from './dareu-products';
@@ -55,6 +55,11 @@ const W = 41;
 const A = 61;
 const FN = 107;
 
+// tests shorten the shared timings; put the real ones back afterwards
+const realTiming = { ...dareuTiming };
+afterAll(() => {
+  Object.assign(dareuTiming, realTiming);
+});
 beforeAll(() => {
   Object.assign(dareuTiming, { poll: 0, tries: 5, pollSettle: 0 });
 });

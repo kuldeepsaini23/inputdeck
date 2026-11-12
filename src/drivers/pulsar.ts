@@ -118,6 +118,8 @@ interface Base {
   r1Live?: boolean;
   /** families keyed by cid/mid */
   catalog?: 'atk';
+  /** official photo when the USB id alone identifies the model */
+  image?: string;
 }
 
 const PULSAR_LOD: [string, number][] = [
@@ -125,7 +127,9 @@ const PULSAR_LOD: [string, number][] = [
   ['1 mm', 1],
   ['2 mm', 2],
 ];
+/** Lamzu hub "Atlantis" (IsCompx): LOD "0.7;1;2", with 0.7 mm stored as code 3 */
 const LAMZU_LOD: [string, number][] = [
+  ['0.7 mm', 3],
   ['1 mm', 1],
   ['2 mm', 2],
 ];
@@ -186,10 +190,11 @@ add(0x3554, [0xf57d], { brand: 'KYSONA', model: 'M600', wireless: false, codec: 
 add(0x3554, [0xf5f4, 0xf5f7, 0xf517], { brand: 'SCYROX', model: 'Scyrox mouse', wireless: true, codec: 's50', maxDpi: 30000, lod: PULSAR_LOD, buttons: true, angle: true });
 add(0x3554, [0xf5f6, 0xf515], { brand: 'SCYROX', model: 'Scyrox mouse', wireless: false, codec: 's50', maxDpi: 30000, lod: PULSAR_LOD, buttons: true, angle: true });
 
+const ATLANTIS_IMG = 'https://lamzu.net/Config/Atlantis/Device_1.png';
 // Lamzu Atlantis generation: own polling bytes (0x10 also means 1000 Hz) and two LOD stops
-add(0x3554, [0xf50f], { brand: 'LAMZU', model: 'Atlantis', wireless: false, codec: 's50', maxDpi: 26000, rates: 'lamzu', lod: LAMZU_LOD, buttons: true, angle: true });
-add(0x3554, [0xf50d], { brand: 'LAMZU', model: 'Atlantis', wireless: true, codec: 's50', maxDpi: 26000, rates: 'lamzu', lod: LAMZU_LOD, buttons: true, angle: true });
-add(0x3554, [0xf510], { brand: 'LAMZU', model: 'Atlantis', wireless: true, codec: 's50', maxDpi: 26000, lod: LAMZU_LOD, buttons: true, angle: true });
+add(0x3554, [0xf50f], { brand: 'LAMZU', model: 'Atlantis', image: ATLANTIS_IMG, wireless: false, codec: 's50', maxDpi: 26000, rates: 'lamzu', lod: LAMZU_LOD, buttons: true, angle: true });
+add(0x3554, [0xf50d], { brand: 'LAMZU', model: 'Atlantis', image: ATLANTIS_IMG, wireless: true, codec: 's50', maxDpi: 26000, rates: 'lamzu', lod: LAMZU_LOD, buttons: true, angle: true });
+add(0x3554, [0xf510], { brand: 'LAMZU', model: 'Atlantis', image: ATLANTIS_IMG, wireless: true, codec: 's50', maxDpi: 26000, lod: LAMZU_LOD, buttons: true, angle: true });
 
 // Teevolution (Terra Pro family, TeevoLink)
 add(0x3554, [0xf520, 0xf522, 0xf523, 0xf5bb], { brand: 'TEEVOLUTION', model: 'Teevolution mouse', wireless: false, codec: 's50', maxDpi: 42000, lod: null, buttons: true, angle: true });
@@ -324,6 +329,7 @@ export function resolveVariant(vid: number, pid: number, cid?: number, mid?: num
     buttons: b.buttons ?? false,
     r1Live: b.r1Live ?? false,
     wireless: b.wireless,
+    image: b.image,
   };
   if (cid === undefined || mid === undefined || (cid === 0 && mid === 0)) return v;
 

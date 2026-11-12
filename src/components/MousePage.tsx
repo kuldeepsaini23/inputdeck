@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
-import { setSkin } from '#/drivers/wlmouse'
+import { getSkin, setSkin } from '#/drivers/wlmouse'
 import { Battery, Crosshair, Gauge, Info, Monitor, MousePointerClick, SlidersHorizontal } from 'lucide-react'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '#/components/ui/dialog'
 import type { DeviceState } from '#/devices'
@@ -70,7 +70,7 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
   const battery = textOf(dev, 'battery')
   const pct = battery ? parseInt(battery, 10) : undefined
   const fw = textOf(dev, 'fw')
-  const image = dev.driver.image()
+  let image = dev.driver.image()
   const inGroup = (g: string) => (edit ?? []).filter((s) => s.group === g)
 
   let left: React.ReactNode = null
@@ -82,9 +82,13 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
   const isWl = /wlmouse\.gg/.test(image ?? '')
   // CompX hubs (WLMouse, Lamzu, Arbiter) ship tall photos sized for this box; brand-site photos are square with padding
   const tall = /wlmouse\.gg|lamzu\.net|arbiterstudio\.com/.test(image ?? '')
-  const skinN = Number(/Colors\/(\d+)\.png/.exec(image ?? '')?.[1] ?? 1)
+  // Lamzu's hub has the same photo in several colours as Device_<n>.png
+  const isLamzu = /lamzu\.net\/Config\/[^/]+\/Device_\d+\.png/.test(image ?? '')
+  if (isLamzu && image) image = image.replace(/Device_\d+\.png/, `Device_${getSkin(dev.id)}.png`)
+  const skins = isLamzu ? 6 : 12
+  const skinN = Number((/Colors\/(\d+)\.png/.exec(image ?? '') ?? /Device_(\d+)\.png/.exec(image ?? ''))?.[1] ?? 1)
   const changeSkin = (d: number) => {
-    const n = ((skinN - 1 + d + 12) % 12) + 1
+    const n = ((skinN - 1 + d + skins) % skins) + 1
     setSkin(dev.id, n)
     setSkinTick((x) => x + 1)
   }
@@ -252,7 +256,8 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
                   style={{ clipPath: 'inset(5.4% 25.8% 4.8% 26.9% round 23% / 21%)' }} />
               </div>
             ) : image ? (
-              <img src={image} alt={`${dev.driver.brand()} ${dev.driver.model()}`} className={cn('size-full object-contain drop-shadow-[0_40px_40px_rgb(0_0_0/0.8)]', !tall && 'scale-[1.7]')} />
+              <img src={image} alt={`${dev.driver.brand()} ${dev.driver.model()}`} className={cn('size-full object-contain drop-shadow-[0_40px_40px_rgb(0_0_0/0.8)]', !tall && 'scale-[1.7]')}
+                onError={() => { if (isLamzu && skinN !== 1) { setSkin(dev.id, 1); setSkinTick((x) => x + 1) } }} />
             ) : (
               <MouseArt label={`${dev.driver.brand()} ${dev.driver.model()}`} />
             )}
@@ -282,7 +287,7 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
                 </div>
               )
             })}
-            {isWl && (
+            {(isWl || isLamzu) && (
               <div className="absolute -bottom-12 left-1/2 flex -translate-x-1/2 items-center gap-1 text-[11px] whitespace-nowrap text-[var(--text-3)]">
                 <button type="button" data-press className="grid size-6 place-items-center rounded-full hover:text-[var(--text)]" onClick={() => changeSkin(-1)} aria-label="Previous photo colour"><ChevronLeft className="size-3.5" /></button>
                 Photo colour

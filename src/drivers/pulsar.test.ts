@@ -234,14 +234,18 @@ describe('other CompX-B brands', () => {
     expect([v.brand, v.model, v.codec]).toEqual(['PULSAR', 'X2H', 's50'])
   })
 
-  it('Lamzu Atlantis: own polling table and two LOD stops', async () => {
+  it('Lamzu Atlantis: own polling table and 0.7 / 1 / 2 mm lift-off (0.7 = code 3)', async () => {
     const { fake, drv } = await open({ vendorId: 0x3554, productId: 0xf50f, cid: 1, mid: 1, link: 2, codec: 's50' })
     fake.map[0] = 0x10
     fake.map[1] = 0x45
+    fake.map[0x0a] = 3
+    fake.map[0x0b] = 0x52
     const s = await drv.read()
     const poll = find(s, 'polling').value as Choice
     expect(poll.options.map((o) => o[0])).toEqual(['125 Hz', '250 Hz', '500 Hz', '1000 Hz', '1000 Hz (keep)'])
-    expect((find(s, 'lod').value as Choice).options.map((o) => o[1])).toEqual([1, 2])
+    const lod = find(s, 'lod').value as Choice
+    expect(lod.options).toEqual([['0.7 mm', 3], ['1 mm', 1], ['2 mm', 2]])
+    expect(lod.current).toBe(3)
     expect(drv.brand()).toBe('LAMZU')
   })
 

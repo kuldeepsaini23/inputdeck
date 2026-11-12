@@ -299,7 +299,7 @@ export function setSkin(id: string, n: number | string): void {
   }
 }
 
-function getSkin(id: string): string {
+export function getSkin(id: string): string {
   try {
     return localStorage.getItem(SKIN_PREFIX + id) || '1';
   } catch {

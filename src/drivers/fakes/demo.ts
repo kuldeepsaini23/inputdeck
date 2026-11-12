@@ -13,6 +13,7 @@ export function demoDevices(): HIDDevice[] {
     new FakeMouse().asHid(),
     new FakeKeyboard().asDevice(),
     new FakePulsar().asHid(),
+    new FakePulsar({ vendorId: 0x3554, productId: 0xf510, productName: 'LAMZU Atlantis 8K Receiver', cid: 1, mid: 1, link: 5, codec: 's50' }).asHid(),
     new FakeLogitech({ wired: true }).asHid(),
     new FakeRazer().asHid(),
   ]

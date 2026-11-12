@@ -1,4 +1,5 @@
 // WLMouse ("Compx" page/command framing) - Huan, Huan M, Beast X 8K, Sword X, Ying...
+// Also the other CompX-A brands (Lamzu, Vancer, LunaFury, Attack Shark, CRDRAKO): see CATALOG.
 // Port of the desktop app's src/drivers/wlmouse.rs (hardware-verified) to WebHID.
 //
 // Interface: vendor usage page 0xFFFF (also 0xFF00/0xFF02), feature report 0, 64 data bytes.
@@ -15,6 +16,8 @@ import { sleep as realSleep } from './types';
 const VID = 0x36a7;
 const MOUSE = 2;
 const DONGLE = 0;
+/** shared receivers answer "which mouse is paired" on this target */
+const PAIRING = 1;
 
 const POLLING: [string, number][] = [
   ['125 Hz', 0x08], ['250 Hz', 0x04], ['500 Hz', 0x02], ['1000 Hz', 0x01],
@@ -72,11 +75,146 @@ export const ACTIONS: [string, number, number[]][] = [
 /** Choice value for "whatever is on the button now" (keyboard key, macro...) - never written. */
 export const KEEP = 1000;
 
+// ---------------------------------------------------------------- other CompX-A brands
+//
+// Same firmware family, same page/command framing. Sources (all read as data only):
+// - Lamzu: the official "LAMZU Aurora" web hub, lamzu.net/Config/env-models.json (1.0.38)
+// - Vancer x Arbiter Studio Akitsu: webapp.arbiterstudio.com/Config/env-models.json (1.0.2.3)
+// - LunaFury: the device table inside mouse.lunafury.games (LUNA33 / TYPE33)
+// - Attack Shark R5 Ultra / R6 / R8 and CRDRAKO KO-ONE: OpenMouse's catalog (from Attack Shark Core)
+// Only listed product IDs match: bootloader IDs (373E:B0xx, 37B0:0002/0004/0006/...) never do, and
+// 37B0:003E/003F (Atlantis Mini 54H20, "IsCompx" = other protocol) are deliberately left out.
+
+const LAMZU_VID = 0x37b0;
+const COMPX_VID = 0x373e;
+
+const R1K = [125, 250, 500, 1000];
+const R8K = [500, 1000, 2000, 4000, 8000];
+const RALL = [125, 250, 500, 1000, 2000, 4000, 8000];
+const RV_WIRED = [500, 1000];
+
+const MIN = 60;
+const sleepList = (secs: number[], never = false): [string, number][] => [
+  ...secs.map((v): [string, number] => [v < MIN ? `${v} sec` : `${v / MIN} min`, v]),
+  ...(never ? [['Never', SLEEP_NEVER] as [string, number]] : []),
+];
+/** Lamzu hub "SleepTimeGrade" lists */
+const SLEEP_LAMZU = sleepList([10, 30, MIN, 5 * MIN, 10 * MIN, 30 * MIN]);
+const SLEEP_LAMZU_MIN = sleepList([MIN, 5 * MIN, 10 * MIN, 15 * MIN, 20 * MIN, 25 * MIN]);
+/** Arbiter hub slider: whole minutes 1-30 */
+const SLEEP_VANCER = sleepList([1, 2, 3, 5, 10, 15, 20, 30].map((m) => m * MIN));
+/** LunaFury: 1-30 minutes, or never (0xFFFF) */
+const SLEEP_LUNA = sleepList([1, 2, 3, 5, 10, 15, 20, 30].map((m) => m * MIN), true);
+
+export interface CompxModel {
+  brand: string;
+  name: string;
+  /** official product photo (top-down, transparent) on the brand's own web hub */
+  img?: string;
+  dpiMax: number;
+  /** DPI stages the firmware keeps (the table is always 6 slots / 26 bytes on the wire) */
+  stages: number;
+  /** maker's hub hides separate X/Y DPI */
+  noXY?: boolean;
+  /** maker's hub hides high-speed (hyper) mode */
+  noHyper?: boolean;
+  sleep?: [string, number][];
+}
+
+interface CatalogEntry {
+  /** more than one when a receiver PID is shared by several mice */
+  models: CompxModel[];
+  /** polling rates (Hz) on this connection */
+  rates: number[];
+  /** mouse answers on this target (wired LunaFury / CRDRAKO answer on 0, not 2) */
+  target?: number;
+  /** a receiver shared by several mice: the paired mouse is asked for */
+  paired?: boolean;
+}
+
+const CATALOG = new Map<number, CatalogEntry>();
+const ckey = (vid: number, pid: number) => vid * 0x10000 + pid;
+
+/** register a model: [pid, rates, target?] per connection (wired cable, 1K / 8K receiver) */
+function add(vid: number, m: CompxModel, ...pids: [number, number[], number?][]): void {
+  for (const [pid, rates, target] of pids) {
+    const e = CATALOG.get(ckey(vid, pid));
+    if (e) e.models.push(m);
+    else CATALOG.set(ckey(vid, pid), { models: [m], rates, ...(target !== undefined ? { target } : {}) });
+  }
+}
+
+const lamzuImg = (folder: string) => `https://lamzu.net/Config/${folder}/Device_1.png`;
+const lamzu = (name: string, folder: string, dpiMax = 30000, sleep = SLEEP_LAMZU): CompxModel => ({
+  brand: 'Lamzu', name, img: lamzuImg(folder), dpiMax, stages: 5, sleep,
+});
+
+// Lamzu on the shared CompX vendor ID
+add(COMPX_VID, lamzu('Maya X', 'MayaX'), [0x001c, R1K], [0x001d, R1K], [0x001e, R8K]);
+// Lamzu's own vendor ID (Inca generation onwards)
+add(LAMZU_VID, lamzu('Tachi', 'TACHI'), [0x0005, R1K], [0x000b, R1K], [0x000c, R8K]);
+add(LAMZU_VID, lamzu('Inca', 'INCA'), [0x0009, R1K], [0x000f, R1K], [0x0010, R8K]);
+add(LAMZU_VID, lamzu('Maya', 'Maya'), [0x0011, R1K], [0x0013, R1K], [0x0015, R8K]);
+add(LAMZU_VID, lamzu('Paro', 'PARO'), [0x0007, R1K], [0x000d, R1K], [0x000e, R8K]);
+add(LAMZU_VID, lamzu('Thorn', 'THORN'), [0x0017, R1K], [0x0019, R1K], [0x001b, R8K]);
+add(LAMZU_VID, lamzu('Thorn V2', 'THORN'), [0x0021, R1K], [0x0023, R8K]);
+add(LAMZU_VID, lamzu('Tachi Lite', 'TACHI_LITE'), [0x001c, R1K], [0x001e, R8K]);
+add(LAMZU_VID, lamzu('Maya X V2', 'MayaXV2'), [0x001f, R1K], [0x0016, R8K]);
+add(LAMZU_VID, lamzu('Atlantis OG Champion', 'AtlantisOG'), [0x0025, R1K], [0x0027, R8K]);
+add(LAMZU_VID, lamzu('Atlantis Mini', 'AtlantisMini'), [0x0028, R1K], [0x002b, R1K], [0x002a, R8K]);
+add(LAMZU_VID, lamzu('Maya M', 'MayaM'), [0x002c, R8K], [0x002e, R8K]);
+add(LAMZU_VID, lamzu('Thorn V2 (54H20)', 'THORNV2', 50000, SLEEP_LAMZU_MIN), [0x0030, R8K], [0x0032, R8K]);
+add(LAMZU_VID, lamzu('Thorn V2 3955 (54H20)', 'THORNV2_3955', 50000, SLEEP_LAMZU_MIN), [0x0040, R8K], [0x002e, R8K], [0x0032, R8K]);
+add(LAMZU_VID, lamzu('DM198', 'DM198'), [0x0034, R8K], [0x0036, R8K]);
+add(LAMZU_VID, lamzu('DM198 OP', 'DM198_OP'), [0x0038, R8K], [0x0036, R8K]);
+add(LAMZU_VID, lamzu('Maya X (54H20)', 'MayaX'), [0x003a, R8K], [0x003b, R8K]);
+add(LAMZU_VID, lamzu('Maya (54H20)', 'Maya'), [0x003c, R8K], [0x0036, R8K]);
+add(LAMZU_VID, lamzu('Orcus', 'ORCUS', 50000, SLEEP_LAMZU_MIN), [0x0042, R8K], [0x0036, R8K]);
+add(LAMZU_VID, lamzu('Maya X (LM20)', 'MayaX(LM20)', 50000, SLEEP_LAMZU_MIN), [0x0044, R8K], [0x0048, R8K]);
+add(LAMZU_VID, lamzu('Maya M (LM20)', 'MayaM(LM20)', 50000, SLEEP_LAMZU_MIN), [0x0052, R8K], [0x0048, R8K]);
+add(LAMZU_VID, lamzu('Maya (LM20)', 'Maya(LM20)', 50000, SLEEP_LAMZU_MIN), [0x0050, R8K], [0x0048, R8K]);
+add(LAMZU_VID, lamzu('Mini (LM20)', 'Lamzu_mini(LM20)', 50000, SLEEP_LAMZU_MIN), [0x0046, R8K], [0x0054, R8K]);
+add(LAMZU_VID, lamzu('Orcus V2 (LM20)', 'ORCUSV2(LM20)', 50000, SLEEP_LAMZU_MIN), [0x0056, R8K], [0x0048, R8K]);
+/** shared "LAMZU Aurora" receivers: the paired mouse is asked for (00/8B) */
+const LAMZU_RX: CompxModel = { brand: 'Lamzu', name: 'Aurora receiver', dpiMax: 30000, stages: 5, sleep: SLEEP_LAMZU };
+CATALOG.set(ckey(LAMZU_VID, 0x0001), { models: [{ ...LAMZU_RX, name: 'Aurora 8K receiver' }], rates: R8K, paired: true });
+CATALOG.set(ckey(LAMZU_VID, 0x0003), { models: [{ ...LAMZU_RX, name: 'Aurora 1K receiver' }], rates: R1K, paired: true });
+
+// Vancer x Arbiter Studio Akitsu (Arbiter Web HUB device table)
+const ARB = 'https://webapp.arbiterstudio.com/Config';
+const vancer = (name: string, img: string, dpiMax: number): CompxModel => ({
+  brand: 'Vancer', name, img, dpiMax, stages: 5, noXY: true, noHyper: true, sleep: SLEEP_VANCER,
+});
+add(COMPX_VID, vancer('Akitsu 3395', `${ARB}/TD006/Device.png`, 26000), [0x0009, RV_WIRED], [0x000a, R8K]);
+add(COMPX_VID, vancer('Akitsu 3950', `${ARB}/TD006_3950/Device.png`, 30000), [0x0038, RV_WIRED], [0x0039, R8K]);
+add(COMPX_VID, vancer('Akitsu Medium 3950', `${ARB}/Akitsu_M_3950/Device_1.png`, 30000), [0x0066, RV_WIRED], [0x0067, R8K]);
+
+// LunaFury (mouse.lunafury.games device table): wired mice answer on target 0
+const luna = (name: string, stages: number): CompxModel => ({
+  brand: 'LunaFury', name, dpiMax: 30000, stages, noXY: true, sleep: SLEEP_LUNA,
+});
+add(COMPX_VID, luna('LUNA33', 6), [0x0032, R1K, DONGLE], [0x0033, RALL]);
+add(COMPX_VID, luna('TYPE33', 5), [0x0054, RALL, DONGLE], [0x0084, RALL]);
+
+// Attack Shark on CompX (Attack Shark Core device table, via OpenMouse)
+const shark = (name: string): CompxModel => ({ brand: 'Attack Shark', name, dpiMax: 42000, stages: 6 });
+add(COMPX_VID, shark('R5 Ultra'), [0x0046, R1K], [0x0047, RALL]);
+add(COMPX_VID, shark('R6'), [0x0021, R1K], [0x0022, RALL]);
+add(COMPX_VID, shark('R8'), [0x003a, R1K], [0x003b, RALL]);
+
+// CRDRAKO KO-ONE: the wired mouse answers on target 0
+add(COMPX_VID, { brand: 'CRDRAKO', name: 'KO-ONE', dpiMax: 30000, stages: 6 }, [0x006a, RALL, DONGLE], [0x006b, RALL]);
+
+/** catalog entry for a non-WLMouse CompX-A device (exported for tests / UI) */
+export function compxEntry(vid: number, pid: number): Readonly<CatalogEntry> | undefined {
+  return CATALOG.get(ckey(vid, pid));
+}
+
 /** Brands shipping this same "Compx page/command" protocol, by USB vendor ID. */
 function brandOf(vid: number, pid: number): string | null {
   if (vid === VID) return 'WLMouse';
-  if (vid === 0x37b0) return 'Lamzu';
-  if (vid === 0x373e) return 'Compx-based (Lamzu / Attack Shark / CRDRAKO)';
+  const e = CATALOG.get(ckey(vid, pid));
+  if (e) return e.models[0].brand;
   if (vid === 0x258a && ((pid >= 0x2011 && pid <= 0x2014) || (pid >= 0x2022 && pid <= 0x2025))) return 'Glorious (wireless)';
   return null;
 }
@@ -178,10 +316,19 @@ export interface WlMouseOptions {
 
 export class WlMouseDriver implements Driver {
   readonly id: string;
-  readonly family = 'Compx (WLMouse / Lamzu / Glorious wireless)';
+  readonly family = 'Compx (WLMouse / Lamzu / Vancer / LunaFury / Attack Shark / CRDRAKO / Glorious wireless)';
   readonly kind = 'mouse' as const;
 
+  /** only WLMouse is checked on real hardware; other CompX-A brands start read-only */
+  readonly verified: boolean;
+
   private readonly brandName: string;
+  /** catalog entry for non-WLMouse brands (undefined for WLMouse / Glorious) */
+  private readonly entry: CatalogEntry | undefined;
+  /** resolved model of a non-WLMouse brand (null while a shared receiver's mouse is unknown) */
+  private cat: CompxModel | null = null;
+  /** target the mouse answers on (2 through a receiver; some wired mice answer on 0) */
+  private readonly mouse: number;
   private modelName: string | null = null;
   private folder: string | null = null;
   private profile = 1;
@@ -209,6 +356,13 @@ export class WlMouseDriver implements Driver {
     this.delay = opts.sleep ?? realSleep;
     this.id = `${hex4(device.vendorId)}:${hex4(device.productId)}`;
     this.brandName = brandOf(device.vendorId, device.productId) ?? 'Compx';
+    this.verified = device.vendorId === VID;
+    this.entry = device.vendorId === VID ? undefined : CATALOG.get(ckey(device.vendorId, device.productId));
+    this.mouse = this.entry?.target ?? MOUSE;
+    if (this.entry?.models.length === 1 && !this.entry.paired) {
+      this.cat = this.entry.models[0];
+      this.modelName = this.cat.name;
+    }
     // wired mode: the device PID is the mouse's own PID
     const m = modelInfo(device.vendorId, device.productId);
     if (m) [this.modelName, this.folder] = m;
@@ -223,8 +377,19 @@ export class WlMouseDriver implements Driver {
   }
 
   image(): string | undefined {
+    if (this.entry) return this.cat?.img;
     if (!this.folder) return undefined;
     return `https://gm.wlmouse.gg/Config/${this.folder}/Colors/${getSkin(this.id)}.png`;
+  }
+
+  /** DPI stages this firmware keeps */
+  private get maxStages(): number {
+    return this.spec?.stages ?? 6;
+  }
+
+  /** resolved model, or the first candidate of a shared receiver (same limits for all of them) */
+  private get spec(): CompxModel | undefined {
+    return this.cat ?? this.entry?.models[0];
   }
 
   /** detected receive offset (for tests / diagnostics) */
@@ -314,7 +479,7 @@ export class WlMouseDriver implements Driver {
   }
 
   private set(page: number, cmd: number, payload: number[], waitMs: number): Promise<void> {
-    return this.setTo(MOUSE, page, cmd, payload, waitMs);
+    return this.setTo(this.mouse, page, cmd, payload, waitMs);
   }
 
   /** SET with the hard block on destructive / identity commands, whatever the caller does. */
@@ -389,6 +554,17 @@ export class WlMouseDriver implements Driver {
     });
   }
 
+  /**
+   * Read-only "which mouse is paired" query to a shared receiver (target 1, 00/8B [02])
+   * -> [?, ?, vidHi, vidLo, pidHi, pidLo]. Only the GET is ever sent; 00/0B SET stays blocked.
+   */
+  private async pairedModel(): Promise<CompxModel | null> {
+    const v = await this.tryGet(PAIRING, 0x00, 0x0b, 6, [0x02]);
+    if (!v || v.length < 6) return null;
+    const e = CATALOG.get(ckey((v[2] << 8) | v[3], (v[4] << 8) | v[5]));
+    return e?.models.length === 1 ? e.models[0] : null;
+  }
+
   /** read-only dongle firmware query (works even if the mouse sleeps) */
   identify(): Promise<number[]> {
     return this.get(DONGLE, 0x00, 0x01, 0x10);
@@ -423,7 +599,7 @@ export class WlMouseDriver implements Driver {
   }
 
   private async readButton(btn: number): Promise<Button> {
-    const v = await this.tryGet(MOUSE, 0x03, 0x00, 0x0f, [this.profile, btn, 0x00, 0xff, 0x0a]);
+    const v = await this.tryGet(this.mouse, 0x03, 0x00, 0x0f, [this.profile, btn, 0x00, 0xff, 0x0a]);
     // [profile, button, 0, type, len, data...]
     if (!v || v.length < 5 || v[1] !== btn) return null;
     const n = Math.min(v[4], v.length - 5);
@@ -457,38 +633,49 @@ export class WlMouseDriver implements Driver {
     // --- info
     let fw: number[];
     try {
-      fw = await this.get(MOUSE, 0x00, 0x01, 0x10);
+      fw = await this.get(this.mouse, 0x00, 0x01, 0x10);
     } catch (e) {
       throw new Error(
         `Mouse isn't answering (${(e as Error).message}). Turn it on / move it to wake it, then press Re-read.`,
       );
     }
-    const pid = (byte(fw, 4) << 8) | byte(fw, 5);
-    const vid = this.brandName === 'WLMouse' ? VID : 0;
-    const info = modelInfo(vid, pid);
-    this.modelName = info ? info[0] : `(model ${hex4(pid).toUpperCase()})`;
-    this.folder = info ? info[1] : null;
-    const model = info?.[0];
+    let model: string | undefined;
+    if (this.entry) {
+      // other CompX-A brands: the model comes from the USB product ID (catalog); a receiver
+      // shared by several mice is asked which mouse is paired to it
+      if (!this.cat) this.cat = await this.pairedModel();
+      const e = this.entry;
+      this.modelName = this.cat?.name ?? (e.models.length === 1 ? e.models[0].name : `${this.brandName} receiver`);
+      this.folder = null;
+    } else {
+      const pid = (byte(fw, 4) << 8) | byte(fw, 5);
+      const vid = this.brandName === 'WLMouse' ? VID : 0;
+      const info = modelInfo(vid, pid);
+      this.modelName = info ? info[0] : `(model ${hex4(pid).toUpperCase()})`;
+      this.folder = info ? info[1] : null;
+      model = info?.[0];
+    }
     out.push(text('model', 'Model', 'Info', this.modelName));
     if (this.folder) out.push(text('ui_folder', 'Model folder', 'Info', this.folder));
-    out.push(text('fw', 'Mouse firmware', 'Info', `${fw[0]}.${fw[1]}.${fw[2]}.${fw[3]}`));
-    const d = await this.tryGet(DONGLE, 0x00, 0x01, 0x10);
+    if (fw.length >= 4) out.push(text('fw', 'Mouse firmware', 'Info', `${fw[0]}.${fw[1]}.${fw[2]}.${fw[3]}`));
+    // a wired mouse that answers on target 0 has no separate receiver
+    const d = this.mouse === DONGLE ? null : await this.tryGet(DONGLE, 0x00, 0x01, 0x10);
     if (d && d.length >= 4) out.push(text('dongle_fw', 'Receiver firmware', 'Info', `${d[0]}.${d[1]}.${d[2]}.${d[3]}`));
-    const b = await this.tryGet(MOUSE, 0x00, 0x03, 2);
+    const b = await this.tryGet(this.mouse, 0x00, 0x03, 2);
     if (b) {
       const charging = byte(b, 0) === 1 ? ' (charging)' : '';
       out.push(text('battery', 'Battery', 'Info', `${byte(b, 1)}%${charging}`));
     }
 
     // --- profile
-    this.profile = byte(await this.get(MOUSE, 0x00, 0x05, 1), 0);
-    const cnt = await this.tryGet(MOUSE, 0x00, 0x06, 1);
+    this.profile = byte(await this.get(this.mouse, 0x00, 0x05, 1), 0);
+    const cnt = await this.tryGet(this.mouse, 0x00, 0x06, 1);
     const count = Math.max(1, cnt?.[0] ?? 1);
     const p = this.profile;
     // 00/8E [p] -> [p, byteLen, UTF-16LE name]
     const names: (string | null)[] = [];
     for (let i = 1; i <= count; i++) {
-      const v = await this.tryGet(MOUSE, 0x00, 0x0e, 0x3a, [i]);
+      const v = await this.tryGet(this.mouse, 0x00, 0x0e, 0x3a, [i]);
       let name: string | null = null;
       if (v && v.length >= 2) {
         const n = Math.min(v[1], v.length - 2);
@@ -512,18 +699,20 @@ export class WlMouseDriver implements Driver {
     if (pname) out.push(text('profile_name', 'Profile name', 'Profile', pname));
 
     // --- DPI
-    const mx = await this.tryGet(MOUSE, 0x01, 0x0c, 2);
-    this.dpiMax = mx && mx.length >= 2 ? (mx[0] << 8) | mx[1] : 26000;
+    const mx = await this.tryGet(this.mouse, 0x01, 0x0c, 2);
+    const spec = this.spec;
+    this.dpiMax = mx && mx.length >= 2 ? (mx[0] << 8) | mx[1] : (spec?.dpiMax ?? 26000);
     const step = model === 'HUAN M' ? 1 : 50;
-    const t = await this.get(MOUSE, 0x01, 0x01, 0x0a, [p, 6]);
-    this.count = Math.min(6, Math.max(1, byte(t, 1)));
+    const maxStages = this.maxStages;
+    const t = await this.get(this.mouse, 0x01, 0x01, 0x0a, [p, maxStages]);
+    this.count = Math.min(maxStages, Math.max(1, byte(t, 1)));
     for (let i = 0; i < 6; i++) {
       const o = 2 + i * 4;
       this.stages[i] = t.length >= o + 4 ? [(t[o] << 8) | t[o + 1], (t[o + 2] << 8) | t[o + 3]] : [0, 0];
     }
-    this.active = Math.min(this.count, Math.max(1, byte(await this.get(MOUSE, 0x01, 0x02, 2, [p]), 1)));
-    this.xy = ((await this.tryGet(MOUSE, 0x01, 0x0d, 2, [p]))?.[1] ?? 0) !== 0;
-    const c = await this.tryGet(MOUSE, 0x02, 0x01, 0x13, [p]);
+    this.active = Math.min(this.count, Math.max(1, byte(await this.get(this.mouse, 0x01, 0x02, 2, [p]), 1)));
+    this.xy = ((await this.tryGet(this.mouse, 0x01, 0x0d, 2, [p]))?.[1] ?? 0) !== 0;
+    const c = await this.tryGet(this.mouse, 0x02, 0x01, 0x13, [p]);
     this.colors = c && c.length >= 19 ? c.slice(1, 19) : null;
     const n = this.count;
     const active = this.active - 1;
@@ -533,8 +722,9 @@ export class WlMouseDriver implements Driver {
     });
     out.push(s('dpi', this.xy ? 'DPI stages (X)' : 'DPI stages', 'DPI', dpiVal(this.stages.slice(0, n).map((v) => v[0]))));
     if (this.xy) out.push(s('dpi_y', 'DPI stages (Y)', 'DPI', dpiVal(this.stages.slice(0, n).map((v) => v[1]))));
-    out.push(s('dpi_count', 'Number of DPI stages', 'DPI', choice([1, 2, 3, 4, 5, 6].map((i) => [String(i), i]), this.count)));
-    out.push(s('dpi_xy', 'Separate X / Y DPI', 'DPI', toggle(this.xy)));
+    out.push(s('dpi_count', 'Number of DPI stages', 'DPI', choice(Array.from({ length: maxStages }, (_, i) => [String(i + 1), i + 1]), this.count)));
+    // the maker's hub hides separate X/Y for some models; still shown if it is somehow on
+    if (!spec?.noXY || this.xy) out.push(s('dpi_xy', 'Separate X / Y DPI', 'DPI', toggle(this.xy)));
     if (this.colors) {
       for (let i = 0; i < 6; i++) {
         out.push(s(COLOR_KEYS[i], `Stage ${i + 1} colour`, 'DPI', { kind: 'color', rgb: this.colorOf(i) }));
@@ -542,10 +732,16 @@ export class WlMouseDriver implements Driver {
     }
 
     // --- performance
-    let code = byte(await this.get(MOUSE, 0x01, 0x00, 2, [p]), 1);
+    let code = byte(await this.get(this.mouse, 0x01, 0x00, 2, [p]), 1);
     if (code === 0x10) code = 0x01; // alternate encoding of 1000 Hz
-    out.push(s('polling', 'Polling rate', 'Performance', choice(POLLING.map(([l, v]) => [l, v]), code)));
-    const l = await this.tryGet(MOUSE, 0x01, 0x08, 3, [p]);
+    const rates = this.entry?.rates;
+    const pollOpts: [string, number][] = POLLING.filter(([l]) => !rates || rates.includes(parseInt(l, 10))).map(([l, v]) => [l, v]);
+    if (rates && !pollOpts.some(([, v]) => v === code)) {
+      const known = POLLING.find(([, v]) => v === code);
+      pollOpts.push(known ? [known[0], code] : [`Code ${hex2(code)}`, code]);
+    }
+    out.push(s('polling', 'Polling rate', 'Performance', choice(pollOpts, code)));
+    const l = await this.tryGet(this.mouse, 0x01, 0x08, 3, [p]);
     if (l) {
       const lod = byte(l, 1);
       this.lodMode = l[2] ?? LOD_STANDARD;
@@ -559,18 +755,18 @@ export class WlMouseDriver implements Driver {
       if (!opts.some((o) => o[1] === lod)) opts.push([`${lodDecode(lod)} mm`, lod]);
       out.push(s('lod', 'Lift-off distance', 'Performance', choice(opts, lod)));
     }
-    const hv = await this.tryGet(MOUSE, 0x01, 0x0b, 2, [p]);
+    const hv = spec?.noHyper ? null : await this.tryGet(this.mouse, 0x01, 0x0b, 2, [p]);
     if (hv) {
       this.hyper = byte(hv, 1) !== 0;
       out.push(s('hyper', 'High-speed mode', 'Performance', toggle(this.hyper)));
-      const tv = await this.tryGet(MOUSE, 0x01, 0x13, 2, [p]);
+      const tv = await this.tryGet(this.mouse, 0x01, 0x13, 2, [p]);
       if (tv) out.push(s('turbo', 'Turbo mode (needs high-speed mode)', 'Performance', toggle(byte(tv, 1) !== 0)));
     }
     for (const [key, label, cmd] of TOGGLES) {
-      const v = await this.tryGet(MOUSE, 0x01, cmd, 2, [p]);
+      const v = await this.tryGet(this.mouse, 0x01, cmd, 2, [p]);
       if (v) out.push(s(key, label, 'Performance', toggle(byte(v, 1) !== 0)));
     }
-    const at = await this.tryGet(MOUSE, 0x01, 0x14, 2, [p]);
+    const at = await this.tryGet(this.mouse, 0x01, 0x14, 2, [p]);
     if (at) {
       const raw = byte(at, 1);
       const deg = raw <= 30 ? raw : raw - 256;
@@ -578,7 +774,7 @@ export class WlMouseDriver implements Driver {
         kind: 'number', min: -30, max: 30, current: Math.min(30, Math.max(-30, deg)), unit: '°',
       }));
     }
-    const cb = await this.tryGet(MOUSE, 0x03, 0x01, 2, [p]);
+    const cb = await this.tryGet(this.mouse, 0x03, 0x01, 2, [p]);
     if (cb) out.push(s('combo', 'Button combination', 'Performance', toggle(byte(cb, 1) !== 0)));
 
     // --- buttons
@@ -596,23 +792,24 @@ export class WlMouseDriver implements Driver {
       }
       out.push(s(BTN_KEYS[bi], BTN_LABELS[bi], 'Buttons', choice(opts, current)));
     }
-    const db = await this.tryGet(MOUSE, 0x00, 0x08, 2, [p]);
+    const db = await this.tryGet(this.mouse, 0x00, 0x08, 2, [p]);
     if (db) out.push(s('debounce', 'Click debounce', 'Buttons', { kind: 'number', min: 0, max: 15, current: byte(db, 1), unit: ' ms' }));
 
     // --- power
-    const sl = await this.tryGet(MOUSE, 0x00, 0x07, 3, [p]);
+    const sl = await this.tryGet(this.mouse, 0x00, 0x07, 3, [p]);
     if (sl) {
       let secs = (byte(sl, 1) << 8) | byte(sl, 2);
       if (secs === 0 || secs >= 0xff00) secs = SLEEP_NEVER; // official treats 0, 0xFF00 and 0xFFFF as disabled
-      const opts: [string, number][] = SLEEP.map(([a, v]) => [a, v]);
-      if (!SLEEP.some(([, v]) => v === secs)) opts.push([`${secs} sec`, secs]);
+      const list = spec?.sleep ?? SLEEP;
+      const opts: [string, number][] = list.map(([a, v]) => [a, v]);
+      if (!list.some(([, v]) => v === secs)) opts.push([secs === SLEEP_NEVER ? 'Never' : `${secs} sec`, secs]);
       out.push(s('sleep', 'Sleep after', 'Power', choice(opts, secs)));
     }
 
     // --- hidden by the maker: mouse RGB light (02/80 effect, 02/82 brightness). WLMouse's hub
     // reads these on every open but hides the menu for HUAN M (LightScrollEnable=0).
-    const le = await this.tryGet(MOUSE, 0x02, 0x00, 26, [1]);
-    const lb = le ? await this.tryGet(MOUSE, 0x02, 0x02, 3, [1, 0]) : null;
+    const le = await this.tryGet(this.mouse, 0x02, 0x00, 26, [1]);
+    const lb = le ? await this.tryGet(this.mouse, 0x02, 0x02, 3, [1, 0]) : null;
     if (le && lb && le.length >= 8) {
       const effect = byte(le, 2);
       this.light = { effect, speed: Math.min(6, Math.max(1, 7 - byte(le, 4))), rgb: ((le[5] << 16) | (le[6] << 8) | le[7]) >>> 0, bri: byte(lb, 2) };
@@ -626,11 +823,11 @@ export class WlMouseDriver implements Driver {
     }
     // --- features other WLMouse models have: checked with read-only queries, listed when missing
     const probes: [string, number, number, number, number, number[]][] = [
-      ['Adaptive DPI', MOUSE, 0x01, 0x1a, 9, [p]],
-      ['Sensor COG offset', MOUSE, 0x01, 0x15, 3, [p]],
-      ['Wheel BHOP', MOUSE, 0x00, 0x24, 5, [p]],
-      ['Scroll HP', MOUSE, 0x00, 0x19, 4, [p]],
-      ['DPI indicator', MOUSE, 0x02, 0x04, 2, [p]],
+      ['Adaptive DPI', this.mouse, 0x01, 0x1a, 9, [p]],
+      ['Sensor COG offset', this.mouse, 0x01, 0x15, 3, [p]],
+      ['Wheel BHOP', this.mouse, 0x00, 0x24, 5, [p]],
+      ['Scroll HP', this.mouse, 0x00, 0x19, 4, [p]],
+      ['DPI indicator', this.mouse, 0x02, 0x04, 2, [p]],
       ['Touch shortcut', DONGLE, 0x05, 0x0c, 3, [0, 1]],
     ];
     const missing: string[] = [];
@@ -738,7 +935,7 @@ export class WlMouseDriver implements Driver {
       case 'dpi':
       case 'dpi_y': {
         if (v.kind !== 'dpi') throw bad();
-        if (v.stages.length < 1 || v.stages.length > 6) throw new Error('need 1-6 DPI stages');
+        if (v.stages.length < 1 || v.stages.length > this.maxStages) throw new Error(`need 1-${this.maxStages} DPI stages`);
         const isX = st.key === 'dpi';
         v.stages.forEach((dd, i) => {
           const val = Math.min(v.max, Math.max(v.min, Math.round(dd))) & 0xffff;
@@ -769,7 +966,7 @@ export class WlMouseDriver implements Driver {
       }
       case 'dpi_count': {
         if (v.kind !== 'choice') throw bad();
-        const n = Math.min(6, Math.max(1, v.current));
+        const n = Math.min(this.maxStages, Math.max(1, v.current));
         if (this.active > n) {
           this.active = n;
           await this.set(0x01, 0x02, [p, n], 60);
@@ -840,8 +1037,8 @@ export const wlmouseFactory: DriverFactory = {
   name: 'WLMouse / Compx',
   filters: [
     { vendorId: VID },
-    { vendorId: 0x373e },
-    { vendorId: 0x37b0 },
+    // other CompX-A brands: only catalogued product IDs (never their bootloaders)
+    ...[...CATALOG.keys()].map((k) => ({ vendorId: Math.floor(k / 0x10000), productId: k % 0x10000 })),
     ...GLORIOUS_PIDS.map((productId) => ({ vendorId: 0x258a, productId })),
   ],
   match(d: HIDDevice): boolean {

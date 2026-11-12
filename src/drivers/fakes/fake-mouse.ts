@@ -12,6 +12,14 @@ export interface FakeOpts {
   dead?: boolean;
   vendorId?: number;
   productId?: number;
+  /** product name the browser reports */
+  productName?: string;
+  /** PID inside the mouse's 00/81 firmware reply (default 0xA859 = HUAN M) */
+  mousePid?: number;
+  /** target the mouse answers on (default 2; some wired CompX-A mice answer on 0) */
+  mouseTarget?: number;
+  /** shared receivers: [vid, pid] answered to the read-only 00/8B [02] query on target 1 */
+  paired?: [number, number];
 }
 
 type Frame = { target: number; len: number; page: number; cmd: number; payload: number[] };
@@ -62,6 +70,7 @@ export class FakeMouse {
   constructor(readonly o: FakeOpts = {}) {
     this.vendorId = o.vendorId ?? 0x36a7;
     this.productId = o.productId ?? 0xa863;
+    if (o.productName) this.productName = o.productName;
     for (const p of [1, 2, 3]) {
       this.table[p] = {
         count: 6,
@@ -106,7 +115,7 @@ export class FakeMouse {
     if (this.busy > 0) this.busy--;
     let status = 0xa1;
     let pl: number[] = [];
-    if (this.asleep && f.target === 2) status = 0xa4;
+    if (this.asleep && f.target === (this.o.mouseTarget ?? 2)) status = 0xa4;
     else {
       const r = this.handle(f);
       if (r === null) status = 0xa2;
@@ -144,7 +153,16 @@ export class FakeMouse {
     const c = f.cmd & 0x7f;
     const a = f.payload;
     const p = a[0];
-    if (f.target === 0) {
+    const mouse = this.o.mouseTarget ?? 2;
+    if (f.target === 1) {
+      // read-only "which mouse is paired" query of a shared receiver
+      if (f.page === 0 && c === 0x0b && get && a[0] === 0x02 && this.o.paired) {
+        const [v, d] = this.o.paired;
+        return [0x02, 0, v >> 8, v & 0xff, d >> 8, d & 0xff];
+      }
+      return null;
+    }
+    if (f.target === 0 && mouse !== 0) {
       if (f.page === 0 && c === 0x01 && get) return [0, 1, 0, 12, 0xa8, 0x63];
       if (f.page === 5 && c === 0x06) return get ? [this.screen.effect] : ((this.screen.effect = a[0]), []);
       if (f.page === 5 && c === 0x0a) return get ? [this.screen.status] : ((this.screen.status = a[0]), []);
@@ -181,9 +199,13 @@ export class FakeMouse {
       }
       return null;
     }
+    if (f.target !== mouse) return null;
     if (f.page === 0) {
       switch (c) {
-        case 0x01: return get ? [0, 1, 0, 12, 0xa8, 0x59] : null;
+        case 0x01: {
+          const mp = this.o.mousePid ?? 0xa859;
+          return get ? [0, 1, 0, 12, mp >> 8, mp & 0xff] : null;
+        }
         case 0x03: return get ? this.battery : null;
         case 0x05: if (get) return [this.profile]; this.profile = a[0]; return [];
         case 0x06: return get ? [this.profileCount] : null;

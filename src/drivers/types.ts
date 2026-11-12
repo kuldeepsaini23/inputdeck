@@ -93,8 +93,15 @@ export interface Driver {
   model(): string;
   /** official product photo URL if known */
   image(): string | undefined;
+  /** keyboards: the board's keys, for drivers whose settings don't already carry them (picture only) */
+  layout?(): KeyCap[];
   /** keyboards: position of a rotary knob in key units, if the board has one */
   readonly knob?: { x: number; y: number };
+  /**
+   * false for drivers nobody has checked on real hardware yet. The app shows them read-only
+   * (settings visible, no writes) until the user turns on "Allow changes" for that device.
+   */
+  readonly verified?: boolean;
   /** set when the device (or its receiver) has a screen you can put pictures on */
   readonly screen?: ScreenSupport;
   /** keyboards with analog switches: stream live key travel (mm) until the returned stop() runs */

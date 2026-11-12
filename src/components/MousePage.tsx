@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { setSkin } from '#/drivers/wlmouse'
-import { Battery, Crosshair, Gauge, Info, Monitor, MousePointerClick, SlidersHorizontal, Mouse } from 'lucide-react'
+import { Battery, Crosshair, Gauge, Info, Monitor, MousePointerClick, SlidersHorizontal } from 'lucide-react'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '#/components/ui/dialog'
 import type { DeviceState } from '#/devices'
 import type { Setting, Value } from '#/drivers/types'
@@ -10,6 +10,7 @@ import { BigValue, Card, ColorPicker, Range, Row, Segmented, Stepper, Toggle, he
 import { GenericCard, Hero, MiniStats, Pulse, shortHz, type Edit } from './parts'
 import { Dock, textOf } from './shell'
 import { Receiver, ScreenCards, useScreenEditor } from './ScreenPanel'
+import { MouseArt } from './MouseArt'
 
 type Dpi = Extract<Value, { kind: 'dpi' }>
 
@@ -79,6 +80,8 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
 
   const [, setSkinTick] = useState(0)
   const isWl = /wlmouse\.gg/.test(image ?? '')
+  // CompX hubs (WLMouse, Lamzu, Arbiter) ship tall photos sized for this box; brand-site photos are square with padding
+  const tall = /wlmouse\.gg|lamzu\.net|arbiterstudio\.com/.test(image ?? '')
   const skinN = Number(/Colors\/(\d+)\.png/.exec(image ?? '')?.[1] ?? 1)
   const changeSkin = (d: number) => {
     const n = ((skinN - 1 + d + 12) % 12) + 1
@@ -241,10 +244,17 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
             <Receiver picture={screenEd.shown} round={dev.driver.screen.round} stored={screenEd.stored} />
           ) : (
           <div className={cn('relative -mt-[60px]', !pickable && 'float')} style={{ height: pickable ? 'min(58vh, 540px)' : 'min(64vh, 580px)', aspectRatio: '300 / 580' }}>
-            {image ? (
-              <img src={image} alt={`${dev.driver.brand()} ${dev.driver.model()}`} className="size-full object-contain drop-shadow-[0_40px_40px_rgb(0_0_0/0.8)]" />
+            {image && /bbb\.pulsar\.gg/.test(image) ? (
+              // Pulsar's photos put the mouse on a big white X logo: show only the mouse body
+              <div className="size-full drop-shadow-[0_40px_40px_rgb(0_0_0/0.8)]">
+                <img src={image} alt={`${dev.driver.brand()} ${dev.driver.model()}`}
+                  className="absolute top-1/2 left-1/2 aspect-square w-[204%] max-w-none -translate-x-1/2 -translate-y-1/2"
+                  style={{ clipPath: 'inset(5.4% 25.8% 4.8% 26.9% round 23% / 21%)' }} />
+              </div>
+            ) : image ? (
+              <img src={image} alt={`${dev.driver.brand()} ${dev.driver.model()}`} className={cn('size-full object-contain drop-shadow-[0_40px_40px_rgb(0_0_0/0.8)]', !tall && 'scale-[1.7]')} />
             ) : (
-              <Mouse className="size-full text-white/10" strokeWidth={0.6} />
+              <MouseArt label={`${dev.driver.brand()} ${dev.driver.model()}`} />
             )}
             {spots && Object.entries(SPOTS).filter(([k]) => spotKeys.includes(k)).map(([k, p]) => {
               const s = get(k)

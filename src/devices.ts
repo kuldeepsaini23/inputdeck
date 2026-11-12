@@ -5,9 +5,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Driver, DriverFactory, Setting } from './drivers/types';
 import { wlmouseFactory } from './drivers/wlmouse';
 import { wraithFactory } from './drivers/wraith';
-import { pulsarFactory } from './drivers/pulsar';
+import { compxbFactory, pulsarFactory } from './drivers/pulsar';
+import { logitechFactory } from './drivers/logitech';
+import { razerFactory } from './drivers/razer';
+import { viaFactory } from './drivers/via';
 
-export const FACTORIES: DriverFactory[] = [wlmouseFactory, wraithFactory, pulsarFactory];
+const ALLOW_KEY = 'inputdeck.allowChanges';
+
+// VIA last: it matches any raw-HID keyboard the brand drivers above don't claim
+export const FACTORIES: DriverFactory[] = [wlmouseFactory, wraithFactory, pulsarFactory, compxbFactory, logitechFactory, razerFactory, viaFactory];
 
 export interface DeviceState {
   id: string;
@@ -211,21 +217,49 @@ export function useDeviceManager() {
     [patch],
   );
 
+  /** Untested drivers stay view-only until the user allows changes for that device (remembered). */
+  const [allowed, setAllowed] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(ALLOW_KEY) ?? '[]') as string[];
+    } catch {
+      return [];
+    }
+  });
+  const canWrite = useCallback(
+    (id: string) => drivers.current.get(id)?.verified !== false || allowed.includes(id),
+    [allowed],
+  );
+  const allowChanges = useCallback((id: string) => {
+    setAllowed((a) => {
+      const next = a.includes(id) ? a : [...a, id];
+      try {
+        localStorage.setItem(ALLOW_KEY, JSON.stringify(next));
+      } catch {
+        /* storage unavailable: allowed for this visit only */
+      }
+      return next;
+    });
+  }, []);
+
   /** Change a setting; it is written to the device by itself shortly after. */
   const edit = useCallback(
     (id: string, key: string, value: Setting['value']) => {
+      if (!canWrite(id)) {
+        patch(id, { error: 'This device is view-only until you allow changes.' });
+        return;
+      }
       setDevices((list) =>
         list.map((d) => (d.id === id && d.edit ? { ...d, edit: d.edit.map((s) => (s.key === key ? { ...s, value } : s)) } : d)),
       );
       clearTimeout(timers.current.get(id));
       timers.current.set(id, setTimeout(() => void apply(id), LIVE_DELAY_MS));
     },
-    [apply],
+    [apply, canWrite, patch],
   );
 
   const discard = useCallback((id: string) => {
     setDevices((list) => list.map((d) => (d.id === id ? { ...d, edit: d.read } : d)));
   }, []);
 
-  return { devices, scanning, connect, scan, refresh: readDevice, edit, discard, apply };
+  return { devices, scanning, connect, scan, refresh: readDevice, edit, discard, apply, canWrite, allowChanges };
 }

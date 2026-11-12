@@ -518,7 +518,7 @@ class Wraith implements Driver {
   readonly kind = 'keyboard' as const;
 
   /** confirmed model name (set once 0x0D returned a known product) */
-  private verified: string | undefined;
+  private knownModel: string | undefined;
   private product: string;
   private light: Light | undefined;
   private trig: Trig | undefined;
@@ -540,7 +540,7 @@ class Wraith implements Driver {
     return 'WRAITH';
   }
   model() {
-    return this.verified ?? this.product;
+    return this.knownModel ?? this.product;
   }
   image() {
     return undefined;
@@ -551,7 +551,7 @@ class Wraith implements Driver {
     const r = await this.link.xfer(readInfoPkt(), (d) => d[3] === 0);
     const info = parseInfo(r);
     if (!info) throw new Error("couldn't parse device info");
-    this.verified = KNOWN.find((k) => k[0] === info[0])?.[1];
+    this.knownModel = KNOWN.find((k) => k[0] === info[0])?.[1];
     return info;
   }
 
@@ -774,7 +774,7 @@ class Wraith implements Driver {
     out.push(text('model', 'Model', 'Info', this.model()));
     out.push(text('product_id', 'Firmware product ID', 'Info', product));
     out.push(text('fw', 'Firmware', 'Info', fw));
-    if (!this.verified) {
+    if (!this.knownModel) {
       out.push(text('unsupported', 'Note', 'Info', `'${product}' isn't a verified board - settings are read-only`));
       return out;
     }
@@ -860,7 +860,7 @@ class Wraith implements Driver {
   }
 
   private async writeInner(s: Setting): Promise<void> {
-    if (!this.verified) throw new Error('unverified board - settings are read-only');
+    if (!this.knownModel) throw new Error('unverified board - settings are read-only');
     const light = () => {
       if (!this.light) throw new Error('press Re-read first');
       return this.light;

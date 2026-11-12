@@ -89,7 +89,7 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
   const brand = dev.driver.brand().toUpperCase()
   const pkT = get('per_key_trigger')?.value as PerKeyTrigger | undefined
   const pkC = get('per_key_color')?.value as PerKeyColor | undefined
-  const keys: KeyCap[] | undefined = pkT?.keys ?? pkC?.keys
+  const keys: KeyCap[] | undefined = pkT?.keys ?? pkC?.keys ?? dev.driver.layout?.()
   const inGroup = (g: string) => (edit ?? []).filter((s) => s.group === g)
 
   // ---- keyboard looks for the current tab

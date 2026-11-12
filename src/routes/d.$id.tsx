@@ -58,7 +58,14 @@ function DevicePage() {
       ) : (
         <KeyboardPage dev={dev} tab={tab} setTab={setTab} onEdit={onEdit} />
       )}
-      {dev.error && (
+      {!mgr.canWrite(dev.id) && (
+        <div role="status" className="glass absolute top-[88px] left-1/2 z-30 flex max-w-2xl -translate-x-1/2 items-center gap-3 px-5 py-3 text-[12.5px] text-[var(--text-2)]">
+          <span className="eyebrow shrink-0 rounded-full border border-white/20 px-2 py-0.5 !text-[8px]">Untested</span>
+          <span>We haven't tried this {dev.driver.kind} on real hardware yet, so it's view-only. If the values shown match your {dev.driver.kind}, changes are very likely safe.</span>
+          <button type="button" className="plat display shrink-0 rounded-full px-3.5 py-1.5 text-[11px] font-semibold" onClick={() => mgr.allowChanges(dev.id)}>Allow changes</button>
+        </div>
+      )}
+      {dev.error && mgr.canWrite(dev.id) && (
         <div role="alert" className="glass absolute top-[88px] left-1/2 z-30 max-w-xl -translate-x-1/2 px-5 py-3 text-[13px] text-[var(--text)]">
           <span className="mr-2 text-[var(--err)]">●</span>{dev.error}
           <button type="button" className="chip ml-3" onClick={() => void mgr.refresh(dev.id)}>Read again</button>

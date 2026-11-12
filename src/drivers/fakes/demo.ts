@@ -2,10 +2,19 @@
 // so the app can be previewed and checked without anything plugged in.
 import { FakeMouse } from './fake-mouse'
 import { FakeKeyboard } from './fake-keyboard'
+import { FakePulsar } from './fake-pulsar'
+import { FakeLogitech } from './fake-logitech'
+import { FakeRazer } from './fake-razer'
 
 let devices: HIDDevice[] | undefined
 
 export function demoDevices(): HIDDevice[] {
-  devices ??= [new FakeMouse().asHid(), new FakeKeyboard().asDevice()]
+  devices ??= [
+    new FakeMouse().asHid(),
+    new FakeKeyboard().asDevice(),
+    new FakePulsar().asHid(),
+    new FakeLogitech({ wired: true }).asHid(),
+    new FakeRazer().asHid(),
+  ]
   return devices
 }

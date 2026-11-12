@@ -6,11 +6,16 @@ Works in Chrome, Edge and Opera on desktop (it uses [WebHID](https://developer.m
 
 ## Supported devices
 
-- **WLMouse** (HUAN, HUAN M and other models on the Compx protocol)
-- **Pulsar** CrazyLight mice on the 8K dongle (X2 / X3 CrazyLight) — experimental
+Tested on real hardware:
+
+- **WLMouse** HUAN / HUAN M and other WLMouse mice
+- **Pulsar** X2 CrazyLight family on the 8K dongle
 - **Wraith** W75 V2 HE
 
-More brands are coming.
+Untested (view-only until you press **Allow changes** on the device page):
+
+- **Mice:** Pulsar (other models), Logitech (HID++ 2.0: Superlight, G502, G305…), Razer (DeathAdder, Viper, Basilisk, Cobra, Orochi), Lamzu, Vancer, LunaFury, Attack Shark, CRDRAKO, ATK, VXE / VGN, Kysona, Scyrox, Teevolution, Glorious wireless
+- **Keyboards:** any VIA-enabled keyboard (Keychron, NuPhy, Lofree Flow 2, Zoom, Mode, CIDOO, Kzzi, Akko / Monsgeek / Epomaker VIA models and custom boards)
 
 ## Try it without a device
 

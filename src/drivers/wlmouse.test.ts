@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import { FakeMouse, type FakeOpts } from './fakes/fake-mouse';
 import type { Setting, Value } from './types';
-import { KEEP, WlMouseDriver, lodDecode, lodEncode, openWlMouse, setSkin, wlmouseFactory } from './wlmouse';
+import { KEEP, WlMouseDriver, compxEntry, lodDecode, lodEncode, openWlMouse, setSkin, wlmouseFactory } from './wlmouse';
 
 // ------------------------------------------------------------------ fake mouse
 
@@ -450,5 +450,132 @@ describe('hidden RGB lighting', () => {
     expect(w[0]).toMatchObject({ target: 2, cmd: 0x02, payload: [1, 0, 0xff] });
     expect(w[1]).toMatchObject({ target: 2, cmd: 0x00, payload: [1, 0, 4, 0, 6, 0xff, 0, 0] });
     expect(fake.light.effect).toBe(4);
+  });
+});
+
+// ------------------------------------------------------------------ other CompX-A brands
+
+const labels = (v: Value) => (v.kind === 'choice' ? v.options.map((o) => o[0]) : []);
+type Dpi = Extract<Value, { kind: 'dpi' }>;
+type Choice = Extract<Value, { kind: 'choice' }>;
+
+describe('other CompX-A brands', () => {
+  it('match only catalogued product IDs, never bootloaders or the other protocol', () => {
+    const m = (vendorId: number, productId: number) => wlmouseFactory.match(new FakeMouse({ vendorId, productId }).asHid());
+    const yes = [[0x373e, 0x001c], [0x373e, 0x001e], [0x37b0, 0x0010], [0x37b0, 0x0001], [0x373e, 0x0067],
+      [0x373e, 0x0032], [0x373e, 0x0084], [0x373e, 0x0047], [0x373e, 0x006b]];
+    for (const [v, p] of yes) expect(m(v, p)).toBe(true);
+    // bootloaders (373E:B01C, 37B0:0002 / 000A), Atlantis Mini 54H20 (other protocol), unknown
+    const no = [[0x373e, 0xb01c], [0x37b0, 0x0002], [0x37b0, 0x000a], [0x37b0, 0x003e], [0x373e, 0x1234]];
+    for (const [v, p] of no) expect(m(v, p)).toBe(false);
+    expect(wlmouseFactory.filters).toContainEqual({ vendorId: 0x37b0, productId: 0x0010 });
+    expect(wlmouseFactory.filters).not.toContainEqual({ vendorId: 0x373e });
+    expect(compxEntry(0x37b0, 0x0036)?.models.map((x) => x.name)).toEqual(['DM198', 'DM198 OP', 'Maya (54H20)', 'Orcus']);
+  });
+
+  it('WLMouse stays verified; other brands are not', async () => {
+    const { drv } = await setup();
+    expect(drv.verified).toBe(true);
+    const { drv: lz } = await setup({ vendorId: 0x37b0, productId: 0x0010 });
+    expect(lz.verified).toBe(false);
+  });
+
+  it('Lamzu Inca on its 8K receiver: brand, model, photo, 5 stages, receiver rates, Lamzu sleep list', async () => {
+    const { fake, drv, settings } = await setup({ vendorId: 0x37b0, productId: 0x0010 });
+    expect(drv.brand()).toBe('Lamzu');
+    expect(drv.model()).toBe('Inca');
+    expect(drv.image()).toBe('https://lamzu.net/Config/INCA/Device_1.png');
+    expect(find(settings, 'model').value).toEqual({ kind: 'text', text: 'Inca' });
+    expect(settings.some((s) => s.key === 'ui_folder')).toBe(false);
+    const dpi = find(settings, 'dpi').value as Dpi;
+    expect(dpi).toMatchObject({ stages: [400, 800, 1600, 3200, 6400], step: 50, max: 42000 });
+    expect(labels(find(settings, 'dpi_count').value)).toEqual(['1', '2', '3', '4', '5']);
+    expect(labels(find(settings, 'polling').value)).toEqual(['500 Hz', '1000 Hz', '2000 Hz', '4000 Hz', '8000 Hz']);
+    expect(labels(find(settings, 'sleep').value)).toEqual(['10 sec', '30 sec', '1 min', '5 min', '10 min', '30 min']);
+    expect(settings.some((s) => s.key === 'hyper')).toBe(true);
+    // writes: still the full 26-byte, 6-slot table; a 6th stage is refused
+    await drv.write(withValue(find(settings, 'dpi'), { ...dpi, stages: [400, 800, 1600] }));
+    expect(fake.table[2].count).toBe(3);
+    const six = [1, 2, 3, 4, 5, 6].map((i) => i * 400);
+    await expect(drv.write(withValue(find(settings, 'dpi'), { ...dpi, stages: six }))).rejects.toThrow(/1-5/);
+    // the DPI table is read with the 5-stage argument
+    const fresh = new FakeMouse({ vendorId: 0x37b0, productId: 0x0010 });
+    await (await openWlMouse(fresh.asHid(), noSleep))!.read();
+    expect(fresh.sent.find((f) => f.page === 1 && f.cmd === 0x81)?.payload.slice(0, 2)).toEqual([2, 5]);
+  });
+
+  it('shared Lamzu receiver asks which mouse is paired (read-only GET on target 1)', async () => {
+    const { drv } = await setup({ vendorId: 0x37b0, productId: 0x0001, paired: [0x37b0, 0x0042] });
+    expect(drv.model()).toBe('Orcus');
+    expect(drv.image()).toBe('https://lamzu.net/Config/ORCUS/Device_1.png');
+    // a dongle PID shared by several mice that doesn't answer the query
+    const f2 = new FakeMouse({ vendorId: 0x37b0, productId: 0x0036 });
+    const d2 = (await openWlMouse(f2.asHid(), noSleep))!;
+    const ss = await d2.read();
+    expect(f2.sent.some((f) => f.target === 1 && f.page === 0 && f.cmd === 0x8b)).toBe(true);
+    expect(find(ss, 'model').value).toEqual({ kind: 'text', text: 'Lamzu receiver' });
+    expect(d2.image()).toBeUndefined();
+    expect(labels(find(ss, 'sleep').value)).toContain('30 min');
+  });
+
+  it('Vancer Akitsu Medium (wired): no X/Y or high-speed, 500/1000 Hz, minute sleep list, Arbiter hub photo', async () => {
+    const { drv, settings } = await setup({ vendorId: 0x373e, productId: 0x0066 });
+    expect(drv.brand()).toBe('Vancer');
+    expect(drv.model()).toBe('Akitsu Medium 3950');
+    expect(drv.image()).toBe('https://webapp.arbiterstudio.com/Config/Akitsu_M_3950/Device_1.png');
+    for (const k of ['dpi_xy', 'hyper', 'turbo']) expect(settings.some((s) => s.key === k)).toBe(false);
+    expect(labels(find(settings, 'polling').value)).toEqual(['500 Hz', '1000 Hz']);
+    expect(labels(find(settings, 'sleep').value)).toEqual(['1 min', '2 min', '3 min', '5 min', '10 min', '15 min', '20 min', '30 min']);
+  });
+
+  it('LunaFury LUNA33 wired answers on target 0 and every mouse frame goes there', async () => {
+    const fake = new FakeMouse({ vendorId: 0x373e, productId: 0x0032, mouseTarget: 0 });
+    const drv = (await openWlMouse(fake.asHid(), noSleep))!;
+    fake.sent = [];
+    const ss = await drv.read();
+    expect(drv.brand()).toBe('LunaFury');
+    expect(drv.model()).toBe('LUNA33');
+    expect(drv.image()).toBeUndefined();
+    expect(find(ss, 'battery').value).toEqual({ kind: 'text', text: '37%' });
+    expect(ss.some((s) => s.key === 'dongle_fw')).toBe(false);
+    expect(fake.sent.every((f) => f.target === 0)).toBe(true);
+    expect(labels(find(ss, 'polling').value)).toEqual(['125 Hz', '250 Hz', '500 Hz', '1000 Hz']);
+    expect(labels(find(ss, 'sleep').value)).toContain('Never');
+    fake.sent = [];
+    await drv.write(withValue(find(ss, 'polling'), { ...(find(ss, 'polling').value as Choice), current: 0x02 }));
+    expect(fake.sets()).toEqual([{ target: 0, len: 2, page: 1, cmd: 0x00, payload: [2, 0x02] }]);
+  });
+
+  it('Attack Shark R5 Ultra and CRDRAKO KO-ONE', async () => {
+    const { drv, settings } = await setup({ vendorId: 0x373e, productId: 0x0047 });
+    expect([drv.brand(), drv.model(), drv.image(), drv.verified]).toEqual(['Attack Shark', 'R5 Ultra', undefined, false]);
+    expect(find(settings, 'dpi').value).toMatchObject({ stages: [400, 800, 1600, 3200, 6400, 30000] });
+    expect(labels(find(settings, 'polling').value)).toHaveLength(7);
+    const fake = new FakeMouse({ vendorId: 0x373e, productId: 0x006a, mouseTarget: 0 });
+    const ko = (await openWlMouse(fake.asHid(), noSleep))!;
+    await ko.read();
+    expect([ko.brand(), ko.model()]).toEqual(['CRDRAKO', 'KO-ONE']);
+    expect(fake.sent.every((f) => f.target === 0)).toBe(true);
+  });
+
+  it('a full read + writes on other brands never send a blocked command', async () => {
+    const devices: FakeOpts[] = [
+      { vendorId: 0x37b0, productId: 0x0001, paired: [0x37b0, 0x0009] },
+      { vendorId: 0x373e, productId: 0x0054, mouseTarget: 0 },
+    ];
+    for (const o of devices) {
+      const fake = new FakeMouse(o);
+      const drv = (await openWlMouse(fake.asHid(), noSleep))!;
+      const ss = await drv.read();
+      for (const st of ss) await drv.write(st).catch(() => undefined);
+      expect(fake.sets().length).toBeGreaterThan(10);
+      for (const f of fake.sent) {
+        expect(f.page).not.toBe(0xb0);
+        if ((f.cmd & 0x80) === 0) {
+          expect(f.page === 0 && [0, 0x0a, 0x0b, 0x0d, 0x0f, 0x26].includes(f.cmd)).toBe(false);
+          expect(f.page).not.toBe(4);
+        }
+      }
+    }
   });
 });

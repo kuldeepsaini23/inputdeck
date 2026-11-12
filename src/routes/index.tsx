@@ -47,7 +47,7 @@ function Welcome() {
             ))}
           </ol>
           <div className="display mt-9 text-[8.5px] tracking-[0.3em] text-[var(--text-4)]">WORKS WITH</div>
-          <div className="mt-3 text-[13px] text-[var(--text-3)]">WLMouse · Wraith · more brands coming</div>
+          <div className="mt-3 text-[13px] text-[var(--text-3)]">WLMouse · Pulsar · Wraith · more brands coming</div>
         </div>
       </main>
     </div>

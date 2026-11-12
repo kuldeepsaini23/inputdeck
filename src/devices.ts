@@ -5,8 +5,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Driver, DriverFactory, Setting } from './drivers/types';
 import { wlmouseFactory } from './drivers/wlmouse';
 import { wraithFactory } from './drivers/wraith';
+import { pulsarFactory } from './drivers/pulsar';
 
-export const FACTORIES: DriverFactory[] = [wlmouseFactory, wraithFactory];
+export const FACTORIES: DriverFactory[] = [wlmouseFactory, wraithFactory, pulsarFactory];
 
 export interface DeviceState {
   id: string;

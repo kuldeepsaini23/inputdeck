@@ -7,6 +7,7 @@ Works in Chrome, Edge and Opera on desktop (it uses [WebHID](https://developer.m
 ## Supported devices
 
 - **WLMouse** (HUAN, HUAN M and other models on the Compx protocol)
+- **Pulsar** CrazyLight mice on the 8K dongle (X2 / X3 CrazyLight) — experimental
 - **Wraith** W75 V2 HE
 
 More brands are coming.

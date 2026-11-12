@@ -4,6 +4,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 /** What each supported device is called in Chrome's device list. */
 const GUIDE: { icon: React.ReactNode; brand: string; pick: string; note: string }[] = [
   { icon: <Mouse className="size-4" />, brand: 'WLMouse', pick: 'HUAN 8K Receiver', note: 'Pick the receiver, not the mouse. Wired mice show their own name.' },
+  { icon: <Mouse className="size-4" />, brand: 'Pulsar', pick: 'Pulsar 8K Dongle', note: 'Pick the receiver. Wired Pulsar mice show their own name. Turn the mouse on first.' },
   { icon: <Keyboard className="size-4" />, brand: 'Wraith', pick: 'Wraith W75', note: 'Plug the keyboard in with its cable.' },
 ]
 

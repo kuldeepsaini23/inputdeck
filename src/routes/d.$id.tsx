@@ -74,7 +74,7 @@ function DevicePage() {
       )}
       {mgr.isAllowed(dev.id) && (
         <button type="button" onClick={() => mgr.revokeChanges(dev.id)} title="Stop writing to this untested device"
-          className="pill-glass display absolute bottom-[34px] left-6 z-30 flex items-center gap-2 rounded-full px-4 py-2.5 text-[11px] font-semibold text-[var(--text-2)] hover:text-[var(--text)]">
+          className="pill-glass display absolute bottom-[104px] left-6 z-30 flex items-center gap-2 rounded-full px-4 py-2.5 text-[11px] font-semibold text-[var(--text-2)] hover:text-[var(--text)]">
           <span className="eyebrow !text-[8px]">Untested · changes on</span> Make view-only
         </button>
       )}

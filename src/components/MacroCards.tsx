@@ -239,7 +239,7 @@ export function MacroEditor({ v, slot, onChange, className }: {
         {recording
           ? 'Every key you press is captured, Esc and Tab too; click Stop when done.'
           : mouse
-            ? 'The mouse plays the macro itself, with or without InputDeck open.'
+            ? 'The device plays the macro itself, with or without InputDeck open.'
             : `Text is typed as plain ASCII with a US layout.${delays ? '' : " This keyboard's firmware can't store delays."}`}
       </p>
     </Card>

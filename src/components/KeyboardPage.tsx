@@ -8,6 +8,7 @@ import { usedBytes, type Macros } from '#/lib/macros'
 import { KeyboardView, type KeyLook } from './KeyboardView'
 import { KeyCard, KeyPicker, effective, type Keymap } from './KeymapCards'
 import { MacroEditor, MacroList, UsageBar } from './MacroCards'
+import { AdvancedCards, MODE_COLOR, MODE_NAME, advancedSummary, entryAt } from './AdvancedCards'
 import { SocdCard, socdColor, socdEntryLabel, socdEntryOf, socdPickKey, type SocdPick } from './SocdCards'
 import { BigValue, Card, ChoiceSelect, Range, Segmented, SWATCHES, Toggle, hex, type Choice } from './kit'
 import { GenericCard, Hero, Pulse, shortHz, type Edit } from './parts'
@@ -30,7 +31,7 @@ const ICON: Record<string, React.ReactNode> = {
   Settings: <Settings2 className="size-4" />,
 }
 /** settings with their own place in a tab (everything else in their group shows as a generic card) */
-const OWN = new Set(['actuation', 'rapid_trigger', 'rt_sens', 'per_key_trigger', 'per_key_color', 'socd', 'keymap', 'macros', 'polling', 'profile', 'fw', 'model'])
+const OWN = new Set(['rt_adaptive', 'advanced_keys', 'actuation', 'rapid_trigger', 'rt_sens', 'per_key_trigger', 'per_key_color', 'socd', 'keymap', 'macros', 'polling', 'profile', 'fw', 'model'])
 /** driver groups that feed a tab of another name */
 const GROUP_TAB: Record<string, string> = { Switches: 'Performance', Info: 'Settings', Profile: 'Settings', Profiles: 'Settings' }
 /** old ?tab= values */
@@ -55,13 +56,13 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     const has = (k: string) => (edit ?? []).some((s) => s.key === k)
     const t = new Set<string>()
     if (has('actuation') || has('per_key_trigger') || has('polling')) t.add('Performance')
-    if (has('rapid_trigger') || has('rt_sens') || has('per_key_trigger')) t.add('Rapid Trigger')
+    if (has('rapid_trigger') || has('rt_sens') || has('per_key_trigger') || has('rt_adaptive')) t.add('Rapid Trigger')
     if (has('socd')) t.add('SOCD')
     for (const s of edit ?? []) {
       if (OWN.has(s.key) || s.group === 'Per-key') continue
       t.add(GROUP_TAB[s.group] ?? s.group)
     }
-    if (has('keymap')) t.add('Keys')
+    if (has('keymap') || has('advanced_keys')) t.add('Keys')
     if (has('macros')) t.add('Macros')
     if (edit) t.add('Settings')
     return [...t].sort((a, b) => (ORDER.indexOf(a) + 1 || 99) - (ORDER.indexOf(b) + 1 || 99))
@@ -134,7 +135,15 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     if (km && (original?.id !== dev.id || original.n !== km.keys.length)) setOriginal({ id: dev.id, n: km.keys.length, layers: km.layers.map((l) => l.slice()) })
   }, [km, dev.id, original])
   const origLayers = original?.id === dev.id ? original.layers : undefined
-  const onKeys = active === 'Keys' && !!km
+  // ---- advanced key functions (Mod-Tap / Toggle / DKS), the second half of the Keys tab
+  const advS = get('advanced_keys')
+  const adv = advS?.value.kind === 'advancedKeys' ? advS.value : undefined
+  const [keysView, setKeysView] = useState<'remap' | 'advanced'>('remap')
+  const [advPick, setAdvPick] = useState<number | undefined>(undefined)
+  const advSel = adv && advPick !== undefined && advPick < adv.keys.length ? advPick : undefined
+  const onAdv = active === 'Keys' && !!adv && (keysView === 'advanced' || !km)
+  const locked = (i: number) => !!km?.locked?.[layer]?.includes(i)
+  const onKeys = active === 'Keys' && !!km && !onAdv
 
   // ---- macros (drivers with a macros setting)
   const macS = get('macros')
@@ -204,7 +213,17 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     looks = km!.keys.map((_, i) => {
       const code = km!.layers[layer][i]
       const was = origLayers?.[layer]?.[i]
+      if (locked(i)) return { dim: true, title: `${kcLabel(code, km!.codes) || 'None'}: can't be changed on this keyboard` }
       return { dot: was !== undefined && was !== code, dim: code === 1 && layer > 0, title: `${kcLabel(code, km!.codes) || 'None'}: ${describeKc(code, km!.codes)}` }
+    })
+  } else if (onAdv) {
+    interactive = true
+    boardKeys = adv!.keys
+    looks = adv!.keys.map((k, i) => {
+      const e = entryAt(adv!, i)
+      if (e) return { color: MODE_COLOR[e.mode], title: `${k.label}: ${MODE_NAME[e.mode]}` }
+      if (adv!.unavailable?.includes(i)) return { dim: true, title: `${k.label}: can't take an advanced function` }
+      return {}
     })
   } else if (onMacros && km && keys) {
     // keys that play the selected macro (on any layer) get a dot
@@ -257,6 +276,10 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     ;[hero, cards] = socdTab()
   } else if (active === 'Lighting') {
     ;[hero, cards] = lighting()
+  } else if (onAdv) {
+    const sm = advancedSummary(adv!, advSel)
+    hero = <Hero brand={brand} label={advSel === undefined ? 'Advanced keys' : 'Advanced key'} value={sm.value} size={sm.value.length > 6 ? Math.max(30, Math.round(400 / sm.value.length)) : 64} sub={sm.sub} />
+    cards = <AdvancedCards v={adv!} pos={advSel} onChange={(nv) => onEdit('advanced_keys', nv)} />
   } else if (onKeys) {
     ;[hero, cards] = keymap()
   } else if (onMacros) {
@@ -377,6 +400,7 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
               <TravelDiagram max={range.max} act={travel} sens={rtSome ? sensVal : undefined} />
             </Card>
           )}
+          {get('rt_adaptive') && <GenericCard title="Adaptive" settings={[get('rt_adaptive')!]} onEdit={onEdit} />}
           <Card title="How it works">
             <p className="hint m-0">A normal key fires and resets at one fixed point. With Rapid Trigger a key resets as soon as it rises by the sensitivity distance, and fires again as soon as it goes back down by the same amount, so quick taps and strafes register instantly.</p>
             <p className="hint mt-3 mb-0">Lower sensitivity reacts faster but can misfire if you rest your fingers on the keys.</p>
@@ -593,15 +617,23 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
 
   const showBar = (interactive || testing) && boardKeys
   // keys tab: one key at a time; a click (or drag) picks the newly added key
-  const pickKey = (next: Set<number>) => setKSel([...next].find((i) => i !== keySel))
+  const pickKey = (next: Set<number>) => {
+    const k = [...next].find((i) => i !== keySel)
+    setKSel(k !== undefined && locked(k) ? undefined : k)
+  }
+  const pickAdv = (next: Set<number>) => setAdvPick([...next].find((i) => i !== advSel))
+  const viewSwitch = km && adv && (
+    <Segmented label="Keys view" className="[&_button]:!px-3.5 [&_button]:!py-1.5 [&_button]:!text-[11px]" value={keysView}
+      options={[['Remap', 'remap'], ['Mod-Tap · Toggle · DKS', 'advanced']] as const} onChange={setKeysView} />
+  )
   return (
     <>
       <main className="scroll-thin relative z-10 flex h-[calc(100%-76px)] flex-col items-center overflow-y-auto px-16 pt-2 pb-[130px]">
         <div className="relative w-full" style={{ maxWidth: kbMax }}>
           <div className="pointer-events-none absolute -inset-x-20 -top-10 h-[120%] rounded-full bg-[radial-gradient(ellipse_at_center,rgb(230_232_236/0.08),transparent_65%)]" />
           {boardKeys ? (
-            <KeyboardView keys={boardKeys} looks={looks} selected={onKeys ? new Set(keySel === undefined ? [] : [keySel]) : onSocd ? socdBoardSel : interactive ? sel : new Set()}
-              onSelect={onKeys ? pickKey : onSocd ? socdClick : setSel} interactive={interactive} knob={dev.driver.knob} maxWidth={kbMax} />
+            <KeyboardView keys={boardKeys} looks={looks} selected={onKeys ? new Set(keySel === undefined ? [] : [keySel]) : onAdv ? new Set(advSel === undefined ? [] : [advSel]) : onSocd ? socdBoardSel : interactive ? sel : new Set()}
+              onSelect={onKeys ? pickKey : onAdv ? pickAdv : onSocd ? socdClick : setSel} interactive={interactive} knob={dev.driver.knob} maxWidth={kbMax} />
           ) : (
             <div className="grid h-64 place-items-center"><KeyboardIcon className="size-40 text-white/10" strokeWidth={0.6} /></div>
           )}
@@ -612,6 +644,7 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
                   ? <><span className="display mr-1.5 text-[13px] font-semibold text-[var(--text)]">{km!.keys[keySel].label || 'Key'}</span>selected · pick what it sends below</>
                   : 'click a key to remap it · dot = remapped this session · faded = from the layer below'}
               </span>
+              {viewSwitch}
               {km!.layers.length > 1 && (
                 <span className="flex items-center gap-2.5">
                   <span className="eyebrow">Layer</span>
@@ -623,6 +656,15 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
                   )}
                 </span>
               )}
+            </div>
+          ) : onAdv ? (
+            <div className="mt-3 flex h-9 items-center justify-between gap-4">
+              <span className="text-[12px] text-[var(--text-3)]">
+                {advSel !== undefined
+                  ? <><span className="display mr-1.5 text-[13px] font-semibold text-[var(--text)]">{adv!.keys[advSel]?.label || 'Key'}</span>selected · pick its function below</>
+                  : 'click a key to give it an advanced function · colour = Mod-Tap / Toggle / DKS'}
+              </span>
+              {viewSwitch}
             </div>
           ) : onSocd ? (
             <div className="mt-3 flex h-9 items-center justify-between gap-4">

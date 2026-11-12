@@ -319,10 +319,14 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     const perKey = !!pkT && selIdx.length > 0
     const first = selIdx[0]
     const range = pkT ?? (act ? { min: act.min, max: act.max, step: act.step } : undefined)
-    const travel = perKey ? pkT!.travel[first] : act?.current
-    const uniform = !perKey || selIdx.every((i) => Math.abs(pkT!.travel[i] - pkT!.travel[first]) < 1e-6)
-    const rtAll = perKey ? selIdx.every((i) => pkT!.rapid[i]) : rt?.on ?? (pkT ? pkT.rapid.every(Boolean) : false)
-    const rtSome = perKey ? selIdx.some((i) => pkT!.rapid[i]) : pkT ? pkT.rapid.some(Boolean) : rtAll
+    // with no keys picked, describe the whole board from the per-key data when there is some
+    // (a driver's "all keys" value may come from a single reference key)
+    const scopeIdx = perKey ? selIdx : pkT ? pkT.travel.map((_, i) => i) : []
+    const first0 = scopeIdx[0] ?? 0
+    const travel = pkT && scopeIdx.length ? pkT.travel[first0] : act?.current
+    const uniform = !pkT || scopeIdx.every((i) => Math.abs(pkT.travel[i] - pkT.travel[first0]) < 1e-6)
+    const rtAll = pkT && scopeIdx.length ? scopeIdx.every((i) => pkT.rapid[i]) : rt?.on ?? false
+    const rtSome = pkT && scopeIdx.length ? scopeIdx.some((i) => pkT.rapid[i]) : rtAll
     const firstRt = pkT ? pkT.rapid.findIndex(Boolean) : -1
     const sensVal = perKey ? pkT!.sens[first] : sens?.current ?? (pkT && firstRt >= 0 ? pkT.sens[firstRt] : undefined)
     const sensUniform = !perKey || selIdx.every((i) => Math.abs(pkT!.sens[i] - pkT!.sens[first]) < 1e-6)

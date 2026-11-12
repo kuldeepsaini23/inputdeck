@@ -107,6 +107,26 @@ export type Value =
  *     entries: [ { key: posA, mode: 'mt', hold: 0xe0, tap: 0x04, delay: 200 },
  *                { key: posD, mode: 'dks', actions: [{ kc: 0x07, mask: 0x0f }, { kc: 0x04, mask: 0x10 }] } ] }
  */
+/**
+ * Live per-key lighting. The device has a grid of `rows` x `cols` LED cells; `frame()` sets every cell.
+ * start() remembers the current lighting and switches to streaming; stop() puts the remembered lighting back.
+ * `colorOrder`/`map` start unknown on untested boards and are filled in from a guided test.
+ */
+export interface LiveLight {
+  rows: number;
+  cols: number;
+  /** cell (row * cols + col) -> layout key position, when known */
+  map?: (number | undefined)[];
+  /** true until a hardware test confirmed the grid and colour order */
+  experimental: boolean;
+  start(): Promise<void>;
+  /** cells: rows*cols values, each the 3 bytes sent for that cell packed as 0xAABBCC (byte order as sent) */
+  frame(cells: number[]): Promise<void>;
+  stop(): Promise<void>;
+  /** true between start() and stop() */
+  readonly active: boolean;
+}
+
 export interface AdvancedKeys {
   kind: 'advancedKeys';
   /** the board picture; entry keys are positions in this array */
@@ -273,6 +293,11 @@ export interface Driver {
    * Returns a plain-text report the user copies and sends to the developer.
    */
   diagnose?(onProgress?: (done: number, total: number) => void): Promise<string>;
+  /**
+   * Live per-key lighting streamed from the page (not stored on the device; gone when the page stops or the
+   * device is unplugged). Only for firmware with a streaming effect, e.g. DAREU TG boards (effect 18 + FRAME).
+   */
+  readonly liveLight?: LiveLight;
   read(): Promise<Setting[]>;
   write(s: Setting): Promise<void>;
   close(): Promise<void>;

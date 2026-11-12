@@ -611,8 +611,13 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
           {bri && <Level label="Brightness" v={bri} onChange={(n) => onEdit('light_bri', { ...bri, current: n })} />}
           {speed && <Level label="Speed" v={speed} onChange={(n) => onEdit('light_speed', { ...speed, current: n })} />}
         </Card>
-        {extras('Lighting').filter((x) => !LIGHT_OWN.has(x.key)).length > 0 && (
-          <GenericCard title="More lighting" settings={extras('Lighting').filter((x) => !LIGHT_OWN.has(x.key))} onEdit={onEdit} className="col-span-3" />
+        {/* extra light zones (e.g. Lofree Hyzen: bottom strip and receiver) get a card each */}
+        {[['strip_', 'Bottom light strip'], ['dongle_', 'Receiver light']].map(([pre, title]) => {
+          const zone = extras('Lighting').filter((x) => x.key.startsWith(pre))
+          return zone.length ? <GenericCard key={pre} title={title} settings={zone} onEdit={onEdit} className="col-span-3 xl:col-span-1" /> : null
+        })}
+        {extras('Lighting').filter((x) => !LIGHT_OWN.has(x.key) && !/^(strip|dongle)_/.test(x.key)).length > 0 && (
+          <GenericCard title="More lighting" settings={extras('Lighting').filter((x) => !LIGHT_OWN.has(x.key) && !/^(strip|dongle)_/.test(x.key))} onEdit={onEdit} className="col-span-3" />
         )}
       </>
     )

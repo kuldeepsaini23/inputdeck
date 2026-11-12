@@ -602,3 +602,80 @@ describe('SOCD', () => {
     expect(f.sent.some((p) => p[2] === CLS.MAGNETIC && p[3] === 1)).toBe(false); // never the normal-trigger reset
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+
+describe('diagnose (read-only lighting probe)', () => {
+  const allGets = (f: FakeDareu, from: number) => {
+    const frames = f.sent.slice(from);
+    expect(frames.length).toBeGreaterThan(0);
+    for (const fr of frames) expect(fr[3] & GET, `frame ${head(fr, 8).join(' ')}`).toBe(GET);
+    return frames;
+  };
+
+  it('A68 0.4.6: only GET frames, probes 03/84..88, reports firmware answers', async () => {
+    const [f, d] = await connect();
+    await d.read();
+    const from = f.sent.length;
+    const progress: [number, number][] = [];
+    const rep = await d.diagnose!((a, b) => progress.push([a, b]));
+    const frames = allGets(f, from);
+    // the never-used lighting ids, GET form only, [region] payload, profile byte 0
+    for (const cmd of [0x84, 0x85, 0x86, 0x87, 0x88]) {
+      const fr = f.wrote(CLS.LIGHTING, cmd);
+      expect(fr).toHaveLength(1);
+      expect(head(fr[0], 8)).toEqual([0, 1, 3, cmd, 0, 0, 0, 0]);
+    }
+    // nothing outside the GET ids we name
+    const seen = new Set(frames.map((fr) => `${fr[2]}/${fr[3]}`));
+    expect([...seen].sort()).toEqual(['0/128', '3/128', '3/129', '3/130', '3/131', '3/132', '3/133', '3/134', '3/135', '3/136', '5/131'].sort());
+    expect(rep).toMatch(/GET FRAME \(03\/84\) r0: 00 01 03 84 00 00 00 00 -> unsupported: 05 01 03 84/);
+    expect(rep).toMatch(/GET CAL_DATA \(03\/85\) r0: .* -> done: 02 01 03 85 00 00 = answered, no data/);
+    expect(rep).toMatch(/GET CUSTOM \(03\/88\) r0: .* -> unsupported/);
+    expect(rep).toContain('firmware: 00 03 00 80 00 00 00 00 -> done: 02 03 00 80 00 00 00 04 06 = version 0.4.6');
+    expect(rep).toContain('custom frame effect(s) 13, 14 PRESENT');
+    expect(rep).toContain('no streaming effect 18');
+    expect(progress.length).toBeGreaterThan(0);
+    const last = progress[progress.length - 1];
+    expect(last[0]).toBe(last[1]);
+    // diagnose leaves the device usable: a normal read afterwards still works
+    await expect(d.read()).resolves.toBeTruthy();
+  });
+
+  it('other firmware build: undocumented ids are not sent', async () => {
+    const [f, d] = await connect(undefined, (x) => (x.fw = [0, 4, 7]));
+    const from = f.sent.length;
+    const rep = await d.diagnose!();
+    allGets(f, from);
+    for (const cmd of [0x84, 0x85, 0x86, 0x87, 0x88]) expect(f.wrote(CLS.LIGHTING, cmd)).toHaveLength(0);
+    expect(rep).toContain('not sent');
+  });
+
+  it('silent / missing lighting: no throw, reports no answer', async () => {
+    for (const o of [{ ledProbe: 'silent' as const }, { noLighting: true }]) {
+      const [f, d] = await connect(o);
+      const from = f.sent.length;
+      const rep = await d.diagnose!();
+      allGets(f, from);
+      expect(rep).toContain('no answer');
+    }
+  });
+
+  it('busy replies and Windows framing are handled; data answers are flagged', async () => {
+    const [f, d] = await connect({ busy: 2, windows: true, ledProbe: 'data' });
+    const from = f.sent.length;
+    const rep = await d.diagnose!();
+    allGets(f, from);
+    expect(rep).toMatch(/GET FRAME \(03\/84\).*ANSWERED WITH DATA/);
+  });
+
+  it('allowlist: SET forms of the probe ids are refused', () => {
+    for (const cmd of [4, 5, 6, 7, 8]) {
+      expect(allowed(frame(CLS.LIGHTING, cmd, 1, 0, [0]))).toBe(false);
+      expect(allowed(frame(CLS.LIGHTING, cmd | GET, 1, 0, [0]))).toBe(true);
+      expect(allowed(frame(CLS.LIGHTING, cmd | GET, 1, 1, [0]))).toBe(false);
+      expect(allowed(frame(CLS.LIGHTING, cmd | GET, 2, 0, [0, 1]))).toBe(false);
+    }
+    expect(allowed(frame(CLS.LIGHTING, 9 | GET, 1, 0, [0]))).toBe(false);
+  });
+});

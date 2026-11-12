@@ -1,7 +1,7 @@
 // Simulated DAREU keyboard on TG firmware. Default: A68 (VID 260D PID 0175, magnetic, TravelVersion 2);
 // any other product from dareu-products.ts via `pid` (magnetic value layout follows its TravelVersion:
 // 0 = one byte per value, 1/2 = big-endian u16). Used by the tests.
-import { CLS, DEV, GET, KEY, LED, MAG, MCO, PAYLOAD, PFL, REPORT_SIZE, allowed, capsFor, productFor } from '../dareu';
+import { CLS, DEV, GET, KEY, LED, LED_PROBE, MAG, MCO, PAYLOAD, PFL, REPORT_SIZE, allowed, capsFor, productFor } from '../dareu';
 import { usageOfKeyId } from '../dareu-keys';
 
 /** Fakes refuse anything the real device wouldn't accept, so bugs surface in tests. */
@@ -28,6 +28,12 @@ export interface FakeDareuOpts {
   noRtAdaptive?: boolean;
   /** trigger writes (single / RT) only show up after this many later magnetic GETs */
   lag?: number;
+  /**
+   * how the never-used lighting GETs (03/84..88) answer: 'firmware' (default) = like the A68 0.4.6
+   * image (CAL_DATA done with no data, the rest status 5 unsupported); 'silent' = never answer;
+   * 'data' = FRAME answers with bytes (to exercise the report)
+   */
+  ledProbe?: 'firmware' | 'silent' | 'data';
 }
 
 /** One key's trigger in device units (A68 / TravelVersion 2: travel 0.005 mm, sensitivity 0.005 mm). */
@@ -251,6 +257,15 @@ export class FakeDareu {
           };
         }
         return this.answer(f, []);
+      }
+      if (get && (Object.values(LED_PROBE) as number[]).includes(cmd)) {
+        const mode = this.o.ledProbe ?? 'firmware';
+        if (mode === 'silent') return;
+        if (mode === 'data' && cmd === LED_PROBE.FRAME) return this.answer(f, [pl[0], 0, 0, 0, 0xff, 0x00, 0x40]);
+        if (cmd === LED_PROBE.CAL_DATA) return this.answer(f, [pl[0]]);
+        this.answer(f, [pl[0]]);
+        this.reply![0] = 0x05; // unsupported
+        return;
       }
       if (cmd === LED.BRIGHTNESS && get) return this.answer(f, [pl[0], this.bri]);
       if (cmd === LED.BRIGHTNESS) {

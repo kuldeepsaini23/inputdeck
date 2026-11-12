@@ -122,6 +122,40 @@ export const SWITCH_TYPE = 56;
 const SPEED_MAX = 4;
 const BRI_RAW_MAX = 125;
 
+// --- secondary lights, both inside the same function area (written with cmd 06, like the main
+// backlight). Byte offsets and ranges are exactly what Lofree HUB uses (OE930 config +
+// LightEffect FrontLightSettings / DongleLightSettings components).
+//
+// Preposition / bottom "light strip" (hub FrontLightSettings): mode wx(38), brightness wx(31,
+// raw 0..100 asc), speed wx(40, SPEED_MAX-ui desc), colour wx(42,43,44,45, flag 1 then R,G,B).
+/** bottom light-strip effects (prepositionLight: constantlyOn/breathe/meteor/OpenClose/storeLibra/conversion) */
+const STRIP_MODES: [string, number][] = [
+  ['Static', 0x00], ['Breathing', 0x01], ['Meteor', 0x02], ['Open/close', 0x03], ['Scale', 0x04], ['Colour cycle', 0x05],
+];
+export const STRIP_BRI = 31;
+export const STRIP_MODE = 38;
+export const STRIP_SPEED = 40;
+export const STRIP_CUSTOM = 42;
+export const STRIP_RGB = 43;
+export const STRIP_BRI_MAX = 100;
+
+// Receiver / dongle light (hub DongleLightSettings): mode k(49), brightness k(32,
+// ceil(pct*255/100) asc), speed k(52, SPEED_MAX-ui desc), colour wx(10,11,12,16, R,G,B then flag 1).
+// Only the "full" config (wired 0x0024 + 2.4G 0x0025) has a dongle light; the wired-only "single"
+// variant (0x0029) does not.
+/** receiver-light effects (dongleLight: constantlyOn/breathe/meteor/conversion) */
+const DONGLE_MODES: [string, number][] = [
+  ['Static', 0x00], ['Breathing', 0x01], ['Meteor', 0x02], ['Colour cycle', 0x03],
+];
+export const DONGLE_RGB = 10;
+export const DONGLE_CUSTOM = 16;
+export const DONGLE_BRI = 32;
+export const DONGLE_MODE = 49;
+export const DONGLE_SPEED = 52;
+export const DONGLE_BRI_MAX = 255;
+/** wired-only variant with no receiver light */
+const SINGLE_PID = 0x0029;
+
 // ---------------------------------------------------------------------------------------------
 // layout
 
@@ -711,6 +745,10 @@ class Hyzen implements Driver {
       const mode = block[L_MODE];
       const name = LIGHT_MODES.find(([, m]) => m === mode)?.[0] ?? 'unknown';
       note(`main backlight: effect ${hex2(mode)} (${name}), speed byte ${block[L_SPEED]}, colour flag ${block[L_CUSTOM]}, colour ${rgbHex(block, L_RGB)}, brightness ${block[L_BRI]}/${BRI_RAW_MAX}`);
+      const sname = STRIP_MODES.find(([, m]) => m === block[STRIP_MODE])?.[0] ?? 'unknown';
+      note(`light strip: effect ${hex2(block[STRIP_MODE])} (${sname}), speed byte ${block[STRIP_SPEED]}, colour flag ${block[STRIP_CUSTOM]}, colour ${rgbHex(block, STRIP_RGB)}, brightness ${block[STRIP_BRI]}/${STRIP_BRI_MAX}`);
+      const dname = DONGLE_MODES.find(([, m]) => m === block[DONGLE_MODE])?.[0] ?? 'unknown';
+      note(`receiver light: effect ${hex2(block[DONGLE_MODE])} (${dname}), speed byte ${block[DONGLE_SPEED]}, colour flag ${block[DONGLE_CUSTOM]}, colour ${rgbHex(block, DONGLE_RGB)}, brightness ${block[DONGLE_BRI]}/${DONGLE_BRI_MAX}`);
       note(`switch mode byte ${hex2(block[SWITCH_TYPE])} (01 mechanical, 02 magnetic)`);
     }
 
@@ -1039,6 +1077,46 @@ class Hyzen implements Driver {
       value: { kind: 'number', min: 0, max: SPEED_MAX, current: clamp(SPEED_MAX - block[L_SPEED], 0, SPEED_MAX), unit: '' },
     });
     out.push({ key: 'light_color', label: 'Colour', group: 'Lighting', value: { kind: 'color', rgb: rgb(block[L_RGB], block[L_RGB + 1], block[L_RGB + 2]) } });
+
+    // --- bottom light strip (preposition light)
+    const smode = block[STRIP_MODE];
+    const smodes: [string, number][] = STRIP_MODES.map(([l, m]) => [l, m]);
+    if (!STRIP_MODES.some(([, m]) => m === smode)) smodes.push([`Mode ${smode}`, smode]);
+    out.push({ key: 'strip_mode', label: 'Light strip effect', group: 'Lighting', value: { kind: 'choice', options: smodes, current: smode } });
+    out.push({
+      key: 'strip_bri',
+      label: 'Light strip brightness',
+      group: 'Lighting',
+      value: { kind: 'number', min: 0, max: 100, current: clamp(block[STRIP_BRI], 0, STRIP_BRI_MAX), unit: '%' },
+    });
+    out.push({
+      key: 'strip_speed',
+      label: 'Light strip speed',
+      group: 'Lighting',
+      value: { kind: 'number', min: 0, max: SPEED_MAX, current: clamp(SPEED_MAX - block[STRIP_SPEED], 0, SPEED_MAX), unit: '' },
+    });
+    out.push({ key: 'strip_color', label: 'Light strip colour', group: 'Lighting', value: { kind: 'color', rgb: rgb(block[STRIP_RGB], block[STRIP_RGB + 1], block[STRIP_RGB + 2]) } });
+
+    // --- receiver / dongle light (only the full config has one)
+    if (this.pid !== SINGLE_PID) {
+      const dmode = block[DONGLE_MODE];
+      const dmodes: [string, number][] = DONGLE_MODES.map(([l, m]) => [l, m]);
+      if (!DONGLE_MODES.some(([, m]) => m === dmode)) dmodes.push([`Mode ${dmode}`, dmode]);
+      out.push({ key: 'dongle_mode', label: 'Receiver light effect', group: 'Lighting', value: { kind: 'choice', options: dmodes, current: dmode } });
+      out.push({
+        key: 'dongle_bri',
+        label: 'Receiver light brightness',
+        group: 'Lighting',
+        value: { kind: 'number', min: 0, max: 100, current: clamp(Math.round((block[DONGLE_BRI] * 100) / DONGLE_BRI_MAX), 0, 100), unit: '%' },
+      });
+      out.push({
+        key: 'dongle_speed',
+        label: 'Receiver light speed',
+        group: 'Lighting',
+        value: { kind: 'number', min: 0, max: SPEED_MAX, current: clamp(SPEED_MAX - block[DONGLE_SPEED], 0, SPEED_MAX), unit: '' },
+      });
+      out.push({ key: 'dongle_color', label: 'Receiver light colour', group: 'Lighting', value: { kind: 'color', rgb: rgb(block[DONGLE_RGB], block[DONGLE_RGB + 1], block[DONGLE_RGB + 2]) } });
+    }
     return out;
   }
 
@@ -1150,6 +1228,54 @@ class Hyzen implements Driver {
           b[L_RGB] = (c >> 16) & 0xff;
           b[L_RGB + 1] = (c >> 8) & 0xff;
           b[L_RGB + 2] = c & 0xff;
+        });
+      }
+      case 'strip_mode:choice': {
+        const mode = (v as Extract<Value, { kind: 'choice' }>).current;
+        if (!STRIP_MODES.some(([, m]) => m === mode)) throw new Error('unknown light-strip effect');
+        return this.writeBlock((b) => (b[STRIP_MODE] = mode));
+      }
+      case 'strip_bri:number': {
+        const pct = clamp(Math.round((v as Extract<Value, { kind: 'number' }>).current), 0, 100);
+        return this.writeBlock((b) => (b[STRIP_BRI] = clamp(pct, 0, STRIP_BRI_MAX)));
+      }
+      case 'strip_speed:number': {
+        const ui = clamp(Math.round((v as Extract<Value, { kind: 'number' }>).current), 0, SPEED_MAX);
+        return this.writeBlock((b) => (b[STRIP_SPEED] = SPEED_MAX - ui));
+      }
+      case 'strip_color:color': {
+        const c = (v as Extract<Value, { kind: 'color' }>).rgb;
+        return this.writeBlock((b) => {
+          b[STRIP_CUSTOM] = 1;
+          b[STRIP_RGB] = (c >> 16) & 0xff;
+          b[STRIP_RGB + 1] = (c >> 8) & 0xff;
+          b[STRIP_RGB + 2] = c & 0xff;
+        });
+      }
+      case 'dongle_mode:choice': {
+        if (this.pid === SINGLE_PID) throw new Error('this model has no receiver light');
+        const mode = (v as Extract<Value, { kind: 'choice' }>).current;
+        if (!DONGLE_MODES.some(([, m]) => m === mode)) throw new Error('unknown receiver-light effect');
+        return this.writeBlock((b) => (b[DONGLE_MODE] = mode));
+      }
+      case 'dongle_bri:number': {
+        if (this.pid === SINGLE_PID) throw new Error('this model has no receiver light');
+        const pct = clamp(Math.round((v as Extract<Value, { kind: 'number' }>).current), 0, 100);
+        return this.writeBlock((b) => (b[DONGLE_BRI] = clamp(Math.ceil((pct * DONGLE_BRI_MAX) / 100), 0, DONGLE_BRI_MAX)));
+      }
+      case 'dongle_speed:number': {
+        if (this.pid === SINGLE_PID) throw new Error('this model has no receiver light');
+        const ui = clamp(Math.round((v as Extract<Value, { kind: 'number' }>).current), 0, SPEED_MAX);
+        return this.writeBlock((b) => (b[DONGLE_SPEED] = SPEED_MAX - ui));
+      }
+      case 'dongle_color:color': {
+        if (this.pid === SINGLE_PID) throw new Error('this model has no receiver light');
+        const c = (v as Extract<Value, { kind: 'color' }>).rgb;
+        return this.writeBlock((b) => {
+          b[DONGLE_RGB] = (c >> 16) & 0xff;
+          b[DONGLE_RGB + 1] = (c >> 8) & 0xff;
+          b[DONGLE_RGB + 2] = c & 0xff;
+          b[DONGLE_CUSTOM] = 1;
         });
       }
       case 'actuation:float': {

@@ -1,6 +1,10 @@
 // Simulated Lofree Hyzen (Lofree HUB protocol, report 4 transactions). Used by the tests.
 import {
   CMD,
+  DONGLE_BRI,
+  DONGLE_MODE,
+  DONGLE_RGB,
+  DONGLE_SPEED,
   HYZEN_CODES,
   KEY_SLOTS,
   LED_BYTES,
@@ -12,6 +16,10 @@ import {
   POLL_WIRELESS,
   PROFILE_SIZE,
   PROFILES,
+  STRIP_BRI,
+  STRIP_MODE,
+  STRIP_RGB,
+  STRIP_SPEED,
   SWITCH_TYPE,
   allowed,
   frameSize,
@@ -77,6 +85,20 @@ export class FakeLofree {
     this.func[b + L_RGB + 1] = 0x22;
     this.func[b + L_RGB + 2] = 0x33;
     this.func[b + L_BRI] = 100;
+    // bottom light strip (preposition): Meteor, speed byte 1, brightness 80/100, colour #445566
+    this.func[b + STRIP_MODE] = 0x02;
+    this.func[b + STRIP_SPEED] = 1;
+    this.func[b + STRIP_BRI] = 80;
+    this.func[b + STRIP_RGB] = 0x44;
+    this.func[b + STRIP_RGB + 1] = 0x55;
+    this.func[b + STRIP_RGB + 2] = 0x66;
+    // receiver / dongle light: Breathing, speed byte 2, brightness 255/255, colour #778899
+    this.func[b + DONGLE_MODE] = 0x01;
+    this.func[b + DONGLE_SPEED] = 2;
+    this.func[b + DONGLE_BRI] = 255;
+    this.func[b + DONGLE_RGB] = 0x77;
+    this.func[b + DONGLE_RGB + 1] = 0x88;
+    this.func[b + DONGLE_RGB + 2] = 0x99;
     this.func[b + SWITCH_TYPE] = o.switchType ?? 0x02;
     this.func[POLL_WIRED] = 0x00;
     this.func[POLL_WIRELESS] = 0x04;

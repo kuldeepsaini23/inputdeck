@@ -8,6 +8,6 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   resolve: { tsconfigPaths: true },
   server: { port: 5176, strictPort: true },
-  plugins: [tailwindcss(), tanstackStart({ spa: { enabled: true } }), viteReact()],
+  plugins: [tailwindcss(), tanstackStart({ spa: { enabled: true, prerender: { outputPath: '/index.html' } } }), viteReact()],
   test: { include: ['src/**/*.test.ts'] },
 } as never)

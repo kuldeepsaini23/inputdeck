@@ -255,6 +255,8 @@ button:hover > .hotspot-ring { border-color: #fff; background: rgb(10 10 12 / 0.
 @keyframes fadein { from { opacity: 0; transform: translateY(6px); } }
 .scroll-thin::-webkit-scrollbar { width: 6px; }
 .scroll-thin::-webkit-scrollbar-thumb { background: rgb(255 255 255 / 0.15); border-radius: 3px; }
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
 
 }
 

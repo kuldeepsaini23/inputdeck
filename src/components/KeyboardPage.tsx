@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Gauge, Keyboard as KeyboardIcon, Lightbulb, SlidersHorizontal, ToggleRight, Zap } from 'lucide-react'
+import { Gauge, Keyboard as KeyboardIcon, Lightbulb, Settings2, SlidersHorizontal, Swords, Timer, Zap } from 'lucide-react'
 import type { DeviceState } from '#/devices'
 import type { KeyCap, Setting, Value } from '#/drivers/types'
 import { cn } from '#/lib/utils'
@@ -18,16 +18,25 @@ type PerKeyColor = Extract<Value, { kind: 'perKeyColor' }>
 type Float = Extract<Value, { kind: 'float' }>
 type Num = Extract<Value, { kind: 'number' }>
 
-const ORDER = ['Switches', 'Lighting', 'Keys', 'Macros', 'Performance']
+// Tabs: each big feature gets its own. Settings from the drivers are sorted into them by key or group.
+const ORDER = ['Performance', 'Rapid Trigger', 'SOCD', 'Keys', 'Lighting', 'Macros', 'Settings']
 const ICON: Record<string, React.ReactNode> = {
-  Switches: <ToggleRight className="size-4" />,
-  Lighting: <Lightbulb className="size-4" />,
-  Keys: <KeyboardIcon className="size-4" />,
-  Macros: <Zap className="size-4" />,
   Performance: <Gauge className="size-4" />,
+  'Rapid Trigger': <Timer className="size-4" />,
+  SOCD: <Swords className="size-4" />,
+  Keys: <KeyboardIcon className="size-4" />,
+  Lighting: <Lightbulb className="size-4" />,
+  Macros: <Zap className="size-4" />,
+  Settings: <Settings2 className="size-4" />,
 }
-// per-key settings live on the Switches / Lighting tabs
-const MERGED = new Set(['Info', 'Per-key'])
+/** settings with their own place in a tab (everything else in their group shows as a generic card) */
+const OWN = new Set(['actuation', 'rapid_trigger', 'rt_sens', 'per_key_trigger', 'per_key_color', 'socd', 'keymap', 'macros', 'polling', 'profile', 'fw', 'model'])
+/** driver groups that feed a tab of another name */
+const GROUP_TAB: Record<string, string> = { Switches: 'Performance', Info: 'Settings', Profile: 'Settings', Profiles: 'Settings' }
+/** old ?tab= values */
+const TAB_ALIAS: Record<string, string> = { Switches: 'Performance' }
+/** lighting settings drawn by the Lighting cards */
+const LIGHT_OWN = new Set(['light_mode', 'light_power', 'light_bri', 'light_speed', 'light_color', 'light_rainbow'])
 const PRESET_SEL: [string, (l: string) => boolean][] = [
   ['All', () => true],
   ['WASD', (l) => ['W', 'A', 'S', 'D'].includes(l)],
@@ -43,10 +52,24 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
   const edit = dev.edit
   const get = (k: string) => edit?.find((s) => s.key === k)
   const groups = useMemo(() => {
-    const g = [...new Set((edit ?? []).map((s) => s.group))].filter((x) => !MERGED.has(x))
-    return g.sort((a, b) => (ORDER.indexOf(a) + 1 || 99) - (ORDER.indexOf(b) + 1 || 99))
+    const has = (k: string) => (edit ?? []).some((s) => s.key === k)
+    const t = new Set<string>()
+    if (has('actuation') || has('per_key_trigger') || has('polling')) t.add('Performance')
+    if (has('rapid_trigger') || has('rt_sens') || has('per_key_trigger')) t.add('Rapid Trigger')
+    if (has('socd')) t.add('SOCD')
+    for (const s of edit ?? []) {
+      if (OWN.has(s.key) || s.group === 'Per-key') continue
+      t.add(GROUP_TAB[s.group] ?? s.group)
+    }
+    if (has('keymap')) t.add('Keys')
+    if (has('macros')) t.add('Macros')
+    if (edit) t.add('Settings')
+    return [...t].sort((a, b) => (ORDER.indexOf(a) + 1 || 99) - (ORDER.indexOf(b) + 1 || 99))
   }, [edit])
-  const active = tab && groups.includes(tab) ? tab : groups[0]
+  const want = tab ? TAB_ALIAS[tab] ?? tab : undefined
+  const active = want && groups.includes(want) ? want : groups[0]
+  /** generic settings that belong on a tab (not drawn by a dedicated card) */
+  const extras = (t: string) => (edit ?? []).filter((s) => !OWN.has(s.key) && s.group !== 'Per-key' && (GROUP_TAB[s.group] ?? s.group) === t)
   const [sel, setSel] = useState<Set<number>>(new Set())
   // size the board so the cards below still fit above the dock
   const [vh, setVh] = useState(900)
@@ -89,15 +112,14 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     }
   }, [testing, dev.driver])
   useEffect(() => {
-    if (tab && tab !== 'Switches') setTesting(false)
-  }, [tab])
+    if (active !== 'Performance') setTesting(false)
+  }, [active])
   const kbMax = Math.round(Math.min(1000, Math.max(640, (vh - 420) / 0.43)))
 
   const brand = dev.driver.brand().toUpperCase()
   const pkT = get('per_key_trigger')?.value as PerKeyTrigger | undefined
   const pkC = get('per_key_color')?.value as PerKeyColor | undefined
   const keys: KeyCap[] | undefined = pkT?.keys ?? pkC?.keys ?? dev.driver.layout?.()
-  const inGroup = (g: string) => (edit ?? []).filter((s) => s.group === g)
 
   // ---- key remapping (drivers with a keymap setting)
   const kmS = get('keymap')
@@ -129,13 +151,13 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
   const [socdMsg, setSocdMsg] = useState<string | undefined>(undefined)
   const socdSel = socd?.mode === 'pairs' && socdSelPick !== undefined && socdSelPick < socd.entries.length ? socdSelPick : undefined
   const socdPicking = socd && socdPick && (socdPick.entry < socd.entries.length) ? socdPick : undefined
-  const onSocd = active === 'Switches' && !!socd && !testing && (socdPicking !== undefined || socdSel !== undefined)
+  const onSocd = active === 'SOCD' && !!socd
   useEffect(() => {
     setSocdPick(undefined)
     setSocdSel(undefined)
     setSocdMsg(undefined)
   }, [active, dev.id])
-  const socdBoardSel = onSocd ? new Set(socdPicking ? (socd!.mode === 'pairs' ? socdPicking.keys : socd!.entries[socdPicking.entry].keys) : socd!.entries[socdSel!].keys) : new Set<number>()
+  const socdBoardSel = !onSocd ? new Set<number>() : socdPicking ? new Set(socd!.mode === 'pairs' ? socdPicking.keys : socd!.entries[socdPicking.entry].keys) : socdSel !== undefined ? new Set(socd!.entries[socdSel].keys) : new Set<number>()
   /** board clicks while the SOCD card is active */
   const socdClick = (next: Set<number>) => {
     if (!socd) return
@@ -200,14 +222,18 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
       if (socd!.unavailable?.includes(p)) return { dim: true, title: `${k.label}: can't be used for SOCD` }
       return {}
     })
-  } else if (keys && active === 'Switches' && pkT && testing) {
+  } else if (keys && active === 'Performance' && pkT && testing) {
     looks = keys.map((_, i) => {
       const mm = live.depth.get(i) ?? 0
       return { press: mm / (pkT.max || 4), fired: mm >= pkT.travel[i] - 1e-6 && mm > 0.05, rt: pkT.rapid[i] }
     })
-  } else if (keys && active === 'Switches' && pkT) {
+  } else if (keys && active === 'Performance' && pkT) {
     interactive = true
     looks = pkT.travel.map((t, i) => ({ tint: Math.pow(1 - (t - pkT.min) / (pkT.max - pkT.min || 1), 2), rt: pkT.rapid[i] }))
+  } else if (keys && active === 'Rapid Trigger' && pkT) {
+    interactive = true
+    // Rapid Trigger keys glow; the more sensitive, the brighter
+    looks = pkT.rapid.map((on, i) => (on ? { tint: 0.35 + 0.65 * (1 - (pkT.sens[i] - pkT.sensMin) / (pkT.sensMax - pkT.sensMin || 1)), rt: true, title: `${pkT.keys[i]?.label}: Rapid Trigger ±${pkT.sens[i].toFixed(2)} mm` } : { dim: true }))
   } else if (keys && active === 'Lighting' && pkC) {
     interactive = true
     const on = (get('light_power')?.value as Extract<Value, { kind: 'toggle' }> | undefined)?.on ?? true
@@ -223,56 +249,47 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
 
   if (!edit) {
     hero = <Hero brand={brand} label="Reading settings" value="…" size={64} sub="Talking to the keyboard." />
-  } else if (active === 'Switches') {
-    ;[hero, cards] = switches()
+  } else if (active === 'Performance') {
+    ;[hero, cards] = triggers('perf')
+  } else if (active === 'Rapid Trigger') {
+    ;[hero, cards] = triggers('rt')
+  } else if (active === 'SOCD' && socd) {
+    ;[hero, cards] = socdTab()
   } else if (active === 'Lighting') {
     ;[hero, cards] = lighting()
   } else if (onKeys) {
     ;[hero, cards] = keymap()
   } else if (onMacros) {
     ;[hero, cards] = macros()
-  } else if (active === 'Performance') {
-    const poll = get('polling')
-    const label = choiceLabel(poll)
-    const rate = parseInt(label ?? '0', 10)
-    hero = <Hero brand={brand} label="Polling rate" value={label?.replace(/\s*Hz/i, '') ?? '—'} unit="Hz" size={76}
-      sub={rate ? `Reports every ${(1000 / rate).toFixed(3).replace(/0+$/, '').replace(/\.$/, '')} ms · wired` : undefined} />
-    cards = (
-      <>
-        {poll?.value.kind === 'choice' && (
-          <Card title="Polling rate" className="col-span-2">
-            <div className="flex items-end justify-between gap-4">
-              <BigValue value={label?.replace(/\s*Hz/i, '') ?? '—'} unit="Hz" size={30} />
-              <Pulse rate={rate || 1000} width={240} />
-            </div>
-            <Segmented className="mt-4" label="Polling rate" options={poll.value.options.map(([l, v]) => [shortHz(l), v] as const)} value={poll.value.current}
-              onChange={(c) => onEdit('polling', { ...(poll.value as Choice), current: c })} />
-            <p className="hint mt-3 mb-0">Higher rates report key presses sooner and use a little more CPU.</p>
-          </Card>
-        )}
-        <Card title="Device">
-          <div className="display text-[17px] font-semibold">{dev.driver.model()}</div>
-          <dl className="m-0 mt-3">
-            {[['Switches', pkT ? 'Magnetic' : undefined], ['Layout', /75/.test(dev.driver.model()) ? '75%' : undefined], ['Connection', 'Wired'], ['Firmware', textOf(dev, 'fw')]].filter(([, v]) => v).map(([k, v]) => (
-              <div key={k} className="flex justify-between border-b border-white/5 py-2 last:border-0">
-                <dt className="eyebrow">{k}</dt>
-                <dd className="display m-0 text-[11px]">{v}</dd>
-              </div>
-            ))}
-          </dl>
-          {textOf(dev, 'unsupported') && <p className="hint mt-2 mb-0 text-[var(--warn)]">{textOf(dev, 'unsupported')}</p>}
-        </Card>
-        <GenericCard title="More" settings={inGroup('Performance').filter((s) => s.key !== 'polling')} onEdit={onEdit} />
-      </>
-    )
+  } else if (active === 'Settings') {
+    ;[hero, cards] = settingsTab()
   } else if (active) {
     hero = <Hero brand={brand} label={active} value={dev.driver.model()} size={48} />
-    cards = <GenericCard title={active} settings={inGroup(active)} onEdit={onEdit} className="col-span-3" />
+    cards = <GenericCard title={active} settings={extras(active)} onEdit={onEdit} className="col-span-3" />
   } else {
     hero = <Hero brand={brand} label="Keyboard" value={dev.driver.model()} size={48} sub={textOf(dev, 'unsupported') ?? 'No settings to change on this keyboard yet.'} />
   }
 
-  function switches(): [React.ReactNode, React.ReactNode] {
+  function pollingCard(wide: boolean) {
+    const poll = get('polling')
+    if (poll?.value.kind !== 'choice') return null
+    const label = choiceLabel(poll)
+    const rate = parseInt(label ?? '0', 10)
+    return (
+      <Card key="poll" title="Polling rate" className={wide ? 'col-span-2' : undefined}>
+        <div className="flex items-end justify-between gap-4">
+          <BigValue value={label?.replace(/\s*Hz/i, '') ?? '—'} unit="Hz" size={wide ? 30 : 26} />
+          {wide && <Pulse rate={rate || 1000} width={240} />}
+        </div>
+        <Segmented className="mt-4" label="Polling rate" options={poll.value.options.map(([l, v]) => [shortHz(l), v] as const)} value={poll.value.current}
+          onChange={(c) => onEdit('polling', { ...(poll.value as Choice), current: c })} />
+        <p className="hint mt-3 mb-0">{rate ? `Reports every ${(1000 / rate).toFixed(3).replace(/0+$/, '').replace(/\.$/, '')} ms. ` : ''}Higher rates report presses sooner and use a little more CPU.</p>
+      </Card>
+    )
+  }
+
+  /** Performance (actuation, polling, live test) and Rapid Trigger share the per-key selection. */
+  function triggers(view: 'perf' | 'rt'): [React.ReactNode, React.ReactNode] {
     const act = get('actuation')?.value as Float | undefined
     const rt = get('rapid_trigger')?.value as Extract<Value, { kind: 'toggle' }> | undefined
     const sens = get('rt_sens')?.value as Float | undefined
@@ -281,8 +298,11 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     const range = pkT ?? (act ? { min: act.min, max: act.max, step: act.step } : undefined)
     const travel = perKey ? pkT!.travel[first] : act?.current
     const uniform = !perKey || selIdx.every((i) => Math.abs(pkT!.travel[i] - pkT!.travel[first]) < 1e-6)
-    const rtOn = perKey ? selIdx.every((i) => pkT!.rapid[i]) : rt?.on ?? false
-    const sensVal = perKey ? pkT!.sens[first] : sens?.current
+    const rtAll = perKey ? selIdx.every((i) => pkT!.rapid[i]) : rt?.on ?? (pkT ? pkT.rapid.every(Boolean) : false)
+    const rtSome = perKey ? selIdx.some((i) => pkT!.rapid[i]) : pkT ? pkT.rapid.some(Boolean) : rtAll
+    const firstRt = pkT ? pkT.rapid.findIndex(Boolean) : -1
+    const sensVal = perKey ? pkT!.sens[first] : sens?.current ?? (pkT && firstRt >= 0 ? pkT.sens[firstRt] : undefined)
+    const sensUniform = !perKey || selIdx.every((i) => Math.abs(pkT!.sens[i] - pkT!.sens[first]) < 1e-6)
     const sensRange = pkT ? { min: pkT.sensMin, max: pkT.sensMax, step: pkT.step } : sens
 
     const setTravel = (n: number) => {
@@ -293,40 +313,36 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
       } else if (act) onEdit('actuation', { ...act, current: snap(n, act.step) })
     }
     const setRt = (on: boolean) => {
-      if (perKey) {
+      if (perKey || (!rt && pkT)) {
         const r = pkT!.rapid.slice()
-        for (const i of selIdx) r[i] = on
+        for (const i of perKey ? selIdx : r.map((_, i) => i)) r[i] = on
         onEdit('per_key_trigger', { ...pkT!, rapid: r })
       } else if (rt) onEdit('rapid_trigger', { kind: 'toggle', on })
     }
     const setSens = (n: number) => {
-      if (perKey) {
+      if (perKey || (!sens && pkT)) {
         const s = pkT!.sens.slice()
-        for (const i of selIdx) s[i] = snap(n, pkT!.step)
+        for (const i of perKey ? selIdx : s.map((_, i) => i)) s[i] = snap(n, pkT!.step)
         onEdit('per_key_trigger', { ...pkT!, sens: s })
       } else if (sens) onEdit('rt_sens', { ...sens, current: snap(n, sens.step) })
     }
     const scope = perKey ? `${selIdx.length} key${selIdx.length === 1 ? '' : 's'}` : 'all keys'
-    const socdCard = socd && (
-      <SocdCard key="socd" className="col-span-3" v={socd} sel={socdSel} pick={socdPicking}
-        onSelect={(i) => { setSocdMsg(undefined); setSocdSel(i) }}
-        onPick={(p) => { setSocdMsg(undefined); setSocdPick(p) }}
-        onChange={(v) => onEdit('socd', v)} />
-    )
+    const more = extras('Performance')
 
+    // ---- live key test
     const lk = live.last
     const liveMm = lk !== undefined ? live.depth.get(lk) ?? 0 : 0
-    if (testing) {
+    if (view === 'perf' && testing) {
       const kname = lk !== undefined && keys?.[lk] ? keys[lk].label : undefined
-      const act = lk !== undefined && pkT ? pkT.travel[lk] : travel
+      const a = lk !== undefined && pkT ? pkT.travel[lk] : travel
       const hTest = (
         <Hero live brand={brand} label={kname ? `Live travel · ${kname}` : 'Live travel'} value={liveMm.toFixed(2)} unit="mm" size={76}
-          sub={kname && act !== undefined ? (liveMm >= act ? `Past its ${act.toFixed(2)} mm actuation point — the key fires` : `Fires at ${act.toFixed(2)} mm`) : 'Press any key on the keyboard.'} />
+          sub={kname && a !== undefined ? (liveMm >= a ? `Past its ${a.toFixed(2)} mm actuation point — the key fires` : `Fires at ${a.toFixed(2)} mm`) : 'Press any key on the keyboard.'} />
       )
       return [hTest, (
         <>
           <Card title="Key travel · live" className="col-span-2">
-            <TravelDiagram max={range?.max ?? 4} act={act ?? 1} sens={undefined} live={liveMm} />
+            <TravelDiagram max={range?.max ?? 4} act={a ?? 1} sens={undefined} live={liveMm} />
           </Card>
           <Card title="How to read it">
             <p className="hint m-0">Each key fills up as you press it and lights up once it passes its actuation point. Rapid Trigger keys keep their dot.</p>
@@ -335,13 +351,53 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
         </>
       )]
     }
-    const h = (
-      <Hero brand={brand} label={`Actuation · ${scope}`} value={travel === undefined ? '—' : uniform ? travel.toFixed(2) : 'Mixed'} unit={uniform ? 'mm' : undefined} size={76}
-        sub={range ? `Magnetic switches · ${range.min.toFixed(2)} – ${range.max.toFixed(2)} mm` : undefined} />
+
+    // ---- Rapid Trigger tab
+    if (view === 'rt') {
+      const state = rtAll ? 'On' : rtSome ? 'Mixed' : 'Off'
+      const h = (
+        <Hero brand={brand} label={`Rapid Trigger · ${scope}`} value={state} size={76}
+          sub={rtSome && sensVal !== undefined ? `Resets after ${sensUniform ? sensVal.toFixed(2) : 'mixed'} mm of upward travel` : 'Keys reset only when they rise back past the actuation point.'} />
+      )
+      return [h, (
+        <>
+          <Card title="Rapid Trigger" right={<Toggle label={`Rapid Trigger, ${scope}`} checked={rtAll} onChange={setRt} />}>
+            <div className="display text-[26px] font-semibold">{state}</div>
+            <p className="hint mt-1 mb-0">{perKey ? `For the ${scope} you picked.` : pkT ? 'For every key. Pick keys on the board to set them one by one.' : 'For every key.'}</p>
+            {sensRange && sensVal !== undefined && (
+              <>
+                <div className="mt-4 flex items-baseline justify-between"><span className="eyebrow">Sensitivity</span><BigValue value={sensUniform ? sensVal.toFixed(2) : 'Mixed'} unit={sensUniform ? 'mm' : undefined} size={13} /></div>
+                <Range className="mt-1.5" label="Rapid Trigger sensitivity" min={sensRange.min} max={sensRange.max} step={sensRange.step} value={sensVal} onChange={setSens} />
+                <div className="mt-1 flex justify-between text-[9.5px] text-[var(--text-4)]"><span>{sensRange.min.toFixed(2)} · fastest</span><span>{sensRange.max.toFixed(2)} · steadiest</span></div>
+              </>
+            )}
+          </Card>
+          {range && travel !== undefined && (
+            <Card title="Key travel">
+              <TravelDiagram max={range.max} act={travel} sens={rtSome ? sensVal : undefined} />
+            </Card>
+          )}
+          <Card title="How it works">
+            <p className="hint m-0">A normal key fires and resets at one fixed point. With Rapid Trigger a key resets as soon as it rises by the sensitivity distance, and fires again as soon as it goes back down by the same amount, so quick taps and strafes register instantly.</p>
+            <p className="hint mt-3 mb-0">Lower sensitivity reacts faster but can misfire if you rest your fingers on the keys.</p>
+          </Card>
+        </>
+      )]
+    }
+
+    // ---- Performance tab
+    const pollLabel = choiceLabel(get('polling'))
+    const h = range && travel !== undefined ? (
+      <Hero brand={brand} label={`Actuation · ${scope}`} value={uniform ? travel.toFixed(2) : 'Mixed'} unit={uniform ? 'mm' : undefined} size={76}
+        sub={`Magnetic switches · ${range.min.toFixed(2)} – ${range.max.toFixed(2)} mm`} />
+    ) : (
+      <Hero brand={brand} label="Polling rate" value={pollLabel?.replace(/\s*Hz/i, '') ?? '—'} unit={pollLabel ? 'Hz' : undefined} size={76} sub="Wired" />
     )
-    if (!range || travel === undefined) return [h, <><GenericCard title="Switches" settings={inGroup('Switches')} onEdit={onEdit} className="col-span-3" />{socdCard}</>]
+    if (!range || travel === undefined) {
+      return [h, <>{pollingCard(true)}{more.length > 0 && <GenericCard title="More" settings={more} onEdit={onEdit} />}</>]
+    }
     const presets = PRESETS.filter(([, mm]) => mm >= range.min && mm <= range.max)
-    const c = (
+    return [h, (
       <>
         <Card title="Actuation point">
           <BigValue value={uniform ? travel.toFixed(2) : 'Mixed'} unit={uniform ? 'mm' : undefined} size={26} />
@@ -357,22 +413,62 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
           )}
         </Card>
         <Card title="Key travel">
-          <TravelDiagram max={range.max} act={travel} sens={rtOn ? sensVal : undefined} />
+          <TravelDiagram max={range.max} act={travel} sens={rtSome ? sensVal : undefined} />
         </Card>
-        <Card title="Rapid Trigger" right={<Toggle label={`Rapid Trigger, ${scope}`} checked={rtOn} onChange={setRt} />}>
-          <div className="display text-[26px] font-semibold">{rtOn ? 'On' : 'Off'}</div>
-          <p className="hint mt-1">Resets the instant a key starts rising.</p>
-          {sensRange && sensVal !== undefined && (
-            <>
-              <div className="mt-3 flex items-baseline justify-between"><span className="eyebrow">Sensitivity</span><BigValue value={sensVal.toFixed(2)} unit="mm" size={13} /></div>
-              <Range className="mt-1.5" label="Rapid Trigger sensitivity" min={sensRange.min} max={sensRange.max} step={sensRange.step} value={sensVal} onChange={setSens} />
-            </>
-          )}
-        </Card>
-        {socdCard}
+        {pollingCard(false)}
+        {more.length > 0 && <GenericCard title="More" settings={more} onEdit={onEdit} className="col-span-3" />}
       </>
+    )]
+  }
+
+  function socdTab(): [React.ReactNode, React.ReactNode] {
+    const v = socd!
+    const used = v.entries.filter((e) => e.keys.length > 0).length
+    const h = (
+      <Hero brand={brand} label="SOCD · Snap Tap" value={used} unit={v.mode === 'pairs' ? (used === 1 ? 'pair' : 'pairs') : used === 1 ? 'group' : 'groups'} size={76}
+        sub="When two opposite keys are held, only one counts, so you never stand still while strafing." />
     )
-    return [h, c]
+    return [h, (
+      <SocdCard key="socd" className="col-span-3" v={v} sel={socdSel} pick={socdPicking}
+        onSelect={(i) => { setSocdMsg(undefined); setSocdSel(i) }}
+        onPick={(p) => { setSocdMsg(undefined); setSocdPick(p) }}
+        onChange={(nv) => onEdit('socd', nv)} />
+    )]
+  }
+
+  function settingsTab(): [React.ReactNode, React.ReactNode] {
+    const more = extras('Settings')
+    const model = dev.driver.model()
+    const rows: [string, string | undefined][] = [
+      ['Model', model],
+      ['Brand', dev.driver.brand()],
+      ['Switches', pkT ? 'Magnetic' : undefined],
+      ['Keys', keys ? String(keys.length) : undefined],
+      ['Connection', 'Wired'],
+      ['Firmware', textOf(dev, 'fw')],
+      ['USB id', dev.id],
+    ]
+    const h = <Hero brand={brand} label="Keyboard" value={model} size={model.length > 8 ? Math.max(30, Math.round(440 / model.length)) : 64} sub={textOf(dev, 'fw') ? `Firmware ${textOf(dev, 'fw')}` : undefined} />
+    return [h, (
+      <>
+        <Card title="Device">
+          <dl className="m-0">
+            {rows.filter(([, v]) => v).map(([k, v]) => (
+              <div key={k} className="flex justify-between gap-3 border-b border-white/5 py-2 last:border-0">
+                <dt className="eyebrow">{k}</dt>
+                <dd className="display m-0 truncate text-[11px]">{v}</dd>
+              </div>
+            ))}
+          </dl>
+          {textOf(dev, 'unsupported') && <p className="hint mt-2 mb-0 text-[var(--warn)]">{textOf(dev, 'unsupported')}</p>}
+        </Card>
+        {more.length > 0 ? <GenericCard title="Settings" settings={more} onEdit={onEdit} className="col-span-2" /> : (
+          <Card title="Profiles" className="col-span-2">
+            <p className="hint m-0">{get('profile') ? 'Switch profiles with P1, P2… at the top right. Each profile keeps its own settings on the keyboard.' : 'This keyboard keeps one set of settings, stored on the keyboard itself.'}</p>
+          </Card>
+        )}
+      </>
+    )]
   }
 
   function keymap(): [React.ReactNode, React.ReactNode] {
@@ -487,6 +583,9 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
           {bri && <Level label="Brightness" v={bri} onChange={(n) => onEdit('light_bri', { ...bri, current: n })} />}
           {speed && <Level label="Speed" v={speed} onChange={(n) => onEdit('light_speed', { ...speed, current: n })} />}
         </Card>
+        {extras('Lighting').filter((x) => !LIGHT_OWN.has(x.key)).length > 0 && (
+          <GenericCard title="More lighting" settings={extras('Lighting').filter((x) => !LIGHT_OWN.has(x.key))} onEdit={onEdit} className="col-span-3" />
+        )}
       </>
     )
     return [h, c]
@@ -534,18 +633,22 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
                       ? <><span className="display mr-1.5 text-[13px] font-semibold text-[var(--text)]">{socd!.keys[socdPicking.keys[0]]?.label}</span>picked · click key 2 of the pair</>
                       : 'SOCD · click key 1 of the pair'
                     : `SOCD · click keys to add them to group ${socdPicking.entry + 1}${socd!.removable === false ? '' : ', click again to take them out'}`
-                  : <><span className="display mr-1.5 text-[13px] font-semibold text-[var(--text)]">{socdEntryLabel(socd!, socdSel!)}</span>coloured keys are in SOCD</>)}
+                  : socdSel !== undefined
+                    ? <><span className="display mr-1.5 text-[13px] font-semibold text-[var(--text)]">{socdEntryLabel(socd!, socdSel)}</span>selected · coloured keys are in SOCD</>
+                    : 'coloured keys are in SOCD · click one to select its ' + (socd!.mode === 'pairs' ? 'pair' : 'group'))}
               </span>
-              <button type="button" className="chip display !text-[11px] font-semibold" onClick={() => { setSocdPick(undefined); setSocdSel(undefined); setSocdMsg(undefined) }}>
-                {socdPicking && socd!.mode === 'pairs' ? 'Cancel' : 'Done'}
-              </button>
+              {(socdPicking || socdSel !== undefined) && (
+                <button type="button" className="chip display !text-[11px] font-semibold" onClick={() => { setSocdPick(undefined); setSocdSel(undefined); setSocdMsg(undefined) }}>
+                  {socdPicking && socd!.mode === 'pairs' ? 'Cancel' : 'Done'}
+                </button>
+              )}
             </div>
           ) : (
           <div className={cn('mt-3 flex h-9 items-center justify-between', !showBar && 'invisible')}>
             <span className="text-[12px] text-[var(--text-3)]">{!testing && <span className="display mr-1.5 text-[13px] font-semibold text-[var(--text)]">{selIdx.length}</span>}
               {testing ? 'live test · press keys on your keyboard' : <>key{selIdx.length === 1 ? '' : 's'} selected · {selIdx.length === 0 ? 'editing all keys, click or drag to pick some' : 'click or drag over keys'}</>}</span>
             <span className="flex gap-1.5">
-              {canTest && active === 'Switches' && (
+              {canTest && active === 'Performance' && (
                 <button type="button" className={cn('chip display !text-[11px] font-semibold', testing && 'plat !border-transparent')} aria-pressed={testing} onClick={() => setTesting((t) => !t)}>
                   {testing ? '● Testing' : 'Test keys'}
                 </button>

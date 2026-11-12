@@ -33,9 +33,9 @@ function DeviceTab({ d, active }: { d: DeviceState; active: boolean }) {
       <span className="grid size-[30px] place-items-center overflow-hidden rounded-full bg-black/40">
         {img ? <img src={img} alt="" className="h-[28px] w-auto object-contain" /> : d.driver.kind === 'mouse' ? <Mouse className="size-4 opacity-70" /> : <Keyboard className="size-4 opacity-70" />}
       </span>
-      <span className="leading-tight">
-        <span className={cn('display block text-[10.5px] tracking-wide', active ? 'text-[var(--text)]' : 'text-[var(--text-2)]')}>{d.driver.model()}{unitNumber(d.id) > 1 ? ` #${unitNumber(d.id)}` : ''}</span>
-        <span className="display flex items-center gap-1.5 text-[10.5px] text-[rgb(242_242_245/0.5)]">
+      <span className="min-w-0 leading-tight" title={`${d.driver.brand()} ${d.driver.model()}`}>
+        <span className={cn('display block max-w-[118px] truncate text-[10.5px] tracking-wide', active ? 'text-[var(--text)]' : 'text-[var(--text-2)]')}>{d.driver.model()}{unitNumber(d.id) > 1 ? ` #${unitNumber(d.id)}` : ''}</span>
+        <span className="display flex items-center gap-1.5 whitespace-nowrap text-[10.5px] text-[rgb(242_242_245/0.5)]">
           <span className={cn('size-[5px] rounded-full', d.error ? 'bg-[var(--err)]' : d.busy ? 'bg-[var(--warn)]' : 'bg-[var(--ok)]')} />
           {sub}
         </span>
@@ -57,7 +57,7 @@ export function TopBar({ activeId, profile, onProfile }: { activeId?: string; pr
           </button>
         )}
       </div>
-      <nav aria-label="Devices" className="pill-glass absolute left-1/2 flex -translate-x-1/2 items-center gap-1 p-1">
+      <nav aria-label="Devices" className="pill-glass no-scrollbar absolute left-1/2 flex max-w-[calc(100%-480px)] -translate-x-1/2 items-center gap-1 overflow-x-auto p-1 [&>*]:shrink-0">
         {devices.map((d) => <DeviceTab key={d.id} d={d} active={d.id === activeId} />)}
         {supported && (
           <button type="button" onClick={requestConnect} aria-label="Connect a device" title="Connect a device"
@@ -90,7 +90,7 @@ export function Dock({ tabs, active, onChange }: { tabs: { id: string; label: st
     <nav aria-label="Sections" className="pill-glass absolute bottom-8 left-1/2 z-20 flex -translate-x-1/2 gap-1 p-1.5">
       {tabs.map((t) => (
         <button key={t.id} type="button" onClick={() => onChange(t.id)} aria-current={t.id === active ? 'page' : undefined}
-          className={cn('display flex items-center gap-2 rounded-full px-[18px] py-[11px] text-[13px] font-semibold transition-colors', t.id === active ? 'plat' : 'text-[var(--text-2)] hover:text-[var(--text)]')}>
+          className={cn('display flex items-center gap-2 whitespace-nowrap rounded-full px-[18px] py-[11px] text-[13px] font-semibold transition-colors', t.id === active ? 'plat' : 'text-[var(--text-2)] hover:text-[var(--text)]')}>
           {t.icon}
           {t.label}
         </button>

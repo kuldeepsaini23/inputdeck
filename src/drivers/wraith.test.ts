@@ -17,7 +17,11 @@ import {
   parseInfo,
   parseKeyTrig,
   parseLight,
+  parseMaxTravel,
   parseModeList,
+  sameTrig,
+  describeTrig,
+  sensMaxUnits,
   perKeyTriggerValue,
   planKeyTrigs,
   readColorsPkt,
@@ -141,6 +145,33 @@ describe('packets', () => {
     r[13] = 2;
     expect(parseKeyTrig(r)).toEqual({ mode: 0x0c, travel: 0x155, press: 0x201, release: 1 });
     expect(parseKeyTrig(r.slice(0, 10))).toBeUndefined();
+  });
+
+  it('travel range parsed like the official readHidData', () => {
+    // verified W75 probe reply: max 0xAA, unit 2 (0.02 mm), min 5
+    expect(parseMaxTravel(hex('21 00 00 00 06 04 aa 02 02 00 05'))).toEqual({ unit: 2, min: 5, max: 170 });
+    // official fallbacks: d7 = 0 -> 0.10 mm units; d10 = 0 -> 3 at 0.04 mm units, else 1
+    expect(parseMaxTravel(hex('21 00 00 00 06 04 22 00 00 00 00'))).toEqual({ unit: 10, min: 1, max: 34 });
+    expect(parseMaxTravel(hex('21 00 00 00 06 04 55 04 00 00 00'))).toEqual({ unit: 4, min: 3, max: 85 });
+    expect(parseMaxTravel(hex('21 00 00 00 06 04 55 04 00'))).toBeUndefined();
+    // RT press/release sliders: 1 .. ceil(max / 2) units (W75: 85 x 0.02 = 1.70 mm)
+    expect(sensMaxUnits({ max: 170 })).toBe(85);
+    expect(sensMaxUnits({ max: 35 })).toBe(18);
+  });
+
+  it('read-back compares only what the mode uses', () => {
+    const fixed = { mode: TRIG_FIXED, travel: 50, press: 5, release: 5 };
+    expect(sameTrig({ ...fixed, press: 0, release: 0 }, fixed)).toBe(true);
+    expect(sameTrig({ ...fixed, travel: 51 }, fixed)).toBe(false);
+    expect(sameTrig({ ...fixed, mode: TRIG_RT }, fixed)).toBe(false);
+    const rt = { mode: TRIG_RT, travel: 50, press: 5, release: 5 };
+    expect(sameTrig({ ...rt, release: 9 }, rt)).toBe(true);
+    expect(sameTrig({ ...rt, press: 6 }, rt)).toBe(false);
+    const split = { mode: TRIG_RT_SPLIT, travel: 50, press: 5, release: 7 };
+    expect(sameTrig({ ...split }, split)).toBe(true);
+    expect(sameTrig({ ...split, release: 5 }, split)).toBe(false);
+    expect(describeTrig(rt, 2)).toBe('RT 1.00 mm, RT 0.10/0.10 mm');
+    expect(describeTrig({ ...fixed, mode: 0x55 }, 2)).toBe('mode 55 1.00 mm, RT 0.10/0.10 mm');
   });
 
   it('colour packets', () => {
@@ -403,18 +434,20 @@ describe('driver', () => {
   it('writes global actuation / rapid trigger / sensitivity to all 81 keys', async () => {
     const [f, d] = await connect();
     const ss = await d.read();
+    // the last set packet (every write is followed by 18 05 read-backs)
+    const lastSet = () => [...f.sent].reverse().find((q) => q[0] === 0x21 && q[4] === 0x18 && q[5] !== 0x05)!;
     await d.write(withValue(find(ss, 'actuation'), { kind: 'float', min: 0.1, max: 3.4, step: 0.02, current: 1.0, unit: ' mm' }));
-    let p = f.sent[f.sent.length - 1];
+    let p = lastSet();
     expect(p.slice(0, 6)).toEqual(hex('21 00 00 00 18 00'));
     expect(p.slice(28, 36)).toEqual(hex('32 32 05 05 00 00 00 00'));
     expect(p.slice(36).every((b) => b === 0)).toBe(true);
     expect([...f.keys.values()].every((k) => k.travel === 50)).toBe(true);
     await d.write(withValue(find(ss, 'rapid_trigger'), { kind: 'toggle', on: true }));
-    p = f.sent[f.sent.length - 1];
+    p = lastSet();
     expect(p[5]).toBe(TRIG_RT);
     expect(p[28]).toBe(50); // keeps the new travel
     await d.write(withValue(find(ss, 'rt_sens'), { kind: 'float', min: 0.02, max: 1, step: 0.02, current: 0.3, unit: ' mm' }));
-    p = f.sent[f.sent.length - 1];
+    p = lastSet();
     expect([p[5], p[30], p[31]]).toEqual([TRIG_RT, 15, 15]);
     expect(f.keys.get(125)).toEqual({ mode: TRIG_RT, travel: 50, press: 15, release: 15 });
     expect(f.keys.has(15)).toBe(false); // knob untouched
@@ -454,6 +487,103 @@ describe('driver', () => {
     travel[pos(46)] = 1.0;
     travel[pos(0)] = 1.0;
     await expect(d.write(withValue(s, { ...v, travel }))).rejects.toThrow(/didn't take the trigger change for: Esc, W/);
+  });
+
+  it('per-key read-back failure names sent vs read-back of the first key', async () => {
+    const [, d] = await connect({ ignoreWrites: true });
+    const s = find(await d.read(), 'per_key_trigger');
+    const v = s.value as Extract<Value, { kind: 'perKeyTrigger' }>;
+    const rapid = [...v.rapid];
+    const sens = [...v.sens];
+    rapid[pos(46)] = true;
+    sens[pos(46)] = 0.3;
+    await expect(d.write(withValue(s, { ...v, rapid, sens }))).rejects.toThrow(
+      "keyboard didn't take the trigger change for: W (W: sent RT 1.70 mm, RT 0.30/0.30 mm, reads back fixed 1.70 mm, RT 0.10/0.10 mm)",
+    );
+  });
+
+  it('round-trips all-keys actuation, Rapid Trigger on/off and sensitivity through a re-read', async () => {
+    const [f, d] = await connect();
+    let ss = await d.read();
+    expect(find(ss, 'rt_sens').value).toMatchObject({ min: 0.02, max: 1.7 });
+    const float = (key: string, mm: number): Setting =>
+      withValue(find(ss, key), { ...(find(ss, key).value as Extract<Value, { kind: 'float' }>), current: mm });
+    const perKey = () => find(ss, 'per_key_trigger').value as Extract<Value, { kind: 'perKeyTrigger' }>;
+    const cur = (key: string) => (find(ss, key).value as Extract<Value, { kind: 'float' }>).current;
+
+    await d.write(float('actuation', 0.9));
+    ss = await d.read();
+    expect(cur('actuation')).toBeCloseTo(0.9, 9);
+    expect(perKey().travel.every((t) => Math.abs(t - 0.9) < 1e-9)).toBe(true);
+
+    await d.write(withValue(find(ss, 'rapid_trigger'), { kind: 'toggle', on: true }));
+    ss = await d.read();
+    expect(find(ss, 'rapid_trigger').value).toEqual({ kind: 'toggle', on: true });
+    expect(perKey().rapid.every(Boolean)).toBe(true);
+
+    await d.write(float('rt_sens', 0.36));
+    ss = await d.read();
+    expect(cur('rt_sens')).toBeCloseTo(0.36, 9);
+    expect(perKey().sens.every((t) => Math.abs(t - 0.36) < 1e-9)).toBe(true);
+    expect(f.keys.get(46)).toEqual({ mode: TRIG_RT, travel: 45, press: 18, release: 18 });
+
+    // above the official slider range -> clamped to ceil(max / 2) units
+    await d.write(float('rt_sens', 3));
+    expect(f.keys.get(46)?.press).toBe(85);
+
+    await d.write(withValue(find(ss, 'rapid_trigger'), { kind: 'toggle', on: false }));
+    ss = await d.read();
+    expect(find(ss, 'rapid_trigger').value).toEqual({ kind: 'toggle', on: false });
+    expect(perKey().rapid.some(Boolean)).toBe(false);
+    expect(cur('actuation')).toBeCloseTo(0.9, 9);
+  });
+
+  it('round-trips per-key actuation / Rapid Trigger / sensitivity through a re-read', async () => {
+    const [, d] = await connect();
+    const s = find(await d.read(), 'per_key_trigger');
+    const v = s.value as Extract<Value, { kind: 'perKeyTrigger' }>;
+    const travel = [...v.travel], rapid = [...v.rapid], sens = [...v.sens];
+    travel[pos(68)] = 0.5;
+    rapid[pos(68)] = true;
+    sens[pos(68)] = 0.06;
+    travel[pos(70)] = 2.5;
+    await d.write(withValue(s, { ...v, travel, rapid, sens }));
+    const got = find(await d.read(), 'per_key_trigger').value as Extract<Value, { kind: 'perKeyTrigger' }>;
+    got.travel.forEach((t, i) => expect(t).toBeCloseTo(travel[i], 9));
+    expect(got.rapid).toEqual(rapid);
+    got.sens.forEach((t, i) => expect(t).toBeCloseTo(sens[i], 9));
+  });
+
+  it('all-keys writes are read back; a refused one names sent vs read-back', async () => {
+    const [f, d] = await connect({ ignoreWrites: true });
+    const ss = await d.read();
+    f.sent = [];
+    await expect(d.write(withValue(find(ss, 'rapid_trigger'), { kind: 'toggle', on: true }))).rejects.toThrow(
+      /^keyboard didn't take the trigger change for: Esc, F1, .* \(Esc: sent RT 1\.70 mm, RT 0\.10\/0\.10 mm, reads back fixed 1\.70 mm, RT 0\.10\/0\.10 mm\)$/,
+    );
+    expect(f.sent.filter((p) => p[0] === 0x21 && p[5] === 0x05).length).toBe(81);
+    // the cache now holds what the board really has: turning RT off again is a no-op that verifies
+    await expect(d.write(withValue(find(ss, 'rapid_trigger'), { kind: 'toggle', on: false }))).resolves.toBeUndefined();
+  });
+
+  it("no false \"didn't take\" when the board zeroes the RT distances in fixed mode", async () => {
+    const [f, d] = await connect({ storeTrig: (k) => (k.mode === TRIG_FIXED ? { ...k, press: 0, release: 0 } : k) });
+    const ss = await d.read();
+    await d.write(withValue(find(ss, 'actuation'), { ...(find(ss, 'actuation').value as Extract<Value, { kind: 'float' }>), current: 1.2 }));
+    expect(f.keys.get(0)).toEqual({ mode: TRIG_FIXED, travel: 60, press: 0, release: 0 });
+    const s = find(await d.read(), 'per_key_trigger');
+    const v = s.value as Extract<Value, { kind: 'perKeyTrigger' }>;
+    const travel = [...v.travel];
+    travel[pos(46)] = 2.0;
+    await d.write(withValue(s, { ...v, travel }));
+    expect(f.keys.get(46)?.travel).toBe(100);
+  });
+
+  it('all-keys write skips keys that never answer the read-back', async () => {
+    const [f, d] = await connect({ silentKeys: [0] });
+    const ss = await d.read();
+    await d.write(withValue(find(ss, 'rapid_trigger'), { kind: 'toggle', on: true }));
+    expect(f.keys.get(0)?.mode).toBe(TRIG_RT);
   });
 
   it('writes lighting with read-back', async () => {

@@ -17,6 +17,8 @@ export interface FakeOpts {
   noColorRead?: boolean;
   /** report SOCD support (status F[9] = 1) */
   socd?: boolean;
+  /** firmware quirk: how a received trigger is stored (default: as sent) */
+  storeTrig?: (k: KeyTrig) => KeyTrig;
 }
 
 export class FakeKeyboard {
@@ -126,7 +128,7 @@ export class FakeKeyboard {
       if (!w) return;
       const k: KeyTrig = { mode: p[5], travel: (p[32] << 8) | p[28], press: (p[34] << 8) | p[30], release: (p[35] << 8) | p[31] };
       for (let col = 0; col < 22; col++)
-        for (let row = 0; row < 8; row++) if (p[6 + col] & (1 << row)) this.keys.set(row * 22 + col, { ...k });
+        for (let row = 0; row < 8; row++) if (p[6 + col] & (1 << row)) this.keys.set(row * 22 + col, this.o.storeTrig ? this.o.storeTrig({ ...k }) : { ...k });
     } else if (c === 0x24 && s1 === 0x02) {
       this.reply([0x24, 0x02, 0, 0, 6, this.socdOn, 0, 0, 0, 0xfa, 0xe5]);
     } else if (c === 0x24 && s1 === 0x03) {

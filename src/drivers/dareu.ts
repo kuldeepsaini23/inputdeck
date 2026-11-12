@@ -16,10 +16,11 @@
 // cmd 8 = factory reset), class 5 profile create/delete/reset, DFU (class 9), TEST (class 10, incl.
 // factory defaults), FLASH (class 12), magnetic calibration (class 13 cmd 10), normal-trigger
 // reset (13/1), global travel SET (13/7 - the vendor's own SetGlobalTravel can't run), key
-// assignment / macros / SOCD / DKS / MT / TGL writes, and anything undocumented.
+// assignment / macros / DKS / MT / TGL writes, and anything undocumented. SOCD (13/11) only as the
+// exact per-key set / remove frames below.
 
 import { DAREU_LAYOUTS, DAREU_PRODUCTS, type DareuProduct } from './dareu-products';
-import type { Driver, DriverFactory, KeyCap, Setting, Value } from './types';
+import type { Driver, DriverFactory, KeyCap, Setting, Socd, Value } from './types';
 import { sleep } from './types';
 
 export const VID = 0x260d;
@@ -37,12 +38,33 @@ export const LED = { ID_LIST: 0, ATTRIBUTE: 1, EFFECT: 2, BRIGHTNESS: 3 } as con
 /** class 5 */
 export const PFL = { ACTIVE: 3 } as const;
 /** class 13 */
-export const MAG = { KEY_FUNCTION: 0, SINGLE_TRIGGER: 2, RAPID_TRIGGER: 3, GLOBAL_TRAVEL: 7 } as const;
+export const MAG = { KEY_FUNCTION: 0, SINGLE_TRIGGER: 2, RAPID_TRIGGER: 3, GLOBAL_TRAVEL: 7, SOCD: 11 } as const;
 
 /** Per-key function ids (class 13 cmd 0). 3..6 = MT / TGL / DKS / SOCD (edited in the official app only). */
 export const FN_NORMAL = 0;
 export const FN_SINGLE = 1;
 export const FN_RAPID = 2;
+/** MT / TGL / DKS: keys with these can't be put in SOCD (it would silently drop them) */
+const FN_OTHER_SPECIAL = new Set([3, 4, 5]);
+
+/** SOCD (class 13 cmd 11 "ST_FUNCTION"): 4 groups, last input wins inside a group. */
+export const SOCD_GROUPS = 4;
+/** group byte of a key that isn't in SOCD */
+export const SOCD_NONE = 0xff;
+/** keys per RemoveBindingEx frame (as the vendor sends them) */
+const SOCD_REMOVE_BATCH = 10;
+/** Firmware from 0.3.0 removes keys from SOCD with (key, FF) pairs; older firmware can't without a trigger reset. */
+export const SOCD_REMOVE_FW = 0x000300;
+/**
+ * Magnetic products whose JSON says `KeyBinding.SupportSOCD: true` (driver.dareu.com/allinone
+ * products/XXXX.json). FwType 6 boards without it: 0092 0103 0107 0113 0115 0129 0131 0132 0152.
+ */
+export const SOCD_PIDS = new Set([
+  0x0105, 0x0106, 0x0117, 0x0119, 0x0123, 0x0124, 0x0126, 0x0127, 0x0136, 0x0139, 0x0140, 0x0164, 0x0165,
+  0x0166, 0x0169, 0x0174, 0x0175, 0x0179, 0x0180, 0x0187, 0x0188, 0x0191, 0x0192, 0x0193, 0x0194, 0x0195,
+  0x0196, 0x0198, 0x0199, 0x0201, 0x0205, 0x0208, 0x0209, 0x0214, 0x0216, 0x0223, 0x0224, 0x0229, 0x0230,
+  0x0232, 0x0234, 0x0236, 0x0237, 0x0238, 0x0239, 0x0241, 0x0244, 0x0249, 0x0252, 0x0253,
+]);
 
 /** Polling rate ids per USB type (vendor POLLING_RATE_MAP). */
 export const POLLING_MAP: [id: number, hz: number][][] = [
@@ -199,6 +221,18 @@ export function allowed(f: ArrayLike<number>): boolean {
       if (get && cmd === MAG.KEY_FUNCTION) return keyList({ 2: 28 }, 'zero');
       if (cmd === MAG.SINGLE_TRIGGER) return keyList({ 2: 18, 3: 18 }, get ? 'zero' : 'set');
       if (cmd === MAG.RAPID_TRIGGER) return keyList({ 4: 14, 7: 8 }, get ? 'zero' : 'set');
+      if (cmd === MAG.SOCD) {
+        // GET one key: [1, key]
+        if (get) return size === 3 && pl(0) === 1 && pl(1) !== 0 && zeroFrom(2);
+        // SET one key: [1, key, group 0..3]
+        if (size === 3 && pl(0) === 1) return pl(1) !== 0 && pl(2) < SOCD_GROUPS && zeroFrom(3);
+        // RemoveBindingEx: [n, (key, FF) x n]; the size byte is n + 1 although 2n + 1 bytes
+        // follow (vendor quirk, copied exactly)
+        const n = pl(0);
+        if (n < 1 || n > SOCD_REMOVE_BATCH || size !== n + 1) return false;
+        for (let i = 0; i < n; i++) if (pl(1 + 2 * i) === 0 || pl(2 + 2 * i) !== SOCD_NONE) return false;
+        return zeroFrom(1 + 2 * n);
+      }
       return false;
     default:
       return false;
@@ -353,6 +387,42 @@ export function setRtPkt(u: Units, keys: number[], travel: number, press: number
 }
 
 const isEditable = (f: number) => f === FN_NORMAL || f === FN_SINGLE || f === FN_RAPID;
+
+// --- SOCD
+
+export const getSocdPkt = (key: number) => frame(CLS.MAGNETIC, MAG.SOCD | GET, 3, 0, [1, key]);
+/** the reply's group byte: 0..3 = in that group, anything else (FF) = not SOCD */
+export const parseSocd = (r: ArrayLike<number>) => (r[PAYLOAD + 2] < SOCD_GROUPS ? r[PAYLOAD + 2] : -1);
+export const setSocdPkt = (key: number, group: number) => {
+  if (!(group >= 0 && group < SOCD_GROUPS)) throw new Error(`SOCD group ${group + 1} doesn't exist`);
+  return frame(CLS.MAGNETIC, MAG.SOCD, 3, 0, [1, key, group]);
+};
+/** RemoveBindingEx (firmware 0.3.0+): size byte n + 1 although 2n + 1 bytes follow, like the vendor. */
+export function removeSocdPkt(keys: number[]): Uint8Array<ArrayBuffer> {
+  if (keys.length < 1 || keys.length > SOCD_REMOVE_BATCH) throw new Error('1..10 keys per SOCD remove frame');
+  const p = [keys.length];
+  for (const k of keys) p.push(k, SOCD_NONE);
+  return frame(CLS.MAGNETIC, MAG.SOCD, keys.length + 1, 0, p);
+}
+/** firmware bytes [a, b, c] -> 0xAABBCC (vendor FwVer) */
+export const fwNumber = (fw: ArrayLike<number>) => ((fw[0] << 16) | (fw[1] << 8) | fw[2]) >>> 0;
+
+/**
+ * UI value -> the SOCD group of every layout key (-1 = none). Throws when a key is in two groups,
+ * when the group count is wrong or a position doesn't exist.
+ */
+export function planSocd(v: Socd, caps: KeyCap[]): number[] {
+  if (v.mode !== 'groups' || v.entries.length !== SOCD_GROUPS) throw new Error("SOCD data doesn't match the keyboard - press Re-read");
+  const want = new Array<number>(caps.length).fill(-1);
+  v.entries.forEach((e, g) => {
+    for (const k of e.keys) {
+      if (!(k >= 0 && k < caps.length)) throw new Error("SOCD data doesn't match the keyboard - press Re-read");
+      if (want[k] >= 0 && want[k] !== g) throw new Error(`${caps[k].label} is in two SOCD groups`);
+      want[k] = g;
+    }
+  });
+  return want;
+}
 
 /** Two triggers equal at device resolution. */
 export function sameTrig(a: KeyTrig, b: KeyTrig, u: Units): boolean {
@@ -539,6 +609,9 @@ class Dareu implements Driver {
   private global: number | undefined;
   private keyTrigs: KeyTrig[] | undefined;
   private sensDefault: number;
+  private fwRaw: number[] = [0, 0, 0];
+  /** SOCD group per layout key (-1 = none), when the board has SOCD */
+  private socd: number[] | undefined;
 
   constructor(
     private readonly link: Link,
@@ -576,7 +649,9 @@ class Dareu implements Driver {
   }
 
   async identify(): Promise<string> {
-    this.fw = fwVersion(await this.link.xfer(fwVerPkt()));
+    const r = await this.link.xfer(fwVerPkt());
+    this.fwRaw = [r[PAYLOAD], r[PAYLOAD + 1], r[PAYLOAD + 2]];
+    this.fw = fwVersion(r);
     return this.fw;
   }
 
@@ -636,6 +711,72 @@ class Dareu implements Driver {
     return out;
   }
 
+  /** firmware 0.3.0+ can take keys out of SOCD without touching their triggers */
+  private socdRemovable() {
+    return fwNumber(this.fwRaw) >= SOCD_REMOVE_FW;
+  }
+
+  /** SOCD group of every layout key (the vendor asks one key at a time). */
+  private async readSocd(): Promise<number[]> {
+    const out: number[] = [];
+    for (const c of this.caps) out.push(parseSocd(await this.link.xfer(getSocdPkt(c.index))));
+    return out;
+  }
+
+  private socdValue(groups: number[], keys: KeyTrig[]): Socd {
+    return {
+      kind: 'socd',
+      mode: 'groups',
+      keys: this.caps,
+      max: SOCD_GROUPS,
+      modes: [['Last input', 0]],
+      unavailable: keys.map((k, i) => (FN_OTHER_SPECIAL.has(k.func) ? i : -1)).filter((i) => i >= 0),
+      removable: this.socdRemovable(),
+      entries: Array.from({ length: SOCD_GROUPS }, (_, g) => ({ keys: groups.map((x, i) => (x === g ? i : -1)).filter((i) => i >= 0), mode: 0 })),
+    };
+  }
+
+  private async writeSocd(v: Socd): Promise<void> {
+    const cur = this.socd;
+    const keys = this.keyTrigs;
+    if (!cur || !keys) throw new Error('press Re-read first');
+    const want = planSocd(v, this.caps);
+    const sets: number[] = [];
+    const removes: number[] = [];
+    want.forEach((g, i) => {
+      if (g === cur[i]) return;
+      if (g < 0) removes.push(i);
+      else if (FN_OTHER_SPECIAL.has(keys[i].func)) throw new Error(`${this.caps[i].label} has another special function (MT/TGL/DKS) - change it in the DAREU app`);
+      else sets.push(i);
+    });
+    if (removes.length && !this.socdRemovable()) {
+      throw new Error(`firmware ${this.fw} can't take keys out of SOCD without resetting their triggers - use the DAREU app`);
+    }
+    if (!sets.length && !removes.length) return;
+    for (const i of sets) await this.link.xfer(setSocdPkt(this.caps[i].index, want[i]));
+    for (let s = 0; s < removes.length; s += SOCD_REMOVE_BATCH) {
+      await this.link.xfer(removeSocdPkt(removes.slice(s, s + SOCD_REMOVE_BATCH).map((i) => this.caps[i].index)));
+    }
+    const next = cur.slice();
+    const bad: string[] = [];
+    for (const i of [...sets, ...removes]) {
+      const id = this.caps[i].index;
+      try {
+        next[i] = parseSocd(await this.link.xfer(getSocdPkt(id)));
+        if (next[i] !== want[i]) bad.push(this.caps[i].label);
+        // older firmware: SOCD replaces the key's trigger function
+        if (!this.socdRemovable()) {
+          const func = parseKeyFuncs(await this.link.xfer(keyFuncPkt([id])), 1)[0];
+          if (func !== keys[i].func) keys[i] = { func, travel: 0, press: 0, release: 0 };
+        }
+      } catch {
+        bad.push(this.caps[i].label);
+      }
+    }
+    this.socd = next;
+    if (bad.length) throw new Error(`keyboard didn't take the SOCD change for: ${bad.join(', ')}`);
+  }
+
   private perKeyValue(keys: KeyTrig[], global: number): Value {
     const r = this.ranges!;
     const sh = keys.map((k) => shown(k, global, this.sensDefault));
@@ -686,6 +827,7 @@ class Dareu implements Driver {
     // --- switches (magnetic boards)
     this.global = undefined;
     this.keyTrigs = undefined;
+    this.socd = undefined;
     const u = this.units;
     if (this.product.fw === 6 && !u) {
       out.push(text('unsupported', 'Note', 'Info', "This board's switch ranges aren't known - magnetic settings are hidden"));
@@ -716,6 +858,26 @@ class Dareu implements Driver {
         value: { kind: 'float', min: r.sensMin, max: Math.max(r.sensMax, this.sensDefault), step: r.step, current: this.sensDefault, unit: ' mm' },
       });
       out.push({ key: 'per_key_trigger', label: 'Per-key actuation', group: 'Per-key', value: this.perKeyValue(keys, global) });
+
+      // --- SOCD (only boards whose product JSON says SupportSOCD)
+      this.socd = undefined;
+      if (SOCD_PIDS.has(this.product.pid)) {
+        try {
+          const groups = await this.readSocd();
+          this.socd = groups;
+          out.push({
+            key: 'socd',
+            label: 'SOCD (Snap Tap)',
+            group: 'Switches',
+            value: this.socdValue(groups, keys),
+            hint: this.socdRemovable()
+              ? 'Keys in the same group: only the last one pressed counts - great for strafing (A/D).'
+              : "Keys in the same group: only the last one pressed counts. On this firmware SOCD replaces the key's trigger, and keys can only be taken out again in the DAREU app.",
+          });
+        } catch {
+          // no answer: leave SOCD out
+        }
+      }
     }
 
     // --- lighting
@@ -887,6 +1049,8 @@ class Dareu implements Driver {
         );
         return this.writeKeyTrigs(changes);
       }
+      case 'socd:socd':
+        return this.writeSocd(v as Socd);
       case 'light_power:toggle': {
         const l = light();
         const on = (v as Extract<Value, { kind: 'toggle' }>).on;

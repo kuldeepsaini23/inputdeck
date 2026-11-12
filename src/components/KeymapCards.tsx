@@ -15,11 +15,13 @@ export function effective(km: Keymap, layer: number, i: number): { code: number;
 }
 
 /** Category tabs + search + a grid of keycodes (same look as the mouse ActionPicker). */
-export function KeyPicker({ km, layer, keyIndex, onPick, className }: {
+export function KeyPicker({ km, layer, keyIndex, onPick, macros = 0, className }: {
   km: Keymap
   layer: number
   keyIndex: number | undefined
   onPick: (code: number) => void
+  /** macro slots the keyboard has (adds a Macros category) */
+  macros?: number
   className?: string
 }) {
   const sel = keyIndex !== undefined
@@ -27,11 +29,11 @@ export function KeyPicker({ km, layer, keyIndex, onPick, className }: {
   const base = sel ? km.layers[0][keyIndex] : KC_SPC
   // layer-tap keys tap what the key sends on layer 0 (or Space)
   const tap = base > KC_TRNS && base < 0x100 ? base : KC_SPC
-  const cats = useMemo(() => categories(km.codes, km.layers.length, tap), [km.codes, km.layers.length, tap])
+  const cats = useMemo(() => categories(km.codes, km.layers.length, tap, macros), [km.codes, km.layers.length, tap, macros])
   const [cat, setCat] = useState(cats[0].id)
   const [target, setTarget] = useState(Math.min(1, km.layers.length - 1))
   const [q, setQ] = useState('')
-  const found = useMemo(() => search(q, km.codes, km.layers.length, tap).slice(0, 48), [q, km.codes, km.layers.length, tap])
+  const found = useMemo(() => search(q, km.codes, km.layers.length, tap, macros).slice(0, 48), [q, km.codes, km.layers.length, tap, macros])
   const inCat = cats.find((c) => c.id === cat) ?? cats[0]
   const shown: Keycode[] = q.trim() ? found : inCat.id === 'layers' ? inCat.codes.filter((k) => k.layer === target) : inCat.codes
   const keyName = sel ? km.keys[keyIndex].label || hexCode(base) : ''
@@ -47,6 +49,7 @@ export function KeyPicker({ km, layer, keyIndex, onPick, className }: {
       {!q.trim() && (
         <Segmented label="Keycode category" className="[&_button]:!px-1.5 [&_button]:!text-[10.5px]" options={cats.map((c) => [c.name, c.id] as const)} value={cat} onChange={setCat} />
       )}
+      {!q.trim() && inCat.id === 'macros' && <p className="hint mt-3 mb-0">Pick a macro to play it from this key. Edit macros in the Macros tab.</p>}
       {!q.trim() && inCat.id === 'layers' && km.layers.length > 1 && (
         <div className="mt-3 flex items-center gap-3">
           <span className="eyebrow shrink-0">Target layer</span>

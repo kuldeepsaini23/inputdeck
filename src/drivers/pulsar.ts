@@ -179,7 +179,30 @@ const VGN: [number, number, string, boolean][] = [
   [0x391d, 0x1a30, 'Dragonfly F2 Turbo', true], [0x391d, 0x1a31, 'Dragonfly F2 Turbo+', true], [0x391d, 0x1a32, 'Dragonfly F1 V2 SE+', true],
   [0x391d, 0x1a33, 'Dragonfly 3 MINI SE+', false],
 ];
-for (const [vid, pid, model, wireless] of VGN) add(vid, [pid], { brand: 'VGN', model, wireless, codec: 's50', maxDpi: 26000, lod: null, buttons: true, angle: true, catalog: 'atk' });
+/**
+ * Top-down photos (transparent, 620x1000) from VGN's own web hub, hub.vgnlab.com: its images chunk maps each
+ * "cover" key to a hashed asset; the hub's mid table picks the cover per model (receivers: mouse unknown, none).
+ */
+const VGN_HUB = 'https://hub.vgnlab.com/assets/';
+const VGN_PHOTO: [RegExp, string][] = [
+  [/F1 Pro\b/, 'F1ProMaxBLACK-BC3o1kDF.webp'],
+  [/F1 MOBA/, 'F1MobaBLACK-DVPkz4T5.webp'],
+  [/F1 V2 SE\+/, 'F1V2BLACK-BJrT3swp.webp'],
+  [/F1 SE/, 'F1SEBLACK-BGs3eTRn.webp'],
+  [/^Dragonfly F1$/, 'F1BLACK-BK6mG4-j.webp'],
+  [/^Y2 Ultra$/, 'Y2BLACK-z7WRnzVp.webp'],
+  [/^Y2 Master$/, 'Y2MasterBLACK-oA_lZjf4.webp'],
+  [/Y2 Pro Max|Y2 V2 MasterGT/, 'Y2MasterWHITE-z73MX36R.webp'],
+  [/F2 Master$/, 'F2MasterBLACK-DAVajiLz.webp'],
+  [/F2 MasterGT|F2 Turbo/, 'F2MasterBLACKFAN-DN-tMO3B.webp'],
+  [/3 MINI SE\+/, 'Dragonfly3MiniSEBLACK-C2RFO8LP.webp'],
+  [/Dragonfly 3 Master/, 'Dragonfly3BLACK-CxOBPuq0.webp'],
+];
+const vgnPhoto = (model: string): string | undefined => {
+  const hit = /receiver/i.test(model) ? undefined : VGN_PHOTO.find(([re]) => re.test(model));
+  return hit ? VGN_HUB + hit[1] : undefined;
+};
+for (const [vid, pid, model, wireless] of VGN) add(vid, [pid], { brand: 'VGN', model, image: vgnPhoto(model), wireless, codec: 's50', maxDpi: 26000, lod: null, buttons: true, angle: true, catalog: 'atk' });
 
 // Kysona (Linux hid-kysona ids); settings layout unconfirmed, so no LOD/button writes
 add(0x3554, [0xf57c], { brand: 'KYSONA', model: 'M600', wireless: true, codec: 's50', maxDpi: 26000, lod: null, buttons: false, angle: true });
@@ -265,9 +288,19 @@ const PULSAR_NAMES: string[] = [
 /** Pulsar (cid 87) mids by sensor (cfg.json); everything else is "pulsar x1" */
 const PULSAR_3950 = new Set([68, 69, 91, 92, 93, 94, 99, 100, 127, 128, 129]);
 const PULSAR_3955 = new Set([101, 107, 108, 110, 111, 112, 113, 114, 115, 120, 121, 122, 123, 124, 125, 126, ...range(133, 149)]);
-/** mids with a product photo at bbb.pulsar.gg/cMouse/img/devices/mouse/57XX.png (checked: HTTP 200, image/png) */
-const PULSAR_NO_PHOTO = new Set([28, 30, 31, 32, 33, 35]);
+/**
+ * Product photos at bbb.pulsar.gg/cMouse/img/devices/mouse/57XX.png (checked: HTTP 200, image/png). Missing (404):
+ * the "By You XS-1" custom builds. The unnamed, unreleased mids get a black silhouette placeholder there, not a photo.
+ */
+const PULSAR_NO_PHOTO = new Set([28, 30, 31, 32, 33, 35, 108, 111, 113, 114, 115, 121, ...range(137, 145), 148, 149]);
+/** "By You XS-1" builds are customised shells of a stock model: show that model's photo (mid -> photo mid) */
+const PULSAR_PHOTO_OF: Record<number, number> = { 28: 1, 30: 29, 33: 17 };
 const PULSAR_PHOTO_MAX = 149;
+function pulsarPhoto(mid: number): string | undefined {
+  const m = PULSAR_PHOTO_OF[mid] ?? mid;
+  if (m < 1 || m > PULSAR_PHOTO_MAX || PULSAR_NO_PHOTO.has(m)) return undefined;
+  return `https://bbb.pulsar.gg/cMouse/img/devices/mouse/57${hexByte(m)}.png`;
+}
 
 /** Pulsar's X2 V2 generation on 3554 (cid 6), from Linux hid-pulsar */
 const PULSAR_CID6: Record<number, string> = {
@@ -338,7 +371,7 @@ export function resolveVariant(vid: number, pid: number, cid?: number, mid?: num
     Object.assign(v, {
       brand: 'PULSAR',
       model: PULSAR_NAMES[mid - 1] || 'CrazyLight mouse',
-      image: mid >= 1 && mid <= PULSAR_PHOTO_MAX && !PULSAR_NO_PHOTO.has(mid) ? `https://bbb.pulsar.gg/cMouse/img/devices/mouse/57${hexByte(mid)}.png` : undefined,
+      image: pulsarPhoto(mid),
       codec: sensor === '3955' ? 's3955' : sensor === '3950' ? 's50' : 'x1',
       maxDpi: sensor === '3955' ? 42000 : 32000,
       rates: 'compx',
@@ -371,6 +404,8 @@ export function resolveVariant(vid: number, pid: number, cid?: number, mid?: num
   }
   if (cid === CID_TEEVOLUTION && b.brand === 'TEEVOLUTION') {
     v.model = 'Terra Pro';
+    // top + bottom view (transparent) from TeevoLink, the hub teevolution.gg links to; one file per colour mid
+    if ([2, 3, 5, 6].includes(mid)) v.image = `https://www.controlhub.top/teevolink/img/devices/mouse/0E${hexByte(mid)}.png`;
     return v;
   }
   if (b.catalog === 'atk') {

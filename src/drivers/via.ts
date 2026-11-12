@@ -14,11 +14,17 @@
 // Key remapping: 0x05 set keycode (one key, one layer), only inside the board's layer count
 // and switch matrix, which the driver learns before it may send one.
 //
+// Macros (QMK dynamic macros): 0x0C count, 0x0D buffer size, 0x0E get buffer and 0x0F set
+// buffer, each get/set inside the buffer size the board reported. Writes rebuild the whole
+// buffer (only the 28-byte chunks that change are sent), flagged as in progress by a non-zero
+// last byte like the VIA app does, then read back. Format: src/lib/macros.ts.
+//
 // NEVER send: 0x03 set keyboard value, 0x13/0x15 encoder / bulk keymap writes, 0x06 keymap
-// reset, 0x0A EEPROM reset, 0x0B bootloader jump, 0x0C-0x10 macros, channel 0 (vendor custom)
+// reset, 0x0A EEPROM reset, 0x0B bootloader jump, 0x10 macro reset, channel 0 (vendor custom)
 // or audio values. `allowed()` enforces an allowlist on every packet.
 
-import type { Driver, DriverFactory, KeyCap, KeycodeSet, Setting, Value } from './types';
+import { decodeMacro, encodeMacro, MAX_DELAY, splitMacros } from '../lib/macros';
+import type { Driver, DriverFactory, KeyCap, KeycodeSet, MacroFormat, MacroStep, Setting, Value } from './types';
 
 export const USAGE_PAGE = 0xff60;
 export const USAGE = 0x61;
@@ -35,6 +41,10 @@ export const CMD = {
   customSet: 0x07,
   customGet: 0x08,
   customSave: 0x09,
+  macroCount: 0x0c,
+  macroSize: 0x0d,
+  macroGet: 0x0e,
+  macroSet: 0x0f,
   layerCount: 0x11,
   getBuffer: 0x12,
   unhandled: 0xff,
@@ -78,6 +88,10 @@ const PROTOCOL_BETA = 9;
 const PROTOCOL_KEYCODES_V2 = 12;
 /** The keymap buffer is addressed with a 16-bit offset. */
 const MAX_KEYMAP_BYTES = 0x10000;
+/** Macro buffer offsets are 16-bit too. */
+const MAX_MACRO_BYTES = 0xffff;
+/** Delays in macros (SS_DELAY_CODE with the 0x01 prefix) come with VIA protocol 11. */
+const PROTOCOL_MACRO_DELAYS = 11;
 
 /** VIDs other drivers own; never claim them. */
 const EXCLUDED_VIDS = new Set([0x36a7, 0x373e, 0x37b0, 0x3710, 0x3554]);
@@ -114,11 +128,17 @@ export interface KeymapBounds {
   cols: number;
 }
 
+/** Size of the board's macro buffer (from 0x0D); macro buffer reads / writes must stay inside it. */
+export interface MacroBounds {
+  size: number;
+}
+
 /**
  * Payload allowlist (32 bytes, no report ID). Everything else is refused. Keymap writes (0x05)
- * are only allowed when `km` (the board's layer count and matrix) is given and the key is inside it.
+ * are only allowed when `km` (the board's layer count and matrix) is given and the key is inside it;
+ * macro buffer reads / writes (0x0E / 0x0F) only when `mb` is given and offset + length fit in it.
  */
-export function allowed(p: ArrayLike<number>, km?: KeymapBounds): boolean {
+export function allowed(p: ArrayLike<number>, km?: KeymapBounds, mb?: MacroBounds): boolean {
   if (p.length === 0 || p.length > REPORT_LEN) return false;
   const tailZero = (from: number) => {
     for (let i = from; i < p.length; i++) if (p[i] !== 0) return false;
@@ -127,7 +147,17 @@ export function allowed(p: ArrayLike<number>, km?: KeymapBounds): boolean {
   switch (p[0]) {
     case CMD.protocol:
     case CMD.layerCount:
+    case CMD.macroCount:
+    case CMD.macroSize:
       return tailZero(1);
+    case CMD.macroGet:
+    case CMD.macroSet: {
+      if (!mb || p.length < 4 || mb.size < 1 || mb.size > MAX_MACRO_BYTES) return false;
+      const off = (p[1] << 8) | p[2];
+      const len = p[3];
+      if (len < 1 || len > BUF_CHUNK || off + len > mb.size) return false;
+      return tailZero(p[0] === CMD.macroGet ? 4 : 4 + len);
+    }
     case CMD.getKbValue:
       return (p[1] === KV_UPTIME || p[1] === KV_LAYOUT_OPTIONS || p[1] === KV_FIRMWARE) && tailZero(2);
     case CMD.getBuffer:
@@ -166,6 +196,11 @@ export const keymapOffset = (layer: number, row: number, col: number, rows: numb
 export const customGetPkt = (ch: number, id: number) => [CMD.customGet, ch, id];
 export const customSetPkt = (ch: number, id: number, ...data: number[]) => [CMD.customSet, ch, id, ...data.map((b) => b & 0xff)];
 export const customSavePkt = (ch: number) => [CMD.customSave, ch];
+export const macroCountPkt = () => [CMD.macroCount];
+export const macroSizePkt = () => [CMD.macroSize];
+export const macroGetPkt = (offset: number, size: number) => [CMD.macroGet, (offset >> 8) & 0xff, offset & 0xff, size];
+export const macroSetPkt = (offset: number, data: ArrayLike<number>) =>
+  [CMD.macroSet, (offset >> 8) & 0xff, offset & 0xff, data.length, ...Array.from(data, (b) => b & 0xff)];
 
 /** Big-endian 32-bit number from 4 bytes. */
 export const be32 = (b: ArrayLike<number>, at = 0) => ((b[at] << 24) | (b[at + 1] << 16) | (b[at + 2] << 8) | b[at + 3]) >>> 0;
@@ -496,6 +531,8 @@ class Link {
   private readonly listeners = new Set<(d: Uint8Array) => void>();
   /** set once the board's layer count + matrix are known; enables keymap writes */
   bounds: KeymapBounds | undefined;
+  /** set once the macro buffer size is known; enables macro buffer reads / writes */
+  macroBounds: MacroBounds | undefined;
   private readonly onReport = (e: HIDInputReportEvent) => {
     if (e.reportId !== REPORT_ID) return;
     const d = new Uint8Array(e.data.buffer.slice(e.data.byteOffset, e.data.byteOffset + e.data.byteLength));
@@ -522,7 +559,7 @@ class Link {
    * (command not handled by this firmware) or timeout.
    */
   xfer(p: number[], echo = p.length): Promise<Uint8Array> {
-    if (!allowed(p, this.bounds)) return Promise.reject(new Error(`refusing to send ${hexs(p.slice(0, 8))}`));
+    if (!allowed(p, this.bounds, this.macroBounds)) return Promise.reject(new Error(`refusing to send ${hexs(p.slice(0, 8))}`));
     const buf = new Uint8Array(REPORT_LEN);
     buf.set(p);
     const head = Array.from(buf.subarray(0, Math.max(1, echo)));
@@ -579,6 +616,8 @@ class Via implements Driver {
   private layoutSource = 'generic ANSI 60% (no VIA definition)';
   /** full keymap as last read / written (only with a definition, so we know the matrix) */
   private km: { rows: number; cols: number; caps: KeyCap[]; layers: number[][]; codes: KeycodeSet } | undefined;
+  /** macro buffer as last read / written, with each slot's raw bytes and steps */
+  private mac: { count: number; size: number; format: MacroFormat; buf: Uint8Array; raw: number[][]; steps: MacroStep[][] } | undefined;
 
   constructor(private readonly link: Link) {
     const d = link.dev;
@@ -708,7 +747,8 @@ class Via implements Driver {
       const kcs = await this.keycodes(rows, cols, Math.max(1, layers), matrix);
       caps.forEach((c, i) => (c.label = keycodeLabel(kcs[0][i])));
       if (caps.length && layers > 0) {
-        const codes: KeycodeSet = this.protocol >= PROTOCOL_KEYCODES_V2 ? 'qmk-v2' : 'qmk-v1';
+        // VIA app key-to-byte tables: protocol <= 10 old (v10), 11 = v2 layout with macros at 0x7702, 12+ = v2
+        const codes: KeycodeSet = this.protocol >= PROTOCOL_KEYCODES_V2 ? 'qmk-v2' : this.protocol === 11 ? 'qmk-v11' : 'qmk-v1';
         this.km = { rows, cols, caps: caps.map((c) => ({ ...c })), layers: kcs, codes };
         this.link.bounds = { layers, rows, cols };
       }
@@ -799,6 +839,10 @@ class Via implements Driver {
       });
     }
 
+    // --- macros
+    const macros = await this.readMacros();
+    if (macros) out.push(macros);
+
     // --- lighting (primary channel)
     this.light = undefined;
     const chans = await this.channels(def);
@@ -832,6 +876,114 @@ class Via implements Driver {
 
     // the keyboard picture comes from layout(); VIA has no per-key colours
     return out;
+  }
+
+  /** `len` bytes of the macro buffer from `start` (28 bytes per request). */
+  private async macroBuffer(start: number, len: number): Promise<Uint8Array> {
+    const bytes = new Uint8Array(len);
+    for (let at = 0; at < len; at += BUF_CHUNK) {
+      const size = Math.min(BUF_CHUNK, len - at);
+      const r = await this.link.xfer(macroGetPkt(start + at, size), 4);
+      bytes.set(r.subarray(4, 4 + size), at);
+    }
+    return bytes;
+  }
+
+  private macroSetting(): Setting | undefined {
+    const m = this.mac;
+    if (!m) return undefined;
+    const busy = m.buf[m.size - 1] !== 0;
+    return {
+      key: 'macros',
+      label: 'Macros',
+      group: 'Macros',
+      value: {
+        kind: 'macros',
+        slots: m.count,
+        maxBytes: m.size,
+        format: m.format,
+        delays: m.format === 'qmk',
+        maxDelay: MAX_DELAY,
+        macros: m.steps.map((x) => x.map((s) => ({ ...s }))),
+      },
+      hint: busy
+        ? 'The macro storage looks half-written, so the keyboard won’t play macros until they are saved again.'
+        : 'Changes are stored in the keyboard straight away.',
+    };
+  }
+
+  /** Every macro slot (QMK dynamic macros), or undefined when the firmware has none. */
+  private async readMacros(): Promise<Setting | undefined> {
+    this.mac = undefined;
+    this.link.macroBounds = undefined;
+    let count: number;
+    let size: number;
+    try {
+      count = (await this.link.xfer(macroCountPkt(), 1))[1];
+      const r = await this.link.xfer(macroSizePkt(), 1);
+      size = (r[1] << 8) | r[2];
+    } catch {
+      return undefined; // firmware without dynamic macros
+    }
+    if (count < 1 || size < 2 || size > MAX_MACRO_BYTES) return undefined;
+    this.link.macroBounds = { size };
+    const format: MacroFormat = this.protocol >= PROTOCOL_MACRO_DELAYS ? 'qmk' : 'qmk-legacy';
+    try {
+      const buf = await this.macroBuffer(0, size);
+      const raw = splitMacros(buf, count);
+      this.mac = { count, size, format, buf, raw, steps: raw.map((b) => decodeMacro(b, format)) };
+    } catch {
+      this.link.macroBounds = undefined;
+      return undefined;
+    }
+    return this.macroSetting();
+  }
+
+  /**
+   * Rebuild the macro buffer: untouched slots keep their exact bytes, changed ones are encoded.
+   * Only chunks that differ are sent; the last byte marks the write as in progress meanwhile
+   * (QMK won't play macros while it's non-zero). Then the whole buffer is read back and compared.
+   */
+  private async writeMacros(v: Extract<Value, { kind: 'macros' }>): Promise<void> {
+    const m = this.mac;
+    if (!m) throw new Error('press Re-read first');
+    if (v.slots !== m.count || v.macros.length !== m.count) throw new Error("macros don't match this keyboard, press Re-read");
+    const same = (a: MacroStep[], b: MacroStep[]) => JSON.stringify(a) === JSON.stringify(b);
+    const parts = v.macros.map((steps, i) => {
+      if (same(steps, m.steps[i])) return m.raw[i];
+      try {
+        return encodeMacro(steps, m.format);
+      } catch (e) {
+        throw new Error(`M${i}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    });
+    const data = parts.flatMap((b) => [...b, 0]);
+    if (data.length > m.size) throw new Error(`macros need ${data.length} bytes, the keyboard has room for ${m.size}`);
+    const want = new Uint8Array(m.size);
+    want.set(data);
+    const last = m.size - 1;
+    const chunks: number[] = [];
+    for (let at = 0; at < last; at += BUF_CHUNK) {
+      const end = Math.min(last, at + BUF_CHUNK);
+      for (let i = at; i < end; i++) {
+        if (want[i] !== m.buf[i]) {
+          chunks.push(at);
+          break;
+        }
+      }
+    }
+    if (!chunks.length && m.buf[last] === 0) return;
+    try {
+      await this.link.xfer(macroSetPkt(last, [0xff]), 4);
+      for (const at of chunks) await this.link.xfer(macroSetPkt(at, want.subarray(at, Math.min(last, at + BUF_CHUNK))), 4);
+    } finally {
+      await this.link.xfer(macroSetPkt(last, [0]), 4);
+    }
+    const back = await this.macroBuffer(0, m.size);
+    const raw = splitMacros(back, m.count);
+    this.mac = { ...m, buf: back, raw, steps: raw.map((b) => decodeMacro(b, m.format)) };
+    const bad = back.findIndex((b, i) => b !== want[i]);
+    if (bad >= 0) throw new Error(`keyboard didn't take the macro change (byte ${bad} reads back 0x${back[bad].toString(16).padStart(2, '0')})`);
   }
 
   private async setValue(id: number, data: number[]): Promise<void> {
@@ -900,6 +1052,7 @@ class Via implements Driver {
     const l = this.light;
     const v = s.value;
     if (s.key === 'keymap' && v.kind === 'keymap') return this.writeKeymap(v);
+    if (s.key === 'macros' && v.kind === 'macros') return this.writeMacros(v);
     if (!l) throw new Error(`${s.key} can't be changed`);
     switch (`${s.key}:${v.kind}`) {
       case 'light_mode:choice': {

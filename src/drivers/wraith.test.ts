@@ -36,6 +36,8 @@ import {
   type KeyTrig,
   type Trig,
 } from './wraith';
+import { SOCD_MAX, SOCD_UNAVAILABLE, W75_HID, parseSocdPage, parseSocdPower, planSocdPairs, readSocdPairsPkt, readSocdPowerPkt, setSocdPairsPkts, setSocdPowerPkt, socdValue } from './wraith';
+import type { Socd } from './types';
 
 const hex = (s: string) => s.split(/\s+/).filter(Boolean).map((b) => parseInt(b, 16));
 const pos = (key: number) => W75_CAPS.findIndex((k) => k.index === key);
@@ -558,5 +560,151 @@ describe('live travel test', () => {
     expect(f.wrote([0x21, 0, 0, 0, 0x18, 0x03]).length).toBe(1);
     await new Promise((r) => setTimeout(r, 120));
     expect(got.length).toBe(n);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// SOCD (official "PRCS", cmd 0x24)
+
+describe('SOCD', () => {
+  const at = (label: string) => W75_CAPS.findIndex((k) => k.label === label);
+  const hx = (p: number[]) => p.map((b) => b.toString(16).padStart(2, '0')).join(' ');
+  const A = at('A');
+  const D = at('D');
+  const Wk = at('W');
+  const S = at('S');
+
+  it('every W75 key except Fn has a HID usage from the vendor layout', () => {
+    const hid = new Map(W75_HID);
+    const missing = W75_CAPS.filter((c) => !hid.has(c.index)).map((c) => c.label);
+    expect(missing).toEqual(['Fn']);
+    expect(SOCD_UNAVAILABLE).toEqual([at('Fn')]);
+    expect(hid.get(46)).toBe(0x1a); // W
+    expect(hid.get(68)).toBe(0x04); // A
+    expect(hid.get(70)).toBe(0x07); // D
+    expect(new Set(W75_HID.map(([, h]) => h)).size).toBe(W75_HID.length);
+    expect(W75_HID.every(([k]) => W75_CAPS.some((c) => c.index === k))).toBe(true);
+  });
+
+  it('frames match the official driver', () => {
+    expect(readSocdPowerPkt()).toEqual(hex('24 02'));
+    expect(readSocdPairsPkt()).toEqual(hex('24 01'));
+    expect(setSocdPowerPkt(true)).toEqual(hex('24 03 00 00 01 01'));
+    expect(setSocdPowerPkt(false)).toEqual(hex('24 03 00 00 01 00'));
+    const pk = setSocdPairsPkts([{ mode: 0, hid1: 0x04, hid2: 0x07 }, { mode: 3, hid1: 0x1a, hid2: 0x16 }]);
+    expect(pk).toHaveLength(2);
+    expect(pk[0].slice(0, 13)).toEqual(hex('24 00 00 00 28 01 00 04 07 01 03 1A 16'));
+    expect(pk[0].length).toBe(45);
+    expect(pk[0].slice(13).every((b) => b === 0)).toBe(true);
+    expect(pk[1]).toEqual([...hex('24 00 00 01 28'), ...new Array(40).fill(0)]);
+    for (const p of [...pk, readSocdPowerPkt(), readSocdPairsPkt(), setSocdPowerPkt(true), setSocdPowerPkt(false)]) expect(allowed(p), hx(p)).toBe(true);
+    // 11 pairs: the 11th lands on page 1
+    const many = setSocdPairsPkts(Array.from({ length: 11 }, () => ({ mode: 1, hid1: 0x04, hid2: 0x07 })));
+    expect(many[1].slice(5, 9)).toEqual(hex('01 01 04 07'));
+    expect(() => setSocdPairsPkts(Array.from({ length: 21 }, () => ({ mode: 0, hid1: 4, hid2: 7 })))).toThrow(/20/);
+  });
+
+  it('allowlist takes only exact SOCD frames', () => {
+    const page = (entries: number[]) => [...hex('24 00 00 00 28'), ...entries, ...new Array(40 - entries.length).fill(0)];
+    expect(allowed(page(hex('01 00 04 07')))).toBe(true);
+    for (const bad of [
+      page(hex('01 04 04 07')), // mode 4
+      page(hex('02 00 04 07')), // valid byte
+      page(hex('01 00 04 04')), // same key twice
+      page(hex('01 00 04 00')), // missing key
+      page(hex('01 00 04 FA')), // not a W75 key
+      page(hex('00 01 00 00')), // junk in an empty entry
+      [...page([]), 1], // trailing junk
+      hex('24 00 00 02 28').concat(new Array(40).fill(0)), // page 2
+      hex('24 00 00 00 27').concat(new Array(40).fill(0)), // length
+      hex('24 00 01 00 28').concat(new Array(40).fill(0)), // page hi
+      hex('24 00 00 00 28'), // short
+      hex('24 03 00 00 01 02'),
+      hex('24 03 00 00 02 01 00'),
+      hex('24 03 00 00 01 01 FA E5'), // the hotkey is never written
+      hex('24 02 01'),
+      hex('24 01 00 01'),
+      hex('24 04'),
+      hex('24 00'),
+    ]) {
+      expect(allowed(bad), hx(bad)).toBe(false);
+    }
+  });
+
+  it('parses the probe replies', () => {
+    // real W75 probe: 24 02 00 00 06 | 00 00 00 00 FA E5
+    expect(parseSocdPower(hex('24 02 00 00 06 00 00 00 00 FA E5'))).toEqual({ on: false, hotkey: [0xfa, 0xe5] });
+    expect(parseSocdPower(hex('24 02 00 00 06 01 00 00 00 FA E5'))?.on).toBe(true);
+    const pg = [...hex('24 01 00 01 28 01 02 04 07 07 FF FF FF 00 03 1A 16'), ...new Array(28).fill(0)];
+    expect(parseSocdPage(pg)).toEqual({ page: 1, pairs: [{ mode: 2, hid1: 4, hid2: 7 }] });
+  });
+
+  it('value / plan round-trip; unknown pairs are kept', () => {
+    const { value, foreign } = socdValue(true, [{ mode: 0, hid1: 0x04, hid2: 0x07 }, { mode: 1, hid1: 0x04, hid2: 0x99 }]);
+    expect(foreign).toEqual([{ mode: 1, hid1: 0x04, hid2: 0x99 }]);
+    expect(value).toMatchObject({ kind: 'socd', mode: 'pairs', enabled: true, max: 19, entries: [{ keys: [A, D], mode: 0 }] });
+    expect(planSocdPairs(value, foreign)).toEqual([{ mode: 0, hid1: 0x04, hid2: 0x07 }, { mode: 1, hid1: 0x04, hid2: 0x99 }]);
+    const v = (entries: Socd['entries']): Socd => ({ ...value, entries });
+    expect(() => planSocdPairs(v([{ keys: [A], mode: 0 }]), [])).toThrow(/two different keys/);
+    expect(() => planSocdPairs(v([{ keys: [A, A], mode: 0 }]), [])).toThrow(/two different keys/);
+    expect(() => planSocdPairs(v([{ keys: [A, D], mode: 0 }, { keys: [D, Wk], mode: 0 }]), [])).toThrow(/D is in two/);
+    expect(() => planSocdPairs(v([{ keys: [A, at('Fn')], mode: 0 }]), [])).toThrow(/Fn can't/);
+    expect(() => planSocdPairs(v([{ keys: [A, D], mode: 7 }]), [])).toThrow(/mode/);
+    const full = Array.from({ length: 20 }, (_, i) => ({ keys: [2 * i, 2 * i + 1], mode: 0 }));
+    expect(() => planSocdPairs(v(full), [{ mode: 0, hid1: 1, hid2: 2 }])).toThrow(/at most 20/);
+    expect(SOCD_MAX).toBe(20);
+  });
+
+  it('is only read when the status says so, and reads never write', async () => {
+    const [f, d] = await connect();
+    expect((await d.read()).find((s) => s.key === 'socd')).toBeUndefined();
+    expect(f.wrote([0x24])).toEqual([]);
+    const [g, e] = await connect({ socd: true });
+    g.socdTable.splice(0, 4, 1, 3, 0x04, 0x07);
+    const ss = await e.read();
+    const s = find(ss, 'socd');
+    expect(s.group).toBe('Switches');
+    expect(s.value).toMatchObject({ kind: 'socd', enabled: false, max: 20, entries: [{ keys: [A, D], mode: 3 }] });
+    expect(g.sent.filter((p) => p[0] === 0x24).map((p) => p[1])).toEqual([0x02, 0x01]);
+  });
+
+  it('writes the switch and pairs, then reads them back', async () => {
+    const [f, d] = await connect({ socd: true });
+    const s = find(await d.read(), 'socd');
+    const v = s.value as Socd;
+    f.sent = [];
+    await d.write(withValue(s, { ...v, enabled: true }));
+    expect(f.socdOn).toBe(1);
+    expect(f.sent.map((p) => p.slice(0, 2))).toEqual([hex('24 03'), hex('24 02')]);
+    f.sent = [];
+    const next: Socd = { ...v, enabled: true, entries: [{ keys: [A, D], mode: 0 }, { keys: [Wk, S], mode: 2 }] };
+    await d.write(withValue(s, next));
+    expect(f.socdTable.slice(0, 8)).toEqual(hex('01 00 04 07 01 02 1A 16'));
+    expect(f.wrote([0x24, 0x00]).map((p) => p[3])).toEqual([0, 1]);
+    expect(f.wrote([0x24, 0x01])).toHaveLength(1);
+    expect(f.wrote([0x24, 0x03])).toHaveLength(0); // switch unchanged
+    // unchanged: nothing written
+    f.sent = [];
+    await d.write(withValue(s, next));
+    expect(f.sent).toEqual([]);
+    // remove one pair
+    await d.write(withValue(s, { ...next, entries: [next.entries[1]] }));
+    expect(f.socdTable.slice(0, 8)).toEqual(hex('01 02 1A 16 00 00 00 00'));
+  });
+
+  it('reports an ignored write', async () => {
+    const [, d] = await connect({ socd: true, ignoreWrites: true });
+    const s = find(await d.read(), 'socd');
+    const v = s.value as Socd;
+    await expect(d.write(withValue(s, { ...v, enabled: true }))).rejects.toThrow(/didn't take the SOCD switch/);
+    await expect(d.write(withValue(s, { ...v, entries: [{ keys: [A, D], mode: 0 }] }))).rejects.toThrow(/didn't take the SOCD change/);
+  });
+
+  it('refuses invalid pairs before sending anything', async () => {
+    const [f, d] = await connect({ socd: true });
+    const s = find(await d.read(), 'socd');
+    f.sent = [];
+    await expect(d.write(withValue(s, { ...(s.value as Socd), entries: [{ keys: [A, at('Fn')], mode: 0 }] }))).rejects.toThrow(/Fn/);
+    expect(f.sent).toEqual([]);
   });
 });

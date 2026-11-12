@@ -51,10 +51,86 @@ export type Value =
       layers: number[][];
       /** which keycode numbering `layers` uses (src/lib/keycodes.ts understands these) */
       codes: KeycodeSet;
-    };
+    }
+  | {
+      /**
+       * The keyboard's macro slots. write() gets every slot; drivers rewrite what changed and
+       * read it back. Slot n runs when a key sends that driver's "macro n" keycode.
+       */
+      kind: 'macros';
+      /** slot count (= macros.length) */
+      slots: number;
+      /** storage all macros share, in bytes, if limited */
+      maxBytes?: number;
+      /** how macros are stored, for byte counting (src/lib/macros.ts knows these) */
+      format?: MacroFormat;
+      /** false when the device can't store delay steps */
+      delays?: boolean;
+      /** longest single delay step (ms) */
+      maxDelay?: number;
+      macros: MacroStep[][];
+    }
+  | Socd;
+
+/**
+ * SOCD / "Snap Tap": when two opposite keys (A/D) are held together, decide which one counts.
+ * write() gets the whole value; drivers write only what changed and read it back.
+ *
+ * - `mode: 'pairs'`: every entry is two keys with its own resolution `mode` (one of `modes`).
+ *   Order matters: keys[0] is "key 1", keys[1] is "key 2". At most `max` entries.
+ * - `mode: 'groups'`: exactly `max` entries, entry i = group i (any number of keys, may be empty).
+ *   Within a group only the last-pressed key counts; groups don't affect each other.
+ *
+ * A key may be in at most one entry.
+ */
+export interface Socd {
+  kind: 'socd';
+  mode: 'pairs' | 'groups';
+  /** the keys entries refer to (the board picture); entry keys are positions in this array */
+  keys: KeyCap[];
+  /** master switch, for devices that have one */
+  enabled?: boolean;
+  /** pairs: most pairs the device stores; groups: number of groups */
+  max: number;
+  /** resolution modes [label, value]; a single entry means there's nothing to choose */
+  modes: [label: string, value: number][];
+  /** positions in `keys` that can't be used for SOCD (e.g. Fn, keys with another special function) */
+  unavailable?: number[];
+  /** false when keys can't be taken out of SOCD again on this device/firmware */
+  removable?: boolean;
+  /** per-entry actuation point (mm), for devices where each pair has its own */
+  travel?: { min: number; max: number; step: number; default: number };
+  /** true when each entry has its own Rapid Trigger switch */
+  rapid?: boolean;
+  entries: SocdEntry[];
+}
+
+export interface SocdEntry {
+  /** positions in Socd.keys */
+  keys: number[];
+  /** one of Socd.modes' values */
+  mode: number;
+  /** actuation point (mm), when Socd.travel is set */
+  travel?: number;
+  /** Rapid Trigger on, when Socd.rapid is set */
+  rapid?: boolean;
+}
+
+/**
+ * One macro step. `kc` is a basic HID keyboard usage (0x04 A … 0xE7 right Win; same as the QMK
+ * basic keycodes). Text is typed as US-layout ASCII.
+ */
+export type MacroStep =
+  | { t: 'tap' | 'down' | 'up'; kc: number }
+  | { t: 'delay'; ms: number }
+  | { t: 'text'; text: string };
+
+/** Macro storage formats: QMK dynamic macros with (VIA protocol 11+) and without delays. */
+export type MacroFormat = 'qmk' | 'qmk-legacy';
 
 /** Keycode numberings: QMK keycodes v2 (QMK 0.19+, VIA protocol 12+) and the older v1. */
-export type KeycodeSet = 'qmk-v2' | 'qmk-v1';
+/** QMK keycode numbering: v1 = VIA protocol <= 10, v11 = protocol 11 (v2 layout, macros at 0x7702), v2 = protocol 12+ */
+export type KeycodeSet = 'qmk-v2' | 'qmk-v11' | 'qmk-v1';
 
 export interface Setting {
   /** stable id used by write() */

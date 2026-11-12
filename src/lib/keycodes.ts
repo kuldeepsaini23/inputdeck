@@ -19,6 +19,8 @@ export interface Keycode {
   name: string;
   /** layer keys: the layer they act on */
   layer?: number;
+  /** macro keys: the macro slot they play */
+  macro?: number;
 }
 
 export interface Category {
@@ -149,7 +151,7 @@ function basics(): Def[] {
 function extras(set: KeycodeSet): Def[] {
   const d: Def[] = [];
   const add = (code: number, id: string, label: string, name: string, cat: Cat) => d.push({ code, id, label, name, cat });
-  const v2 = set === 'qmk-v2';
+  const v2 = set !== 'qmk-v1';
   if (v2) {
     add(0xbf, 'KC_CPNL', 'Ctrl P', 'Open control panel', 'media');
     add(0xc0, 'KC_ASST', 'Asst', 'Assistant', 'media');
@@ -221,7 +223,7 @@ const V1_BASE: Record<(typeof LAYER_FNS)[number], number> = { TO: 0x5010, MO: 0x
 /** Highest layer number a layer function can encode. */
 export function maxLayer(fn: LayerFn, set: KeycodeSet): number {
   if (fn === 'LT') return 15;
-  if (set === 'qmk-v2') return 31;
+  if (set !== 'qmk-v1') return 31;
   return fn === 'TO' ? 15 : fn === 'TT' ? 31 : 255;
 }
 
@@ -229,13 +231,13 @@ export function maxLayer(fn: LayerFn, set: KeycodeSet): number {
 export function layerKey(fn: LayerFn, layer: number, set: KeycodeSet = 'qmk-v2', tap = KC_SPC): number {
   const l = Math.max(0, Math.min(maxLayer(fn, set), Math.floor(layer)));
   if (fn === 'LT') return 0x4000 | (l << 8) | (tap & 0xff);
-  return (set === 'qmk-v2' ? V2_BASE : V1_BASE)[fn] | l;
+  return (set !== 'qmk-v1' ? V2_BASE : V1_BASE)[fn] | l;
 }
 
 /** The layer function a keycode is, if any. */
 export function decodeLayer(kc: number, set: KeycodeSet = 'qmk-v2'): { fn: LayerFn; layer: number; tap?: number } | undefined {
   if (kc >= 0x4000 && kc <= 0x4fff) return { fn: 'LT', layer: (kc >> 8) & 0xf, tap: kc & 0xff };
-  if (set === 'qmk-v2') {
+  if (set !== 'qmk-v1') {
     for (const fn of LAYER_FNS) if (kc >= V2_BASE[fn] && kc < V2_BASE[fn] + 32) return { fn, layer: kc & 0x1f };
     return undefined;
   }
@@ -246,6 +248,25 @@ export function decodeLayer(kc: number, set: KeycodeSet = 'qmk-v2'): { fn: Layer
     if (kc >= V1_BASE[fn] && kc < V1_BASE[fn] + span) return { fn, layer: kc & (span - 1) };
   }
   return undefined;
+}
+
+// ---------------------------------------------------------------------------------------------
+// macro keys (QK_MACRO): play dynamic macro n. v2 (quantum/keycodes.h): QK_MACRO 0x7700-0x777F;
+// v1 (VIA's v10 key table, the pre-0.19 VIA user range): 0x5F12-0x5F21.
+
+const MACRO_BASE: Record<KeycodeSet, number> = { 'qmk-v2': 0x7700, 'qmk-v11': 0x7702, 'qmk-v1': 0x5f12 };
+/** How many macro keys each numbering has. */
+export const MACRO_KEYS: Record<KeycodeSet, number> = { 'qmk-v2': 128, 'qmk-v11': 16, 'qmk-v1': 16 };
+
+/** Keycode that plays macro n (undefined past the numbering's last macro key). */
+export function macroKey(n: number, set: KeycodeSet = 'qmk-v2'): number | undefined {
+  return Number.isInteger(n) && n >= 0 && n < MACRO_KEYS[set] ? MACRO_BASE[set] + n : undefined;
+}
+
+/** The macro slot a keycode plays, if it is a macro key. */
+export function decodeMacroKey(kc: number, set: KeycodeSet = 'qmk-v2'): number | undefined {
+  const n = kc - MACRO_BASE[set];
+  return n >= 0 && n < MACRO_KEYS[set] ? n : undefined;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -273,7 +294,9 @@ function decode(kc: number, set: KeycodeSet): Decoded | undefined {
   kc &= 0xffff;
   const d = table(set).byCode.get(kc);
   if (d) return d;
-  const v2 = set === 'qmk-v2';
+  const v2 = set !== 'qmk-v1';
+  const mac = decodeMacroKey(kc, set);
+  if (mac !== undefined) return { label: `M${mac}`, name: `Play macro M${mac}` };
   // Ctrl+C style combos
   if (kc >= 0x0100 && kc <= 0x1fff) {
     const m = mods((kc >> 8) & 0x1f);
@@ -337,6 +360,8 @@ export function parse(text: string, set: KeycodeSet = 'qmk-v2'): number | undefi
     const l = Number(lf[2]);
     return l <= maxLayer(fn, set) ? layerKey(fn, l, set) : undefined;
   }
+  const mc = t.match(/^(?:MC_|M|QK_MACRO_|MACRO\(?)(\d+)\)?$/);
+  if (mc) return macroKey(Number(mc[1]), set);
   const lt = t.match(/^LT\((\d+),(.+)\)$/);
   if (lt) {
     const tap = parse(lt[2], set);
@@ -350,6 +375,8 @@ export function parse(text: string, set: KeycodeSet = 'qmk-v2'): number | undefi
 export function idOf(kc: number, set: KeycodeSet = 'qmk-v2'): string {
   const d = table(set).byCode.get(kc);
   if (d) return d.id;
+  const mac = decodeMacroKey(kc, set);
+  if (mac !== undefined) return `MC_${mac}`;
   const l = decodeLayer(kc, set);
   if (l) return l.fn === 'LT' ? `LT(${l.layer},${idOf(l.tap!, set)})` : `${l.fn}(${l.layer})`;
   return hexCode(kc);
@@ -357,9 +384,10 @@ export function idOf(kc: number, set: KeycodeSet = 'qmk-v2'): string {
 
 /**
  * Picker categories. Layer keys are listed for layers 0..layers-1; layer-tap keys tap `tap`
- * (a basic keycode, e.g. what the key sends on layer 0).
+ * (a basic keycode, e.g. what the key sends on layer 0). A 'Macros' category lists M0..M(macros-1)
+ * when the keyboard has macro slots.
  */
-export function categories(set: KeycodeSet = 'qmk-v2', layers = 4, tap = KC_SPC): Category[] {
+export function categories(set: KeycodeSet = 'qmk-v2', layers = 4, tap = KC_SPC, macros = 0): Category[] {
   const { list } = table(set);
   const t = tap > KC_TRNS && tap < 0x100 && table(set).byCode.has(tap) ? tap : KC_SPC;
   const layerCodes: Keycode[] = [];
@@ -370,15 +398,25 @@ export function categories(set: KeycodeSet = 'qmk-v2', layers = 4, tap = KC_SPC)
       layerCodes.push({ code, id: idOf(code, set), label: label(code, set), name: describe(code, set), layer: l });
     }
   }
-  return CAT_NAMES.map(([id, name]) => ({
+  const out: Category[] = CAT_NAMES.map(([id, name]) => ({
     id,
     name,
     codes: id === 'layers' ? layerCodes : list.filter((d) => d.cat === id).map(({ cat: _cat, ...k }) => k),
   }));
+  const n = Math.min(Math.max(0, Math.floor(macros)), MACRO_KEYS[set]);
+  if (n > 0) {
+    const codes: Keycode[] = [];
+    for (let m = 0; m < n; m++) {
+      const code = macroKey(m, set)!;
+      codes.push({ code, id: idOf(code, set), label: label(code, set), name: describe(code, set), macro: m });
+    }
+    out.push({ id: 'macros', name: 'Macros', codes });
+  }
+  return out;
 }
 
 /** Search every category (name, legend or QMK id); a typed hex code or QMK name is offered too. */
-export function search(query: string, set: KeycodeSet = 'qmk-v2', layers = 4, tap = KC_SPC): Keycode[] {
+export function search(query: string, set: KeycodeSet = 'qmk-v2', layers = 4, tap = KC_SPC, macros = 0): Keycode[] {
   const q = query.trim().toLowerCase();
   if (!q) return [];
   const seen = new Set<number>();
@@ -390,12 +428,12 @@ export function search(query: string, set: KeycodeSet = 'qmk-v2', layers = 4, ta
   };
   const exact = parse(query, set);
   if (exact !== undefined) push({ code: exact, id: idOf(exact, set), label: label(exact, set), name: describe(exact, set) });
-  for (const c of categories(set, layers, tap)) {
+  for (const c of categories(set, layers, tap, macros)) {
     for (const k of c.codes) {
       if (k.label.toLowerCase() === q) push(k);
     }
   }
-  for (const c of categories(set, layers, tap)) {
+  for (const c of categories(set, layers, tap, macros)) {
     for (const k of c.codes) {
       if (k.name.toLowerCase().includes(q) || k.id.toLowerCase().includes(q) || k.label.toLowerCase().includes(q)) push(k);
     }

@@ -10,10 +10,11 @@
 // writable settings are only exposed for known product strings.
 //
 // NEVER send: 14 00 00 00 01 01 (factory reset), 21 ..18 06 (reset triggers),
-// 21 ..18 07 / other 18 ops (calibration), 26 xx (deadband - read is also reset), 25/19/22/24
-// writes, or anything firmware-related. `allowed()` enforces an allowlist on every packet.
+// 21 ..18 07 / other 18 ops (calibration), 26 xx (deadband - read is also reset), 25/19/22
+// writes, 24 writes other than the exact SOCD frames below, or anything firmware-related.
+// `allowed()` enforces an allowlist on every packet.
 
-import type { Driver, DriverFactory, KeyCap, Setting, Value } from './types';
+import type { Driver, DriverFactory, KeyCap, Setting, Socd, Value } from './types';
 import { sleep } from './types';
 
 const VID = 0x2e3c;
@@ -90,6 +91,38 @@ const W75_LAYOUT: [number, string, number, number, number][] = [
 
 /** The W75 layout as drawn by the UI (built once). */
 export const W75_CAPS: KeyCap[] = W75_LAYOUT.map(([index, label, x, y, w]) => ({ index, label, x, y, w, h: 1 }));
+
+/**
+ * [key index, HID usage] of every W75 key, from the official `config/keys/W75HEARGB.json`
+ * ("hidCode"). SOCD frames name keys by HID usage. Fn (121) has none, so it can't be used.
+ */
+export const W75_HID: [index: number, hid: number][] = [
+  [0, 0x29], [2, 0x3a], [3, 0x3b], [4, 0x3c], [5, 0x3d], [6, 0x3e], [7, 0x3f], [8, 0x40], [9, 0x41], [10, 0x42],
+  [11, 0x43], [12, 0x44], [13, 0x45], [14, 0x4c], [22, 0x35], [23, 0x1e], [24, 0x1f], [25, 0x20], [26, 0x21], [27, 0x22],
+  [28, 0x23], [29, 0x24], [30, 0x25], [31, 0x26], [32, 0x27], [33, 0x2d], [34, 0x2e], [36, 0x2a], [37, 0x4a], [44, 0x2b],
+  [45, 0x14], [46, 0x1a], [47, 0x08], [48, 0x15], [49, 0x17], [50, 0x1c], [51, 0x18], [52, 0x0c], [53, 0x12], [54, 0x13],
+  [55, 0x2f], [56, 0x30], [58, 0x31], [59, 0x4b], [66, 0x39], [68, 0x04], [69, 0x16], [70, 0x07], [71, 0x09], [72, 0x0a],
+  [73, 0x0b], [74, 0x0d], [75, 0x0e], [76, 0x0f], [77, 0x33], [78, 0x34], [80, 0x28], [81, 0x4e], [88, 0xe1], [90, 0x1d],
+  [91, 0x1b], [92, 0x06], [93, 0x19], [94, 0x05], [95, 0x11], [96, 0x10], [97, 0x36], [98, 0x37], [99, 0x38], [101, 0xe5],
+  [102, 0x52], [110, 0xe0], [111, 0xe3], [112, 0xe2], [116, 0x2c], [120, 0xe6], [122, 0xe4], [123, 0x50], [124, 0x51], [125, 0x4f],
+];
+const HID_OF_INDEX = new Map(W75_HID);
+/** HID usages the SOCD write frames may carry */
+const SOCD_HIDS = new Set(W75_HID.map(([, h]) => h));
+/** HID usage -> layout position */
+const POS_OF_HID = new Map(W75_HID.map(([k, h]) => [h, W75_CAPS.findIndex((c) => c.index === k)] as const));
+
+/** SOCD ("PRCS" in the official driver): 2 pages x 10 pairs. */
+export const SOCD_MAX = 20;
+const SOCD_PAGE_PAIRS = 10;
+const SOCD_PAGE_LEN = SOCD_PAGE_PAIRS * 4;
+/** SOCD resolution modes (official prcsModel1..4) */
+export const SOCD_MODES: [string, number][] = [
+  ['Last input', 0],
+  ['Key 1 wins', 1],
+  ['Key 2 wins', 2],
+  ['Neutral', 3],
+];
 
 /** Per-key colour table: 132 key slots (6 rows x 22 cols) x RGB. */
 export const COLOR_TABLE = 132 * 3;
@@ -196,6 +229,24 @@ export function allowed(p: ArrayLike<number>): boolean {
       if (a === 0x18 && b === 0x02) return tailZero(28);
       if (a === 0x18 && b === 0x03) return tailZero(6);
       if (a === 0x18 && b !== undefined) return (b === TRIG_FIXED || b === TRIG_RT || b === TRIG_RT_SPLIT) && tailZero(36);
+      return false;
+    }
+    // SOCD: read pairs (24 01) / switch (24 02); set switch 24 03 00 00 01 <0|1>;
+    // write one page of pairs 24 00 00 <0|1> 28 + 10 x (all zero | 01 mode<4 hid1 hid2)
+    case 0x24: {
+      const sub = at(1);
+      if (sub === 0x01 || sub === 0x02) return tailZero(2);
+      if (sub === 0x03) return at(2) === 0 && at(3) === 0 && at(4) === 1 && (at(5) === 0 || at(5) === 1) && tailZero(6);
+      if (sub === 0x00) {
+        if (p.length < 5 + SOCD_PAGE_LEN || at(2) !== 0 || (at(3) !== 0 && at(3) !== 1) || at(4) !== SOCD_PAGE_LEN) return false;
+        for (let e = 0; e < SOCD_PAGE_PAIRS; e++) {
+          const b = 5 + 4 * e;
+          const [v, m, h1, h2] = [p[b], p[b + 1], p[b + 2], p[b + 3]];
+          if (v === 0 && m === 0 && h1 === 0 && h2 === 0) continue;
+          if (!(v === 1 && m < 4 && SOCD_HIDS.has(h1) && SOCD_HIDS.has(h2) && h1 !== h2)) return false;
+        }
+        return tailZero(5 + SOCD_PAGE_LEN);
+      }
       return false;
     }
     default:
@@ -422,6 +473,105 @@ export function groupKeyTrigs(changes: [number, KeyTrig][]): [KeyTrig, number[]]
   return [...g.values()];
 }
 
+// --- SOCD
+
+/** One SOCD pair as the board stores it. */
+export interface SocdPair {
+  mode: number;
+  hid1: number;
+  hid2: number;
+}
+
+export const readSocdPowerPkt = () => [0x24, 0x02];
+export const setSocdPowerPkt = (on: boolean) => [0x24, 0x03, 0, 0, 0x01, on ? 1 : 0];
+export const readSocdPairsPkt = () => [0x24, 0x01];
+
+/** Both pages that replace the whole pair table (unused entries are 00 00 00 00). */
+export function setSocdPairsPkts(pairs: SocdPair[]): number[][] {
+  if (pairs.length > SOCD_MAX) throw new Error(`at most ${SOCD_MAX} SOCD pairs`);
+  const out: number[][] = [];
+  for (let pg = 0; pg < 2; pg++) {
+    const p = [0x24, 0x00, 0, pg, SOCD_PAGE_LEN, ...new Array<number>(SOCD_PAGE_LEN).fill(0)];
+    pairs.slice(pg * SOCD_PAGE_PAIRS, (pg + 1) * SOCD_PAGE_PAIRS).forEach((s, i) => {
+      p.splice(5 + 4 * i, 4, 0x01, s.mode & 0xff, s.hid1 & 0xff, s.hid2 & 0xff);
+    });
+    out.push(p);
+  }
+  return out;
+}
+
+/** `24 02` reply: d[5] = 1 when on; d[9], d[10] = the toggle hotkey (HID usages). */
+export function parseSocdPower(d: ArrayLike<number>): { on: boolean; hotkey: [number, number] } | undefined {
+  if (d.length < 11 || d[0] !== 0x24 || d[1] !== 0x02 || d[4] < 6) return undefined;
+  return { on: d[5] === 1, hotkey: [d[9], d[10]] };
+}
+
+/** One `24 01 00 pg 28 <10 x 4 bytes>` reply page (empty and `07 FF FF FF` entries skipped). */
+export function parseSocdPage(d: ArrayLike<number>): { page: number; pairs: SocdPair[] } | undefined {
+  if (d.length < 5 + SOCD_PAGE_LEN || d[0] !== 0x24 || d[1] !== 0x01) return undefined;
+  const pairs: SocdPair[] = [];
+  for (let e = 0; e < SOCD_PAGE_PAIRS; e++) {
+    const b = 5 + 4 * e;
+    if (d[b] === 0 || (d[b] === 0x07 && d[b + 1] === 0xff && d[b + 2] === 0xff && d[b + 3] === 0xff)) continue;
+    pairs.push({ mode: d[b + 1], hid1: d[b + 2], hid2: d[b + 3] });
+  }
+  return { page: (d[2] << 8) | d[3], pairs };
+}
+
+/** Layout positions that can't be in a SOCD pair (no HID usage: Fn). */
+export const SOCD_UNAVAILABLE = W75_CAPS.map((c, i) => (HID_OF_INDEX.has(c.index) ? -1 : i)).filter((i) => i >= 0);
+
+/**
+ * The UI value for the stored pairs. Pairs we can't show (key not on the W75 layout, unknown
+ * mode) come back as `foreign`: they are kept as they are on every write.
+ */
+export function socdValue(on: boolean, pairs: SocdPair[]): { value: Socd; foreign: SocdPair[] } {
+  const entries: Socd['entries'] = [];
+  const foreign: SocdPair[] = [];
+  for (const s of pairs) {
+    const a = POS_OF_HID.get(s.hid1);
+    const b = POS_OF_HID.get(s.hid2);
+    if (a === undefined || b === undefined || a < 0 || b < 0 || a === b || !SOCD_MODES.some(([, m]) => m === s.mode)) foreign.push(s);
+    else entries.push({ keys: [a, b], mode: s.mode });
+  }
+  return {
+    value: {
+      kind: 'socd',
+      mode: 'pairs',
+      keys: W75_CAPS,
+      enabled: on,
+      max: SOCD_MAX - foreign.length,
+      modes: SOCD_MODES,
+      unavailable: SOCD_UNAVAILABLE,
+      entries,
+    },
+    foreign,
+  };
+}
+
+/** UI value -> the pair table to write (foreign pairs appended). Throws on anything invalid. */
+export function planSocdPairs(v: Socd, foreign: SocdPair[]): SocdPair[] {
+  if (v.entries.length + foreign.length > SOCD_MAX) throw new Error(`the keyboard holds at most ${SOCD_MAX} SOCD pairs`);
+  const used = new Set<number>();
+  const out: SocdPair[] = [];
+  for (const e of v.entries) {
+    if (e.keys.length !== 2 || e.keys[0] === e.keys[1]) throw new Error('every SOCD pair needs two different keys');
+    const hids = e.keys.map((k) => {
+      const cap = W75_CAPS[k];
+      const hid = cap ? HID_OF_INDEX.get(cap.index) : undefined;
+      if (hid === undefined) throw new Error(`${cap?.label ?? `key ${k}`} can't be used for SOCD`);
+      if (used.has(k)) throw new Error(`${cap.label} is in two SOCD pairs`);
+      used.add(k);
+      return hid;
+    });
+    if (!SOCD_MODES.some(([, m]) => m === e.mode)) throw new Error(`unknown SOCD mode ${e.mode}`);
+    out.push({ mode: e.mode, hid1: hids[0], hid2: hids[1] });
+  }
+  return [...out, ...foreign];
+}
+
+const pairsKey = (ps: SocdPair[]) => ps.map((s) => `${s.mode}:${s.hid1}:${s.hid2}`).join(',');
+
 // ---------------------------------------------------------------------------------------------
 // transport
 
@@ -526,6 +676,8 @@ class Wraith implements Driver {
   private keyTrigs: KeyTrig[] | undefined;
   /** last read custom colour slot (0|1) and its raw table */
   private colors: { slot: number; table: Uint8Array } | undefined;
+  /** last read SOCD state (pairs we can't show are kept as `foreign`) */
+  private socd: { on: boolean; pairs: SocdPair[]; foreign: SocdPair[] } | undefined;
 
   constructor(private readonly link: Link) {
     const d = link.dev;
@@ -681,7 +833,48 @@ class Wraith implements Driver {
     return table;
   }
 
+  private async readSocdPower(): Promise<boolean> {
+    const p = parseSocdPower(await this.link.xfer(readSocdPowerPkt(), (d) => d[1] === 0x02));
+    if (!p) throw new Error('short SOCD reply');
+    return p.on;
+  }
+
+  /** The SOCD pair table (the board answers one request with 2 pages). */
+  private async readSocdPairs(): Promise<SocdPair[]> {
+    const pages = new Map<number, SocdPair[]>();
+    await this.link.listen(readSocdPairsPkt(), wraithTiming.reply, (d) => {
+      const pg = parseSocdPage(d);
+      if (pg && pg.page < 2) pages.set(pg.page, pg.pairs);
+      return pages.has(0) && pages.has(1);
+    });
+    if (!pages.has(0) || !pages.has(1)) throw new Error('SOCD table incomplete');
+    return [...pages.get(0)!, ...pages.get(1)!];
+  }
+
   // --- low-level writes
+
+  private async writeSocd(v: Socd): Promise<void> {
+    const cur = this.socd;
+    if (!cur) throw new Error('press Re-read first');
+    if (v.mode !== 'pairs') throw new Error("SOCD data doesn't match the keyboard - press Re-read");
+    const pairs = planSocdPairs(v, cur.foreign);
+    if (v.enabled !== undefined && v.enabled !== cur.on) {
+      await this.link.send(setSocdPowerPkt(v.enabled));
+      await sleep(wraithTiming.settle);
+      const on = await this.readSocdPower();
+      this.socd = { ...cur, on };
+      if (on !== v.enabled) throw new Error(`keyboard didn't take the SOCD switch (reads back ${on ? 'on' : 'off'})`);
+    }
+    if (pairsKey(pairs) === pairsKey(cur.pairs)) return;
+    for (const p of setSocdPairsPkts(pairs)) {
+      await this.link.send(p);
+      await sleep(wraithTiming.page);
+    }
+    await sleep(wraithTiming.settle);
+    const got = await this.readSocdPairs();
+    this.socd = { on: this.socd?.on ?? cur.on, pairs: got, foreign: socdValue(cur.on, got).foreign };
+    if (pairsKey(got) !== pairsKey(pairs)) throw new Error(`keyboard didn't take the SOCD change (reads back ${got.length} pair${got.length === 1 ? '' : 's'})`);
+  }
 
   /** Send `changes` (layout position, new trigger) grouped by value, then read the keys back. */
   private async writeKeyTrigs(changes: [number, KeyTrig][]): Promise<void> {
@@ -786,7 +979,8 @@ class Wraith implements Driver {
     out.push({ key: 'polling', label: 'Polling rate', group: 'Performance', value: { kind: 'choice', options, current: code } });
 
     // --- switches (skip if the board uses the high-precision travel table)
-    const precise = ((await this.readStatus())?.[5 + 13] ?? 0) !== 0;
+    const status = await this.readStatus();
+    const precise = (status?.[5 + 13] ?? 0) !== 0;
     this.trig = undefined;
     this.keyTrigs = undefined;
     if (!precise) {
@@ -816,6 +1010,26 @@ class Wraith implements Driver {
         const keys = await this.readKeyTrigs(t);
         out.push({ key: 'per_key_trigger', label: 'Per-key actuation', group: 'Per-key', value: perKeyTriggerValue(t, keys) });
         this.keyTrigs = keys;
+      }
+    }
+
+    // --- SOCD (status F[9] == 1 means the board has it, like the official isPrcs)
+    this.socd = undefined;
+    if (status?.[5 + 9] === 1) {
+      try {
+        const on = await this.readSocdPower();
+        const pairs = await this.readSocdPairs();
+        const { value, foreign } = socdValue(on, pairs);
+        this.socd = { on, pairs, foreign };
+        out.push({
+          key: 'socd',
+          label: 'SOCD (Snap Tap)',
+          group: 'Switches',
+          value,
+          hint: 'When both keys of a pair are held, only one counts - great for strafing (A/D).',
+        });
+      } catch {
+        // no answer: leave SOCD out
       }
     }
 
@@ -922,6 +1136,8 @@ class Wraith implements Driver {
       }
       case 'per_key_color:perKeyColor':
         return this.writeColors((v as Extract<Value, { kind: 'perKeyColor' }>).colors);
+      case 'socd:socd':
+        return this.writeSocd(v as Socd);
       default:
         throw new Error(`${s.key} can't be changed`);
     }

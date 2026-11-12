@@ -41,6 +41,8 @@ import {
   unitsFor,
   type KeyTrig,
 } from './dareu';
+import { SOCD_PIDS, getSocdPkt, planSocd, removeSocdPkt, setSocdPkt } from './dareu';
+import type { Socd } from './types';
 
 const hex = (s: string) => s.split(/\s+/).filter(Boolean).map((b) => parseInt(b, 16));
 const head = (f: Uint8Array, n = 12) => Array.from(f.slice(0, n));
@@ -160,7 +162,7 @@ describe('packets', () => {
       frame(13, 7, 2, 0, [0, 200]), // global travel set
       frame(13, 9 | GET, 1, 0), // travel test
       frame(13, 6, 10, 0, [1, 41]), // DKS
-      frame(13, 11, 3, 0, [1, 41, 0]), // SOCD
+      frame(13, 11, 3, 0, [1, 41, 4]), // SOCD group 5 (doesn't exist)
       frame(1, 3, 6, 1, [41, 0, 4]), // key assign
       frame(3, 4, 4, 1, [0]), // lighting frame
       frame(3, 8, 4, 1, [0]), // custom lighting
@@ -449,5 +451,144 @@ describe('fake A68', () => {
     expect(ss.find((s) => s.key === 'per_key_trigger')).toBeUndefined();
     expect(find(ss, 'unsupported')).toBeDefined();
     expect(f.wrote(CLS.MAGNETIC, MAG.GLOBAL_TRAVEL | GET)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// SOCD (class 13 cmd 11, 4 groups)
+
+describe('SOCD', () => {
+  const D = 63;
+  const S = 62;
+
+  it('frames match the vendor (incl. the RemoveBindingEx size quirk)', () => {
+    expect(head(getSocdPkt(A), 9)).toEqual(hex('00 03 0D 8B 00 00 01 3D 00'));
+    expect(head(setSocdPkt(A, 2), 9)).toEqual(hex('00 03 0D 0B 00 00 01 3D 02'));
+    expect(head(removeSocdPkt([A, D]), 12)).toEqual(hex('00 03 0D 0B 00 00 02 3D FF 3F FF 00'));
+    expect(head(removeSocdPkt([A]), 10)).toEqual(hex('00 02 0D 0B 00 00 01 3D FF 00'));
+    expect(() => setSocdPkt(A, 4)).toThrow();
+    expect(() => removeSocdPkt([])).toThrow();
+    expect(() => removeSocdPkt(Array.from({ length: 11 }, (_, i) => i + 1))).toThrow();
+    const ten = removeSocdPkt(Array.from({ length: 10 }, (_, i) => i + 1));
+    expect(ten[1]).toBe(11);
+    for (const f of [getSocdPkt(A), setSocdPkt(A, 0), setSocdPkt(A, 3), removeSocdPkt([A]), removeSocdPkt([A, D]), ten]) expect(allowed(f), head(f).join(' ')).toBe(true);
+  });
+
+  it('allowlist refuses anything else on cmd 11', () => {
+    const no = [
+      frame(13, 11, 3, 0, [1, A, 4]), // group 5
+      frame(13, 11, 3, 0, [1, 0, 1]), // key 0
+      frame(13, 11, 3, 1, [1, A, 1]), // profile byte
+      frame(13, 11, 4, 0, [1, A, 1, 1]), // junk
+      frame(13, 11 | GET, 3, 0, [1, A, 1]), // get with data
+      frame(13, 11 | GET, 4, 0, [2, A, 0, D]), // bulk get not used
+      frame(13, 11, 5, 0, [2, A, 0xff, D, 0xff]), // "honest" size: not what the vendor sends
+      frame(13, 11, 3, 0, [2, A, 0xfe, D, 0xff]), // wrong marker
+      frame(13, 11, 3, 0, [2, A, 0xff, D, 0xff, 7]), // trailing junk
+      frame(13, 11, 12, 0, [11, ...Array.from({ length: 11 }, (_, i) => [i + 1, 0xff]).flat()]), // > 10 keys
+      frame(13, 17 | GET, 2, 1, [1, A]), // FUNC_AND_SOCD bulk read: not used
+      frame(13, 1, 2, 0, [1, A]), // old-firmware removal = normal trigger reset
+    ];
+    for (const f of no) expect(allowed(f), head(f).join(' ')).toBe(false);
+  });
+
+  it('plan: one group per key', () => {
+    const v = (entries: number[][]): Socd => ({ kind: 'socd', mode: 'groups', keys: CAPS, max: 4, modes: [['Last input', 0]], entries: entries.map((keys) => ({ keys, mode: 0 })) });
+    const want = planSocd(v([[pos(A), pos(D)], [], [pos(W)], []]), CAPS);
+    expect(want[pos(A)]).toBe(0);
+    expect(want[pos(W)]).toBe(2);
+    expect(want.filter((g) => g >= 0)).toHaveLength(3);
+    expect(() => planSocd(v([[pos(A)], [pos(A)], [], []]), CAPS)).toThrow(/A is in two/);
+    expect(() => planSocd(v([[pos(A)], [], []]), CAPS)).toThrow(/Re-read/);
+    expect(() => planSocd(v([[999], [], [], []]), CAPS)).toThrow(/Re-read/);
+  });
+
+  it('reads groups per key with GETs only', async () => {
+    const [f, d] = await connect({}, (f) => {
+      setupKeys(f);
+      f.socd.set(A, 0);
+      f.socd.set(D, 0);
+      f.socd.set(W, 1);
+    });
+    const ss = await d.read();
+    const v = find(ss, 'socd').value as Socd;
+    expect(find(ss, 'socd').group).toBe('Switches');
+    expect(v).toMatchObject({ kind: 'socd', mode: 'groups', max: 4, removable: true, modes: [['Last input', 0]] });
+    expect(v.entries.map((e) => e.keys)).toEqual([[pos(A), pos(D)].sort((a, b) => a - b), [pos(W)], [], []]);
+    expect(v.unavailable).toEqual([pos(FN)]); // DKS key
+    expect(f.wrote(CLS.MAGNETIC, MAG.SOCD | GET)).toHaveLength(68);
+    expect(f.wrote(CLS.MAGNETIC, MAG.SOCD)).toHaveLength(0);
+  });
+
+  it('only on products whose JSON says SupportSOCD', async () => {
+    expect(SOCD_PIDS.has(0x0175)).toBe(true);
+    expect(SOCD_PIDS.has(0x0107)).toBe(false);
+    for (const pid of SOCD_PIDS) expect(productFor(pid)?.fw, pid.toString(16)).toBe(6);
+    // the fake only speaks TravelVersion 2 (A68): pretend the A68 JSON lacked the flag
+    SOCD_PIDS.delete(0x0175);
+    try {
+      const [g, e] = await connect();
+      expect((await e.read()).some((s) => s.key === 'socd')).toBe(false);
+      expect(g.wrote(CLS.MAGNETIC, MAG.SOCD | GET)).toHaveLength(0);
+    } finally {
+      SOCD_PIDS.add(0x0175);
+    }
+  });
+
+  it('adds, moves and removes keys, then reads them back', async () => {
+    const [f, d] = await connect({}, (f) => {
+      setupKeys(f);
+      f.socd.set(S, 3);
+    });
+    const s = find(await d.read(), 'socd');
+    const v = s.value as Socd;
+    f.sent = [];
+    await d.write(withValue(s, { ...v, entries: [{ keys: [pos(A), pos(D)], mode: 0 }, { keys: [pos(S)], mode: 0 }, { keys: [], mode: 0 }, { keys: [], mode: 0 }] }));
+    expect([...f.socd.entries()].sort((a, b) => a[0] - b[0])).toEqual([[S, 1], [D, 0], [A, 0]].sort((a, b) => a[0] - b[0]));
+    expect(f.wrote(CLS.MAGNETIC, MAG.SOCD)).toHaveLength(3);
+    // trigger functions are untouched on 0.3.0+ firmware
+    expect(f.key(A).func).toBe(1);
+    // remove A and S in one RemoveBindingEx frame
+    f.sent = [];
+    await d.write(withValue(s, { ...v, entries: [{ keys: [pos(D)], mode: 0 }, { keys: [], mode: 0 }, { keys: [], mode: 0 }, { keys: [], mode: 0 }] }));
+    const rm = f.wrote(CLS.MAGNETIC, MAG.SOCD);
+    expect(rm).toHaveLength(1);
+    expect(rm[0][1]).toBe(3); // n + 1, vendor quirk
+    expect([...f.socd.keys()]).toEqual([D]);
+    expect(f.wrote(CLS.MAGNETIC, MAG.SOCD | GET)).toHaveLength(2); // read back
+    // unchanged: nothing sent
+    f.sent = [];
+    await d.write(withValue(s, { ...v, entries: [{ keys: [pos(D)], mode: 0 }, { keys: [], mode: 0 }, { keys: [], mode: 0 }, { keys: [], mode: 0 }] }));
+    expect(f.sent).toHaveLength(0);
+  });
+
+  it('refuses keys with another special function and reports ignored writes', async () => {
+    const [f, d] = await connect({}, setupKeys);
+    const s = find(await d.read(), 'socd');
+    const v = s.value as Socd;
+    f.sent = [];
+    await expect(d.write(withValue(s, { ...v, entries: [{ keys: [pos(FN)], mode: 0 }, ...v.entries.slice(1)] }))).rejects.toThrow(/special function/);
+    expect(f.sent).toHaveLength(0);
+    const [, e] = await connect({ ignoreWrites: true }, setupKeys);
+    const t = find(await e.read(), 'socd');
+    await expect(e.write(withValue(t, { ...v, entries: [{ keys: [pos(A)], mode: 0 }, ...v.entries.slice(1)] }))).rejects.toThrow(/didn't take the SOCD change for: A/);
+  });
+
+  it('firmware below 0.3.0: can add, never removes (no trigger wipe)', async () => {
+    const [f, d] = await connect({}, (f) => {
+      setupKeys(f);
+      f.fw = [0, 2, 9];
+      f.socd.set(D, 0);
+    });
+    const s = find(await d.read(), 'socd');
+    const v = s.value as Socd;
+    expect(v.removable).toBe(false);
+    expect(s.hint).toMatch(/DAREU app/);
+    f.sent = [];
+    await expect(d.write(withValue(s, { ...v, entries: [{ keys: [], mode: 0 }, ...v.entries.slice(1)] }))).rejects.toThrow(/can't take keys out/);
+    expect(f.sent).toHaveLength(0);
+    await d.write(withValue(s, { ...v, entries: [{ keys: [pos(D), pos(A)], mode: 0 }, ...v.entries.slice(1)] }));
+    expect(f.socd.get(A)).toBe(0);
+    expect(f.sent.some((p) => p[2] === CLS.MAGNETIC && p[3] === 1)).toBe(false); // never the normal-trigger reset
   });
 });

@@ -38,6 +38,11 @@ describe('logitech helpers', () => {
   it('maps names to Logitech-hosted images', () => {
     expect(imageFor('PRO X SUPERLIGHT 2')).toMatch(/^https:\/\/resource\.logitechg\.com\/.*superlight-2-mice-top/)
     expect(imageFor('G502 X PLUS')).toMatch(/g502-x-plus-top/)
+    expect(imageFor('G502 HERO')).toMatch(/g502-hero-mouse-top/)
+    expect(imageFor('G703 LIGHTSPEED Wireless Gaming Mouse w/ HERO')).toMatch(/g703-hero\//)
+    expect(imageFor('PRO X SUPERLIGHT')).toMatch(/pro-x-superlight-black-gallery-6/)
+    expect(imageFor('G Pro Wireless Gaming Mouse')).toMatch(/pro-wireless-carbon/)
+    expect(imageFor('G102 LIGHTSYNC Gaming Mouse')).toMatch(/g203-mouse-top/)
     expect(imageFor('Some Other Mouse')).toBeUndefined()
   })
 

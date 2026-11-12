@@ -45,6 +45,10 @@ export interface FakeViaOpts {
   layers?: number;
   vendorId?: number;
   productId?: number;
+  /** dynamic macro slots (default 4; 0 = firmware without macros) */
+  macroCount?: number;
+  /** macro buffer bytes (default 128) */
+  macroSize?: number;
 }
 
 export class FakeVia {
@@ -66,6 +70,11 @@ export class FakeVia {
   keymap: Uint8Array;
   /** set-keycode commands received: [layer, row, col, keycode] */
   keyWrites: [number, number, number, number][] = [];
+  readonly macroCount: number;
+  /** dynamic macro buffer (NUL-separated QMK send_string macros) */
+  macros: Uint8Array;
+  /** macro set-buffer commands received: [offset, bytes] */
+  macroWrites: [number, number[]][] = [];
   private listeners = new Set<(e: HIDInputReportEvent) => void>();
 
   constructor(private o: FakeViaOpts = {}) {
@@ -74,6 +83,10 @@ export class FakeVia {
     for (const ch of o.channels ?? [3]) this.values.set(ch, [200, 4, 128, 0, 255]);
     this.layers = o.layers ?? 4;
     this.keymap = new Uint8Array(this.layers * this.rows * this.cols * 2);
+    this.macroCount = o.macroCount ?? 4;
+    this.macros = new Uint8Array(o.macroSize ?? 128);
+    // M0 = "hi" + tap Enter (protocol 11+ format)
+    this.macros.set([0x68, 0x69, 0x01, 0x01, 0x28, 0x00]);
     // layer 0: Esc Q W E / Tab A S Enter / Space MO(1)
     const kc: [number, number][] = [[0, 0x29], [1, 0x14], [2, 0x1a], [3, 0x08], [4, 0x2b], [5, 0x04], [6, 0x16], [7, 0x28], [8, 0x2c], [9, 0x5221]];
     for (const [i, k] of kc) this.setKey(0, Math.floor(i / 4), i % 4, k);
@@ -123,7 +136,7 @@ export class FakeVia {
     check(id === 0, 'report id');
     const p = Array.from(data as Uint8Array);
     check(p.length === REPORT_LEN, 'length');
-    check(allowed(p, { layers: this.layers, rows: this.rows, cols: this.cols }), `packet ${p.slice(0, 6).join(',')}`);
+    check(allowed(p, { layers: this.layers, rows: this.rows, cols: this.cols }, { size: this.macros.length }), `packet ${p.slice(0, 6).join(',')}`);
     this.sent.push(p);
     const r = p.slice();
     const w = !this.o.ignoreWrites;
@@ -140,6 +153,28 @@ export class FakeVia {
       case CMD.layerCount:
         r[1] = this.layers;
         break;
+      case CMD.macroCount:
+        if (!this.macroCount) r[0] = CMD.unhandled;
+        else r[1] = this.macroCount;
+        break;
+      case CMD.macroSize:
+        if (!this.macroCount) r[0] = CMD.unhandled;
+        else [r[1], r[2]] = [this.macros.length >> 8, this.macros.length & 0xff];
+        break;
+      case CMD.macroGet: {
+        const off = (p[1] << 8) | p[2];
+        check(off + p[3] <= this.macros.length, 'macro read past the buffer');
+        for (let i = 0; i < p[3]; i++) r[4 + i] = this.macros[off + i];
+        break;
+      }
+      case CMD.macroSet: {
+        const off = (p[1] << 8) | p[2];
+        check(off + p[3] <= this.macros.length, 'macro write past the buffer');
+        const data = p.slice(4, 4 + p[3]);
+        this.macroWrites.push([off, data]);
+        if (w) this.macros.set(data, off);
+        break;
+      }
       case CMD.setKeycode:
         this.keyWrites.push([p[1], p[2], p[3], (p[4] << 8) | p[5]]);
         if (w) this.setKey(p[1], p[2], p[3], (p[4] << 8) | p[5]);

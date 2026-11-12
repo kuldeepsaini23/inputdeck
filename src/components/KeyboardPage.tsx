@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Gauge, Keyboard as KeyboardIcon, Lightbulb, SlidersHorizontal, ToggleRight } from 'lucide-react'
+import { Gauge, Keyboard as KeyboardIcon, Lightbulb, SlidersHorizontal, ToggleRight, Zap } from 'lucide-react'
 import type { DeviceState } from '#/devices'
 import type { KeyCap, Setting, Value } from '#/drivers/types'
 import { cn } from '#/lib/utils'
-import { describe as describeKc, label as kcLabel } from '#/lib/keycodes'
+import { decodeMacroKey, describe as describeKc, label as kcLabel } from '#/lib/keycodes'
+import { usedBytes, type Macros } from '#/lib/macros'
 import { KeyboardView, type KeyLook } from './KeyboardView'
 import { KeyCard, KeyPicker, effective, type Keymap } from './KeymapCards'
+import { MacroEditor, MacroList, UsageBar } from './MacroCards'
+import { SocdCard, socdColor, socdEntryLabel, socdEntryOf, socdPickKey, type SocdPick } from './SocdCards'
 import { BigValue, Card, ChoiceSelect, Range, Segmented, SWATCHES, Toggle, hex, type Choice } from './kit'
 import { GenericCard, Hero, Pulse, shortHz, type Edit } from './parts'
 import { Dock, textOf } from './shell'
@@ -15,11 +18,12 @@ type PerKeyColor = Extract<Value, { kind: 'perKeyColor' }>
 type Float = Extract<Value, { kind: 'float' }>
 type Num = Extract<Value, { kind: 'number' }>
 
-const ORDER = ['Switches', 'Lighting', 'Keys', 'Performance']
+const ORDER = ['Switches', 'Lighting', 'Keys', 'Macros', 'Performance']
 const ICON: Record<string, React.ReactNode> = {
   Switches: <ToggleRight className="size-4" />,
   Lighting: <Lightbulb className="size-4" />,
   Keys: <KeyboardIcon className="size-4" />,
+  Macros: <Zap className="size-4" />,
   Performance: <Gauge className="size-4" />,
 }
 // per-key settings live on the Switches / Lighting tabs
@@ -110,6 +114,64 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
   const origLayers = original?.id === dev.id ? original.layers : undefined
   const onKeys = active === 'Keys' && !!km
 
+  // ---- macros (drivers with a macros setting)
+  const macS = get('macros')
+  const mac = macS?.value.kind === 'macros' ? macS.value : undefined
+  const [slotPick, setSlot] = useState(0)
+  const slot = mac ? Math.min(slotPick, Math.max(0, mac.slots - 1)) : 0
+  const onMacros = active === 'Macros' && !!mac
+
+  // ---- SOCD (drivers with an socd setting): the card takes over the board while it is in use
+  const socdS = get('socd')
+  const socd = socdS?.value.kind === 'socd' ? socdS.value : undefined
+  const [socdPick, setSocdPick] = useState<SocdPick | undefined>(undefined)
+  const [socdSelPick, setSocdSel] = useState<number | undefined>(undefined)
+  const [socdMsg, setSocdMsg] = useState<string | undefined>(undefined)
+  const socdSel = socd?.mode === 'pairs' && socdSelPick !== undefined && socdSelPick < socd.entries.length ? socdSelPick : undefined
+  const socdPicking = socd && socdPick && (socdPick.entry < socd.entries.length) ? socdPick : undefined
+  const onSocd = active === 'Switches' && !!socd && !testing && (socdPicking !== undefined || socdSel !== undefined)
+  useEffect(() => {
+    setSocdPick(undefined)
+    setSocdSel(undefined)
+    setSocdMsg(undefined)
+  }, [active, dev.id])
+  const socdBoardSel = onSocd ? new Set(socdPicking ? (socd!.mode === 'pairs' ? socdPicking.keys : socd!.entries[socdPicking.entry].keys) : socd!.entries[socdSel!].keys) : new Set<number>()
+  /** board clicks while the SOCD card is active */
+  const socdClick = (next: Set<number>) => {
+    if (!socd) return
+    const added = [...next].filter((i) => !socdBoardSel.has(i))
+    const removed = [...socdBoardSel].filter((i) => !next.has(i))
+    // a click next to the keys clears the whole selection: not a request to drop every key
+    if (!added.length && removed.length > 1) return
+    const changed = added.concat(removed)
+    if (!socdPicking) {
+      // not picking: clicking a key in a pair selects that pair
+      const p = changed[0]
+      const e = p === undefined ? -1 : socdEntryOf(socd, p)
+      setSocdSel(e >= 0 ? e : undefined)
+      return
+    }
+    let v = socd
+    let pick: SocdPick | undefined = socdPicking
+    let msg: string | undefined
+    let edited = false
+    for (const p of changed) {
+      if (!pick) break
+      const r = socdPickKey(v, pick, p)
+      msg = r.msg
+      if (r.value) {
+        v = r.value
+        edited = true
+      }
+      pick = r.pick
+    }
+    if (edited) onEdit('socd', v)
+    setSocdMsg(msg)
+    setSocdPick(pick)
+    // a finished pair stays selected for its mode / travel
+    if (!pick && socd.mode === 'pairs') setSocdSel(socdPicking.entry < 0 ? v.entries.length - 1 : socdPicking.entry)
+  }
+
   // ---- keyboard looks for the current tab
   let looks: KeyLook[] = []
   let interactive = false
@@ -121,6 +183,22 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
       const code = km!.layers[layer][i]
       const was = origLayers?.[layer]?.[i]
       return { dot: was !== undefined && was !== code, dim: code === 1 && layer > 0, title: `${kcLabel(code, km!.codes) || 'None'}: ${describeKc(code, km!.codes)}` }
+    })
+  } else if (onMacros && km && keys) {
+    // keys that play the selected macro (on any layer) get a dot
+    looks = km.keys.map((_, i) => {
+      const ls = km.layers.map((l, li) => [li, l[i]] as const).filter(([, c]) => decodeMacroKey(c, km.codes) === slot)
+      return ls.length ? { dot: true, title: `Plays M${slot} on layer ${ls.map(([li]) => li).join(', ')}` } : {}
+    })
+  } else if (onSocd) {
+    // SOCD keys in their pair / group colour; keys that can't be used are faded
+    interactive = true
+    boardKeys = socd!.keys
+    looks = socd!.keys.map((k, p) => {
+      const e = socdEntryOf(socd!, p)
+      if (e >= 0) return { color: socdColor(e), title: `${k.label}: SOCD ${socdEntryLabel(socd!, e)}` }
+      if (socd!.unavailable?.includes(p)) return { dim: true, title: `${k.label}: can't be used for SOCD` }
+      return {}
     })
   } else if (keys && active === 'Switches' && pkT && testing) {
     looks = keys.map((_, i) => {
@@ -151,6 +229,8 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     ;[hero, cards] = lighting()
   } else if (onKeys) {
     ;[hero, cards] = keymap()
+  } else if (onMacros) {
+    ;[hero, cards] = macros()
   } else if (active === 'Performance') {
     const poll = get('polling')
     const label = choiceLabel(poll)
@@ -227,6 +307,12 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
       } else if (sens) onEdit('rt_sens', { ...sens, current: snap(n, sens.step) })
     }
     const scope = perKey ? `${selIdx.length} key${selIdx.length === 1 ? '' : 's'}` : 'all keys'
+    const socdCard = socd && (
+      <SocdCard key="socd" className="col-span-3" v={socd} sel={socdSel} pick={socdPicking}
+        onSelect={(i) => { setSocdMsg(undefined); setSocdSel(i) }}
+        onPick={(p) => { setSocdMsg(undefined); setSocdPick(p) }}
+        onChange={(v) => onEdit('socd', v)} />
+    )
 
     const lk = live.last
     const liveMm = lk !== undefined ? live.depth.get(lk) ?? 0 : 0
@@ -253,7 +339,7 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
       <Hero brand={brand} label={`Actuation · ${scope}`} value={travel === undefined ? '—' : uniform ? travel.toFixed(2) : 'Mixed'} unit={uniform ? 'mm' : undefined} size={76}
         sub={range ? `Magnetic switches · ${range.min.toFixed(2)} – ${range.max.toFixed(2)} mm` : undefined} />
     )
-    if (!range || travel === undefined) return [h, <GenericCard key="g" title="Switches" settings={inGroup('Switches')} onEdit={onEdit} className="col-span-3" />]
+    if (!range || travel === undefined) return [h, <><GenericCard title="Switches" settings={inGroup('Switches')} onEdit={onEdit} className="col-span-3" />{socdCard}</>]
     const presets = PRESETS.filter(([, mm]) => mm >= range.min && mm <= range.max)
     const c = (
       <>
@@ -283,6 +369,7 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
             </>
           )}
         </Card>
+        {socdCard}
       </>
     )
     return [h, c]
@@ -310,8 +397,34 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     )
     const c = (
       <>
-        <KeyPicker km={m} layer={layer} keyIndex={keySel} onPick={assign} className="col-span-2" />
+        <KeyPicker km={m} layer={layer} keyIndex={keySel} onPick={assign} macros={mac?.slots} className="col-span-2" />
         <KeyCard km={m} layer={layer} keyIndex={keySel} original={origLayers} onPick={assign} />
+      </>
+    )
+    return [h, c]
+  }
+
+  function macros(): [React.ReactNode, React.ReactNode] {
+    const v = mac as Macros
+    const steps = v.macros[slot] ?? []
+    const used = usedBytes(v)
+    const bound = km ? km.keys.filter((_, i) => km.layers.some((l) => decodeMacroKey(l[i], km.codes) === slot)).length : 0
+    const h = (
+      <Hero brand={brand} label={`Macro · M${slot}`} value={steps.length} unit={steps.length === 1 ? 'step' : 'steps'} size={64}
+        sub={<>
+          {km ? (bound ? `On ${bound} key${bound === 1 ? '' : 's'} (dotted above).` : 'Not on a key yet. Put a macro on a key in the Keys tab.') : 'Put a macro on a key in the Keys tab.'}
+          {used !== undefined && v.maxBytes ? ` ${used} of ${v.maxBytes} bytes used.` : ''}
+        </>}>
+        {macS?.hint && <p className="hint mt-3 mb-0">{macS.hint}</p>}
+      </Hero>
+    )
+    const c = (
+      <>
+        <div className="flex flex-col gap-3.5">
+          <MacroList v={v} slot={slot} onSelect={setSlot} />
+          {v.maxBytes !== undefined && <section className="glass fade-in p-[21px] pt-[19px]"><UsageBar v={v} /></section>}
+        </div>
+        <MacroEditor v={v} slot={slot} onChange={(nv) => onEdit('macros', nv)} className="col-span-2" />
       </>
     )
     return [h, c]
@@ -334,9 +447,8 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
         onEdit('per_key_color', { ...pkC!, colors })
       } else if (color) onEdit('light_color', { ...color, rgb: c })
     }
-    const steps = (v: Num) => Array.from({ length: v.max - v.min + 1 }, (_, k) => [String(v.min + k), v.min + k] as const)
     const effect = choiceLabel(mode) ?? '—'
-    const h = <Hero brand={brand} label="Effect" value={effect} size={effect.length > 9 ? Math.max(26, Math.round(440 / effect.length)) : 64} sub={power && !power.on ? 'Lights are off' : 'Lights on'} />
+    const h = <Hero brand={brand} label="Effect" value={effect} size={effect.length > 6 ? Math.max(24, Math.round(380 / effect.length)) : 64} sub={power && !power.on ? 'Lights are off' : 'Lights on'} />
     const c = (
       <>
         <Card title="Effect">
@@ -371,9 +483,9 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
           {pkC && !perKey && <p className="hint mt-3 mb-0">Select keys to paint them one by one.</p>}
         </Card>
         <Card title="Lights" right={power && <Toggle label="Lights on" checked={power.on} onChange={(on) => onEdit('light_power', { kind: 'toggle', on })} />}>
-          <div className="display text-[26px] font-semibold">{power ? (power.on ? 'On' : 'Off') : '—'}</div>
-          {bri && (<><div className="eyebrow mt-3 mb-2">Brightness</div><Segmented label="Brightness" options={steps(bri)} value={bri.current} onChange={(n) => onEdit('light_bri', { ...bri, current: n })} /></>)}
-          {speed && (<><div className="eyebrow mt-3 mb-2">Speed</div><Segmented label="Speed" options={steps(speed)} value={speed.current} onChange={(n) => onEdit('light_speed', { ...speed, current: n })} /></>)}
+          <div className="display text-[26px] font-semibold">{power && !power.on ? 'Off' : bri ? `${pctOf(bri)}%` : power ? 'On' : '—'}</div>
+          {bri && <Level label="Brightness" v={bri} onChange={(n) => onEdit('light_bri', { ...bri, current: n })} />}
+          {speed && <Level label="Speed" v={speed} onChange={(n) => onEdit('light_speed', { ...speed, current: n })} />}
         </Card>
       </>
     )
@@ -389,8 +501,8 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
         <div className="relative w-full" style={{ maxWidth: kbMax }}>
           <div className="pointer-events-none absolute -inset-x-20 -top-10 h-[120%] rounded-full bg-[radial-gradient(ellipse_at_center,rgb(230_232_236/0.08),transparent_65%)]" />
           {boardKeys ? (
-            <KeyboardView keys={boardKeys} looks={looks} selected={onKeys ? new Set(keySel === undefined ? [] : [keySel]) : interactive ? sel : new Set()}
-              onSelect={onKeys ? pickKey : setSel} interactive={interactive} knob={dev.driver.knob} maxWidth={kbMax} />
+            <KeyboardView keys={boardKeys} looks={looks} selected={onKeys ? new Set(keySel === undefined ? [] : [keySel]) : onSocd ? socdBoardSel : interactive ? sel : new Set()}
+              onSelect={onKeys ? pickKey : onSocd ? socdClick : setSel} interactive={interactive} knob={dev.driver.knob} maxWidth={kbMax} />
           ) : (
             <div className="grid h-64 place-items-center"><KeyboardIcon className="size-40 text-white/10" strokeWidth={0.6} /></div>
           )}
@@ -412,6 +524,21 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
                   )}
                 </span>
               )}
+            </div>
+          ) : onSocd ? (
+            <div className="mt-3 flex h-9 items-center justify-between gap-4">
+              <span className={cn('text-[12px] text-[var(--text-3)]', socdMsg && 'text-[var(--warn)]')}>
+                {socdMsg ?? (socdPicking
+                  ? socd!.mode === 'pairs'
+                    ? socdPicking.keys.length
+                      ? <><span className="display mr-1.5 text-[13px] font-semibold text-[var(--text)]">{socd!.keys[socdPicking.keys[0]]?.label}</span>picked · click key 2 of the pair</>
+                      : 'SOCD · click key 1 of the pair'
+                    : `SOCD · click keys to add them to group ${socdPicking.entry + 1}${socd!.removable === false ? '' : ', click again to take them out'}`
+                  : <><span className="display mr-1.5 text-[13px] font-semibold text-[var(--text)]">{socdEntryLabel(socd!, socdSel!)}</span>coloured keys are in SOCD</>)}
+              </span>
+              <button type="button" className="chip display !text-[11px] font-semibold" onClick={() => { setSocdPick(undefined); setSocdSel(undefined); setSocdMsg(undefined) }}>
+                {socdPicking && socd!.mode === 'pairs' ? 'Cancel' : 'Done'}
+              </button>
             </div>
           ) : (
           <div className={cn('mt-3 flex h-9 items-center justify-between', !showBar && 'invisible')}>
@@ -467,5 +594,25 @@ function TravelDiagram({ max, act, sens, live }: { max: number; act: number; sen
         <linearGradient id="cap" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#38383d" /><stop offset="1" stopColor="#1e1e21" /></linearGradient>
       </defs>
     </svg>
+  )
+}
+
+const pctOf = (v: Num) => (v.max > v.min ? Math.round(((v.current - v.min) / (v.max - v.min)) * 100) : 0)
+
+/** A few steps as buttons; long ranges (e.g. brightness 0-125) as a slider. */
+function Level({ label, v, onChange }: { label: string; v: Num; onChange: (n: number) => void }) {
+  const n = v.max - v.min + 1
+  return (
+    <>
+      <div className="mt-3 mb-2 flex items-baseline justify-between">
+        <span className="eyebrow">{label}</span>
+        {n > 11 && <span className="display text-[11px] text-[var(--text-2)]">{pctOf(v)}%</span>}
+      </div>
+      {n <= 11 ? (
+        <Segmented label={label} options={Array.from({ length: n }, (_, k) => [String(v.min + k), v.min + k] as const)} value={v.current} onChange={onChange} />
+      ) : (
+        <Range label={label} min={v.min} max={v.max} value={v.current} onChange={onChange} />
+      )}
+    </>
   )
 }

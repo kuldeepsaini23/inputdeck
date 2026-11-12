@@ -28,6 +28,8 @@ import {
   versionNumber,
   writeFrames,
 } from './lofree';
+import { KEY_NORMAL, KEY_SOCD, mirrorMode, parseSocdPairs, socdEntries } from './lofree';
+import type { Socd } from './types';
 
 const hex = (s: string) => s.split(/\s+/).filter(Boolean).map((b) => parseInt(b, 16));
 const pad = (b: number[], n = 63) => [...b, ...new Array(n - b.length).fill(0)];
@@ -303,5 +305,159 @@ describe('fake Hyzen', () => {
     const wPos = hyzenCaps().findIndex((k) => k.label === 'W');
     expect(got.every(([p]) => p === wPos)).toBe(true);
     expect(Math.max(...got.map(([, mm]) => mm))).toBeGreaterThan(1);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// SOCD (key type table 67/66 + SOCD table 56/46)
+
+describe('SOCD', () => {
+  const idx = (label: string) => fakeIndex(hyzenCaps().findIndex((k) => k.label === label));
+  const KA = idx('A');
+  const KD = idx('D');
+  const KW = idx('W');
+  const KS = idx('S');
+  const posOf = (v: Socd, label: string) => v.keys.findIndex((k) => k.label === label);
+  const entryAt = (f: FakeLofree, k: number, profile = 0) => f.socd.slice((profile * KEY_SLOTS + k) * 4, (profile * KEY_SLOTS + k) * 4 + 4);
+  const typeAt = (f: FakeLofree, k: number, profile = 0) => f.types[profile * KEY_SLOTS + k];
+  const setPair = (f: FakeLofree, k1: number, k2: number, mode: number, rt: boolean, raw: number, profile = 0) => {
+    for (const [k, e] of socdEntries({ k1, k2, mode, rt, raw1: raw, raw2: raw })) {
+      f.socd.splice((profile * KEY_SLOTS + k) * 4, 4, ...e);
+      f.types[profile * KEY_SLOTS + k] = KEY_SOCD;
+    }
+  };
+
+  it('entries match the official saveSOCDKeyCommand', () => {
+    // key 1 = slot 0 with the pair mode, key 2 = slot 1 with the mirrored mode
+    expect(socdEntries({ k1: 4, k2: 7, mode: 1, rt: true, raw1: 0x123, raw2: 0x124 })).toEqual([
+      [4, [7, 0x11, 0x23, 0x01]],
+      [7, [4, 0x29, 0x24, 0x01]],
+    ]);
+    expect(socdEntries({ k1: 4, k2: 7, mode: 3, rt: false, raw1: 1, raw2: 2 })[1][1][1]).toBe(0x38);
+    expect([0, 1, 2, 3].map(mirrorMode)).toEqual([0, 2, 1, 3]);
+    // parse back, from either key, and skip broken partners
+    const types = new Array(KEY_SLOTS).fill(KEY_NORMAL);
+    const table = new Array(KEY_SLOTS * 4).fill(0);
+    for (const [k, e] of socdEntries({ k1: 9, k2: 2, mode: 2, rt: true, raw1: 300, raw2: 310 })) {
+      table.splice(k * 4, 4, ...e);
+      types[k] = KEY_SOCD;
+    }
+    types[20] = KEY_SOCD; // orphan: partner 0 is not SOCD
+    expect(parseSocdPairs(types, table)).toEqual([{ k1: 9, k2: 2, mode: 2, rt: true, raw1: 300, raw2: 310 }]);
+  });
+
+  it('allowlist: exact SOCD frames only', () => {
+    const ok = [
+      ...readFrames(CMD.READ_KEY_TYPE, 128, 128 * 6),
+      ...readFrames(CMD.READ_SOCD, 512, 512 * 6),
+      ...writeFrames(CMD.WRITE_KEY_TYPE, [KEY_SOCD], 5),
+      ...writeFrames(CMD.WRITE_KEY_TYPE, [KEY_NORMAL], 128 * 6 + 127),
+      ...writeFrames(CMD.WRITE_SOCD, [7, 0x39, 0xff, 0x3f], 4 * 4),
+    ];
+    for (const p of ok) expect(allowed(p), p.slice(0, 11).join(',')).toBe(true);
+    const no = [
+      writeFrames(CMD.WRITE_KEY_TYPE, [0x24], 5)[0], // DKS
+      writeFrames(CMD.WRITE_KEY_TYPE, [0x27], 5)[0], // HT
+      writeFrames(CMD.WRITE_KEY_TYPE, [0x26, 0x26], 5)[0], // two keys at once
+      writeFrames(CMD.WRITE_KEY_TYPE, [0x26], 128 * 7)[0], // past the table
+      writeFrames(CMD.WRITE_SOCD, [7, 0x11, 1, 0], 4 * 4 + 1)[0], // unaligned
+      writeFrames(CMD.WRITE_SOCD, [7, 0x11, 1], 4 * 4)[0], // short
+      writeFrames(CMD.WRITE_SOCD, [7, 0x11, 1, 0, 0], 4 * 4)[0], // long
+      writeFrames(CMD.WRITE_SOCD, [7, 0x41, 1, 0], 4 * 4)[0], // priority 4
+      writeFrames(CMD.WRITE_SOCD, [7, 0x13, 1, 0], 4 * 4)[0], // unknown flag bit
+      writeFrames(CMD.WRITE_SOCD, [7, 0x11, 0, 0], 4 * 4)[0], // travel 0
+      writeFrames(CMD.WRITE_SOCD, [7, 0x11, 0, 0x40], 4 * 4)[0], // travel > 14 bits
+      writeFrames(CMD.WRITE_SOCD, [128, 0x11, 1, 0], 4 * 4)[0], // partner out of range
+      writeFrames(CMD.WRITE_SOCD, [4, 0x11, 1, 0], 4 * 4)[0], // partner = itself
+      writeFrames(CMD.WRITE_SOCD, [7, 0x11, 1, 0], 512 * 7)[0], // past the table
+      readFrames(CMD.READ_SOCD, 4, 512 * 7)[0],
+      pad(hex('00 00 66 01 05 00 00 26 01')), // trailing junk
+    ];
+    for (const p of no) expect(allowed(p), p.slice(0, 11).join(',')).toBe(false);
+  });
+
+  it('reads pairs of the active profile, marks keys with other advanced functions', async () => {
+    const f = new FakeLofree({ profile: 2 });
+    setPair(f, KA, KD, 3, true, mmToRaw(1.2, 1000, 3.4, true), 2);
+    f.types[2 * KEY_SLOTS + KW] = 0x24; // W is a DKS key
+    const d = (await lofreeFactory.create(f.asDevice()))!;
+    const ss = await d.read();
+    const s = find(ss, 'socd');
+    const v = s.value as Socd;
+    expect(s.group).toBe('Switches');
+    expect(v).toMatchObject({ kind: 'socd', mode: 'pairs', max: 33, rapid: true, travel: { min: 0.1, max: 3.4, step: 0.01 } });
+    expect(v.entries).toEqual([{ keys: [posOf(v, 'A'), posOf(v, 'D')], mode: 3, travel: 1.2, rapid: true }]);
+    expect(v.unavailable).toEqual([posOf(v, 'W')]);
+    // reads only, at the profile's offsets
+    expect(f.frames(CMD.READ_KEY_TYPE).map((p) => p[4] | (p[5] << 8))).toEqual([256, 256 + 56, 256 + 112]);
+    expect(f.frames(CMD.READ_SOCD)[0][4] | (f.frames(CMD.READ_SOCD)[0][5] << 8)).toBe(1024);
+    expect(f.frames(CMD.WRITE_SOCD).length + f.frames(CMD.WRITE_KEY_TYPE).length).toBe(0);
+  });
+
+  it('adds a pair: both entries, then type 26, then reads back', async () => {
+    const [f, d] = await connect();
+    const s = find(await d.read(), 'socd');
+    const v = s.value as Socd;
+    f.sent = [];
+    await d.write(withValue(s, { ...v, entries: [{ keys: [posOf(v, 'A'), posOf(v, 'D')], mode: 1, travel: 0.5, rapid: true }] }));
+    const raw = mmToRaw(0.5, 1000, 3.4, true);
+    expect(entryAt(f, KA)).toEqual([KD, 0x11, raw & 0xff, raw >> 8]);
+    expect(entryAt(f, KD)).toEqual([KA, 0x29, raw & 0xff, raw >> 8]);
+    expect(typeAt(f, KA)).toBe(KEY_SOCD);
+    expect(typeAt(f, KD)).toBe(KEY_SOCD);
+    const order = f.sent.filter((p) => p[2] === CMD.WRITE_SOCD || p[2] === CMD.WRITE_KEY_TYPE).map((p) => [p[2], p[7]]);
+    expect(order).toEqual([[CMD.WRITE_SOCD, KA], [CMD.WRITE_SOCD, KD], [CMD.WRITE_KEY_TYPE, KEY_SOCD], [CMD.WRITE_KEY_TYPE, KEY_SOCD]]);
+    expect(f.frames(CMD.READ_SOCD).length).toBeGreaterThan(0);
+    // re-read shows the same thing, writing it again sends nothing
+    const again = find(await d.read(), 'socd');
+    expect((again.value as Socd).entries).toEqual([{ keys: [posOf(v, 'A'), posOf(v, 'D')], mode: 1, travel: 0.5, rapid: true }]);
+    f.sent = [];
+    await d.write(again);
+    expect(f.sent).toEqual([]);
+  });
+
+  it('changing the mode rewrites only the entries; deleting puts both keys back to 20', async () => {
+    const [f, d] = await connect();
+    setPair(f, KA, KD, 0, false, 400);
+    const s = find(await d.read(), 'socd');
+    const v = s.value as Socd;
+    f.sent = [];
+    await d.write(withValue(s, { ...v, entries: [{ ...v.entries[0], mode: 2 }] }));
+    expect(entryAt(f, KA)).toEqual([KD, 0x20, 400 & 0xff, 400 >> 8]); // travel raw kept
+    expect(entryAt(f, KD)).toEqual([KA, 0x18, 400 & 0xff, 400 >> 8]);
+    expect(f.frames(CMD.WRITE_KEY_TYPE)).toEqual([]);
+    f.sent = [];
+    await d.write(withValue(s, { ...v, entries: [{ keys: [posOf(v, 'W'), posOf(v, 'S')], mode: 0, travel: 1, rapid: false }] }));
+    expect(typeAt(f, KA)).toBe(KEY_NORMAL);
+    expect(typeAt(f, KD)).toBe(KEY_NORMAL);
+    expect(typeAt(f, KW)).toBe(KEY_SOCD);
+    expect(typeAt(f, KS)).toBe(KEY_SOCD);
+    // old keys go back to normal before anything else is written
+    const first = f.sent.find((p) => p[2] === CMD.WRITE_SOCD || p[2] === CMD.WRITE_KEY_TYPE)!;
+    expect([first[2], first[7]]).toEqual([CMD.WRITE_KEY_TYPE, KEY_NORMAL]);
+    await d.write(withValue(s, { ...v, entries: [] }));
+    expect(typeAt(f, KW)).toBe(KEY_NORMAL);
+    expect(typeAt(f, KS)).toBe(KEY_NORMAL);
+  });
+
+  it('refuses DKS/RS/HT keys, duplicates and single keys before sending', async () => {
+    const [f, d] = await connect();
+    f.types[KW] = 0x25; // RS
+    const s = find(await d.read(), 'socd');
+    const v = s.value as Socd;
+    f.sent = [];
+    const w = (entries: Socd['entries']) => d.write(withValue(s, { ...v, entries }));
+    await expect(w([{ keys: [posOf(v, 'W'), posOf(v, 'S')], mode: 0, travel: 1, rapid: false }])).rejects.toThrow(/W has another advanced function/);
+    await expect(w([{ keys: [posOf(v, 'A')], mode: 0, travel: 1, rapid: false }])).rejects.toThrow(/two different keys/);
+    await expect(w([{ keys: [posOf(v, 'A'), posOf(v, 'D')], mode: 0 }, { keys: [posOf(v, 'D'), posOf(v, 'S')], mode: 0 }])).rejects.toThrow(/D is in two/);
+    await expect(w([{ keys: [posOf(v, 'A'), posOf(v, 'D')], mode: 5 }])).rejects.toThrow(/mode/);
+    expect(f.sent).toEqual([]);
+  });
+
+  it('reports an ignored write', async () => {
+    const [, d] = await connect({ ignoreWrites: true });
+    const s = find(await d.read(), 'socd');
+    const v = s.value as Socd;
+    await expect(d.write(withValue(s, { ...v, entries: [{ keys: [posOf(v, 'A'), posOf(v, 'D')], mode: 0, travel: 1, rapid: false }] }))).rejects.toThrow(/didn't take the SOCD change for: A, D/);
   });
 });

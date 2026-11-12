@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { categories, decodeLayer, describe as describeKc, hexCode, idOf, known, label, layerKey, parse, search } from './keycodes';
+import { categories, decodeLayer, decodeMacroKey, describe as describeKc, hexCode, idOf, known, label, layerKey, macroKey, parse, search } from './keycodes';
 import type { KeycodeSet } from './keycodes';
 
 const SETS: KeycodeSet[] = ['qmk-v2', 'qmk-v1'];
@@ -113,3 +113,50 @@ describe('keycode catalogue', () => {
     expect(search('')).toEqual([]);
   });
 });
+
+describe('macro keys', () => {
+  it('QK_MACRO numbering (v2 0x7700+n, v1 0x5F12+n)', () => {
+    expect(macroKey(0)).toBe(0x7700);
+    expect(macroKey(127)).toBe(0x777f);
+    expect(macroKey(128)).toBeUndefined();
+    expect(macroKey(0, 'qmk-v1')).toBe(0x5f12);
+    expect(macroKey(15, 'qmk-v1')).toBe(0x5f21);
+    expect(macroKey(16, 'qmk-v1')).toBeUndefined();
+    expect(decodeMacroKey(0x7703)).toBe(3);
+    expect(decodeMacroKey(0x5f13, 'qmk-v1')).toBe(1);
+    expect(decodeMacroKey(0x5f13)).toBeUndefined();
+    expect(label(0x7702)).toBe('M2');
+    expect(label(0x5f14, 'qmk-v1')).toBe('M2');
+    expect(describeKc(0x7702)).toBe('Play macro M2');
+    expect(idOf(0x7702)).toBe('MC_2');
+    expect(parse('MC_2')).toBe(0x7702);
+    expect(parse('M2')).toBe(0x7702);
+    expect(parse('QK_MACRO_2', 'qmk-v1')).toBe(0x5f14);
+  });
+
+  it('Macros category only when the keyboard has macro slots', () => {
+    expect(categories('qmk-v2', 4, 0x29, 0).some((c) => c.id === 'macros')).toBe(false);
+    for (const set of SETS) {
+      const cats = categories(set, 4, 0x29, 20);
+      const m = cats.find((c) => c.id === 'macros')!;
+      expect(m.name).toBe('Macros');
+      expect(m.codes.length).toBe(set === 'qmk-v2' ? 20 : 16);
+      for (const k of m.codes) {
+        expect(parse(k.id, set)).toBe(k.code);
+        expect(label(k.code, set)).toBe(k.label);
+      }
+      expect(m.codes[3]).toMatchObject({ label: 'M3', macro: 3 });
+    }
+    expect(search('macro', 'qmk-v2', 4, 0x2c, 2).map((k) => k.label)).toEqual(['M0', 'M1']);
+  });
+});
+
+describe('VIA protocol 11 keycodes', () => {
+  it('uses the v2 layer layout but macros start at 0x7702 (VIA key-to-byte v11)', async () => {
+    const k = await import('./keycodes')
+    expect(k.layerKey('MO', 1, 'qmk-v11')).toBe(0x5221)
+    expect(k.macroKey(0, 'qmk-v11')).toBe(0x7702)
+    expect(k.macroKey(0, 'qmk-v2')).toBe(0x7700)
+    expect(k.decodeMacroKey(0x7703, 'qmk-v11')).toBe(1)
+  })
+})

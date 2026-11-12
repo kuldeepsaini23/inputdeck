@@ -47,6 +47,8 @@ export class FakeDareu {
   /** global travel, device units */
   global = 240; // 1.2 mm
   keys = new Map<number, FakeKey>();
+  /** SOCD group per key id (absent = not SOCD) */
+  socd = new Map<number, number>();
   private reply: Uint8Array | undefined;
   private busyLeft = 0;
 
@@ -159,6 +161,29 @@ export class FakeDareu {
             const b = 1 + stride * i;
             this.keys.set(id, { func: 1, travel: (pl[b + 1] << 8) | pl[b + 2], press: 0, release: 0 });
           });
+        }
+        return this.answer(f, []);
+      }
+      if (cmd === MAG.SOCD) {
+        if (get) {
+          check(f[1] === 3 && n === 1, 'SOCD get layout');
+          return this.answer(f, [1, pl[1], this.socd.get(pl[1]) ?? 0xff]);
+        }
+        if (f[1] === 3 && n === 1) {
+          check(pl[2] < 4, 'SOCD group');
+          if (w) {
+            this.socd.set(pl[1], pl[2]);
+            // firmware before 0.3.0: SOCD replaces the key's trigger function
+            if ((this.fw[0] << 16 | this.fw[1] << 8 | this.fw[2]) < 0x300) this.keys.set(pl[1], { func: 6, travel: 0, press: 0, release: 0 });
+          }
+          return this.answer(f, []);
+        }
+        // RemoveBindingEx: size byte n + 1, then n x (key, FF)
+        check(f[1] === n + 1, 'SOCD remove size byte');
+        check((this.fw[0] << 16 | this.fw[1] << 8 | this.fw[2]) >= 0x300, 'SOCD remove on old firmware');
+        for (let i = 0; i < n; i++) {
+          check(pl[2 + 2 * i] === 0xff, 'SOCD remove marker');
+          if (w) this.socd.delete(pl[1 + 2 * i]);
         }
         return this.answer(f, []);
       }

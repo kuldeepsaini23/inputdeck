@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { MousePage } from '#/components/MousePage'
 import { KeyboardPage } from '#/components/KeyboardPage'
 import { Backdrop, SaveBar, TopBar } from '#/components/shell'
+import { FeedbackButton } from '#/components/FeedbackButton'
 import { unslug, useDevices } from '#/lib/device-context'
 import type { Value } from '#/drivers/types'
 
@@ -72,6 +73,7 @@ function DevicePage() {
         </div>
       )}
       <SaveBar dev={dev} savedAt={dev.savedAt} />
+      <FeedbackButton dev={dev} />
     </div>
   )
 }

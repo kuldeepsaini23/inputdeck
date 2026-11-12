@@ -4,6 +4,8 @@ import type { Driver, Setting, Value } from './types';
 import {
   GENERIC_CAPS,
   allowed,
+  macroGetPkt,
+  macroSetPkt,
   customGetPkt,
   customSavePkt,
   customSetPkt,
@@ -64,10 +66,15 @@ describe('allowlist', () => {
   });
 
   it('refuses every dangerous command', () => {
-    for (const c of [0x03, 0x04, 0x05, 0x06, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x13, 0x14, 0x15, 0xfe, 0xff]) {
+    for (const c of [0x03, 0x04, 0x05, 0x06, 0x0a, 0x0b, 0x0e, 0x0f, 0x10, 0x13, 0x14, 0x15, 0xfe, 0xff]) {
       expect(allowed([c])).toBe(false);
       expect(allowed([c, 0, 0, 1])).toBe(false);
     }
+    // macro count / size are plain reads; with arguments they're refused
+    expect(allowed([0x0c, 0, 0, 1])).toBe(false);
+    expect(allowed([0x0d, 0, 0, 1])).toBe(false);
+    // macro reset stays refused even when macro writes are enabled
+    expect(allowed([0x10], undefined, { size: 128 })).toBe(false);
     expect(allowed([0x02, 0x03])).toBe(false); // switch matrix state not needed
     expect(allowed([0x02, 0x05])).toBe(false);
     // dangerous commands stay refused even when keymap writes are enabled
@@ -86,6 +93,28 @@ describe('allowlist', () => {
     expect(allowed([0x05, 0, 0, 0, 0], km)).toBe(false); // short
     expect(allowed([...setKeycodePkt(0, 0, 0, 0x04), 1], km)).toBe(false); // trailing junk
     expect(allowed(setKeycodePkt(0, 0, 0, 0x04), { layers: 64, rows: 6, cols: 16 })).toBe(false); // implausible layer count
+  });
+});
+
+describe('macro allowlist', () => {
+  it('allows count / size reads and buffer reads / writes only inside the buffer', () => {
+    const mb = { size: 100 };
+    expect(allowed([0x0c])).toBe(true);
+    expect(allowed([0x0d])).toBe(true);
+    expect(allowed(macroGetPkt(0, 28))).toBe(false); // size not known yet
+    expect(allowed(macroSetPkt(0, [1, 2]))).toBe(false);
+    expect(allowed(macroGetPkt(0, 28), undefined, mb)).toBe(true);
+    expect(allowed(macroGetPkt(72, 28), undefined, mb)).toBe(true);
+    expect(allowed(macroGetPkt(73, 28), undefined, mb)).toBe(false); // past the end
+    expect(allowed(macroGetPkt(0, 29), undefined, mb)).toBe(false); // chunk too big
+    expect(allowed(macroGetPkt(0, 0), undefined, mb)).toBe(false);
+    expect(allowed([...macroGetPkt(0, 4), 9], undefined, mb)).toBe(false); // trailing junk
+    expect(allowed(macroSetPkt(99, [0xff]), undefined, mb)).toBe(true);
+    expect(allowed(macroSetPkt(100, [0]), undefined, mb)).toBe(false);
+    expect(allowed(macroSetPkt(90, new Array(11).fill(0x41)), undefined, mb)).toBe(false);
+    expect(allowed(macroSetPkt(0, new Array(28).fill(0x41)), undefined, mb)).toBe(true);
+    expect(allowed([...macroSetPkt(0, [0x41, 0x42]), 7], undefined, mb)).toBe(false); // data past its length
+    expect(allowed(macroSetPkt(0, [1]), undefined, { size: 0x10000 })).toBe(false); // implausible size
   });
 });
 
@@ -239,7 +268,7 @@ describe('fake VIA keyboard', () => {
     const [f, d] = await connect();
     const ss = await d.read();
     for (const s of ss) await d.write(s).catch(() => undefined);
-    expect(f.sent.every((p) => allowed(p))).toBe(true);
+    expect(f.sent.every((p) => allowed(p, undefined, { size: f.macros.length }))).toBe(true);
     expect(f.sent.some((p) => [0x03, 0x05, 0x06, 0x0a, 0x0b, 0x10, 0x13].includes(p[0]))).toBe(false);
   });
 
@@ -262,10 +291,12 @@ describe('fake VIA keyboard', () => {
     expect(reads.reduce((n, p) => n + p[3], 0)).toBe(128);
   });
 
-  it('old keycodes (protocol 11) are marked qmk-v1', async () => {
-    const [, d] = await connect({ protocol: 11 });
-    const v = find(await d.read(), 'keymap').value as Extract<Value, { kind: 'keymap' }>;
-    expect(v.codes).toBe('qmk-v1');
+  it('keycode numbering follows the VIA app tables: <=10 v1, 11 v11, 12+ v2', async () => {
+    for (const [protocol, codes] of [[10, 'qmk-v1'], [11, 'qmk-v11'], [12, 'qmk-v2']] as const) {
+      const [, d] = await connect({ protocol });
+      const v = find(await d.read(), 'keymap').value as Extract<Value, { kind: 'keymap' }>;
+      expect(v.codes).toBe(codes);
+    }
   });
 
   it('writes only the changed keys with set-keycode and reads them back', async () => {
@@ -333,6 +364,99 @@ describe('fake VIA keyboard', () => {
     const [, d] = await connect({}, null);
     const ss = await d.read();
     expect(ss.some((s) => s.key === 'keymap')).toBe(false);
+  });
+
+  it('reads the macro slots', async () => {
+    const [f, d] = await connect();
+    const ss = await d.read();
+    const m = find(ss, 'macros');
+    expect(m.group).toBe('Macros');
+    const v = m.value as Extract<Value, { kind: 'macros' }>;
+    expect(v).toMatchObject({ slots: 4, maxBytes: 128, format: 'qmk', delays: true });
+    expect(v.macros[0]).toEqual([{ t: 'text', text: 'hi' }, { t: 'tap', kc: 0x28 }]);
+    expect(v.macros.slice(1)).toEqual([[], [], []]);
+    const reads = f.sent.filter((p) => p[0] === 0x0e);
+    expect(reads.every((p) => p[3] <= 28)).toBe(true);
+    expect(reads.reduce((n, p) => n + p[3], 0)).toBe(128);
+  });
+
+  it('old protocol macros have no delays', async () => {
+    const [f, d] = await connect({ protocol: 10 });
+    f.macros.fill(0);
+    f.macros.set([0x02, 0xe1, 0x61, 0x03, 0xe1, 0x00]);
+    const v = find(await d.read(), 'macros').value as Extract<Value, { kind: 'macros' }>;
+    expect(v).toMatchObject({ format: 'qmk-legacy', delays: false });
+    expect(v.macros[0]).toEqual([{ t: 'down', kc: 0xe1 }, { t: 'text', text: 'a' }, { t: 'up', kc: 0xe1 }]);
+  });
+
+  it('writes macros, keeps untouched slots byte for byte, and reads them back', async () => {
+    const [f, d] = await connect();
+    // M1 holds bytes we decode lossily (prefix + unknown action 0x09)
+    f.macros.set([0x01, 0x09, 0x41, 0x00], 6);
+    const ss = await d.read();
+    const m = find(ss, 'macros');
+    const v = m.value as Extract<Value, { kind: 'macros' }>;
+    const macros = v.macros.map((x) => x.slice());
+    macros[2] = [{ t: 'down', kc: 0xe0 }, { t: 'tap', kc: 0x06 }, { t: 'up', kc: 0xe0 }, { t: 'delay', ms: 250 }, { t: 'text', text: 'ok' }];
+    f.sent = [];
+    await d.write(withValue(m, { ...v, macros }));
+    const want = [0x68, 0x69, 1, 1, 0x28, 0, 0x01, 0x09, 0x41, 0, 1, 2, 0xe0, 1, 1, 0x06, 1, 3, 0xe0, 1, 4, 0x32, 0x35, 0x30, 0x7c, 0x6f, 0x6b, 0, 0];
+    expect(Array.from(f.macros.subarray(0, want.length))).toEqual(want);
+    expect(f.macros.subarray(want.length).every((b) => b === 0)).toBe(true);
+    // in-progress flag first, cleared last; only changed chunks in between; never a reset
+    const sets = f.macroWrites;
+    expect(sets[0]).toEqual([127, [0xff]]);
+    expect(sets.at(-1)).toEqual([127, [0]]);
+    expect(sets.slice(1, -1).map(([o]) => o)).toEqual([0]);
+    expect(f.sent.some((p) => p[0] === 0x10)).toBe(false);
+    // read back (whole buffer)
+    expect(f.sent.filter((p) => p[0] === 0x0e).reduce((n, p) => n + p[3], 0)).toBe(128);
+    const again = find(await d.read(), 'macros').value as Extract<Value, { kind: 'macros' }>;
+    expect(again.macros[2]).toEqual(macros[2]);
+    // writing the same thing again sends nothing
+    f.macroWrites = [];
+    await d.write(withValue(m, { ...again }));
+    expect(f.macroWrites).toEqual([]);
+  });
+
+  it('refuses macros that do not fit or cannot be stored', async () => {
+    const [f, d] = await connect({ macroSize: 32 });
+    const ss = await d.read();
+    const m = find(ss, 'macros');
+    const v = m.value as Extract<Value, { kind: 'macros' }>;
+    const big = v.macros.map((x) => x.slice());
+    big[1] = [{ t: 'text', text: 'x'.repeat(40) }];
+    await expect(d.write(withValue(m, { ...v, macros: big }))).rejects.toThrow(/room for 32/);
+    const bad = v.macros.map((x) => x.slice());
+    bad[1] = [{ t: 'tap', kc: 0x5221 }];
+    await expect(d.write(withValue(m, { ...v, macros: bad }))).rejects.toThrow(/M1/);
+    await expect(d.write(withValue(m, { ...v, macros: v.macros.slice(1) }))).rejects.toThrow(/match/);
+    expect(f.macroWrites).toEqual([]);
+  });
+
+  it('old protocol refuses delay steps', async () => {
+    const [, d] = await connect({ protocol: 10 });
+    const m = find(await d.read(), 'macros');
+    const v = m.value as Extract<Value, { kind: 'macros' }>;
+    const macros = v.macros.map((x) => x.slice());
+    macros[1] = [{ t: 'delay', ms: 10 }];
+    await expect(d.write(withValue(m, { ...v, macros }))).rejects.toThrow(/delays/);
+  });
+
+  it('reports a macro write the board ignores', async () => {
+    const [, d] = await connect({ ignoreWrites: true });
+    const m = find(await d.read(), 'macros');
+    const v = m.value as Extract<Value, { kind: 'macros' }>;
+    const macros = v.macros.map((x) => x.slice());
+    macros[3] = [{ t: 'text', text: 'x' }];
+    await expect(d.write(withValue(m, { ...v, macros }))).rejects.toThrow(/didn't take the macro/);
+  });
+
+  it('firmware without macros: no macros setting, no macro buffer access', async () => {
+    const [f, d] = await connect({ macroCount: 0 });
+    const ss = await d.read();
+    expect(ss.some((s) => s.key === 'macros')).toBe(false);
+    expect(f.sent.some((p) => p[0] === 0x0e || p[0] === 0x0f)).toBe(false);
   });
 
   it('close detaches', async () => {

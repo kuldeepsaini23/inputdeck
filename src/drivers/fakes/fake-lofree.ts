@@ -48,6 +48,10 @@ export class FakeLofree {
   act = new Array<number>(KEY_SLOTS * 2 * PROFILES).fill(0);
   rt = new Array<number>(KEY_SLOTS * 4 * PROFILES).fill(0);
   travelSpec = new Array<number>(56).fill(0);
+  /** key type per profile x key (20 normal, 24 DKS, 25 RS, 26 SOCD, 27 HT) */
+  types = new Array<number>(KEY_SLOTS * PROFILES).fill(0x20);
+  /** SOCD table per profile x key: [partner, flags, travel lo, travel hi] */
+  socd = new Array<number>(KEY_SLOTS * 4 * PROFILES).fill(0);
   live = false;
   liveTimer: ReturnType<typeof setInterval> | undefined;
   private listeners = new Set<(e: HIDInputReportEvent) => void>();
@@ -138,6 +142,12 @@ export class FakeLofree {
       case CMD.READ_RT:
       case CMD.WRITE_RT:
         return this.rt;
+      case CMD.READ_KEY_TYPE:
+      case CMD.WRITE_KEY_TYPE:
+        return this.types;
+      case CMD.READ_SOCD:
+      case CMD.WRITE_SOCD:
+        return this.socd;
       default:
         return undefined;
     }
@@ -175,7 +185,7 @@ export class FakeLofree {
     }
     const t = this.table(cmd);
     check(t !== undefined, 'command ' + cmd.toString(16));
-    const isWrite = cmd === CMD.WRITE_FUNC || cmd === CMD.WRITE_ACT || cmd === CMD.WRITE_RT;
+    const isWrite = [CMD.WRITE_FUNC, CMD.WRITE_ACT, CMD.WRITE_RT, CMD.WRITE_KEY_TYPE, CMD.WRITE_SOCD].includes(cmd as never);
     check(this.tx === (isWrite ? 'write' : 'read'), 'command in the wrong transaction');
     if (isWrite) {
       if (!this.o.ignoreWrites) for (let i = 0; i < len; i++) t![off + i] = p[7 + i];

@@ -18,11 +18,13 @@
 //   5c/4c per-key actuation word (u16: bit15 deadzone, bit14 rapid trigger, low 14 bits raw)
 //   58/48 per-key rapid trigger (u16 press raw, u16 release raw)
 //   63    live travel test on/off (samples arrive on report 6)
+//   67/66 key type table (1 byte per key, 128 per profile): 20 normal, 24 DKS, 25 RS, 26 SOCD, 27 HT
+//   56/46 SOCD table (4 bytes per key, 512 per profile): [partner, prio<<4 | slot<<3 | rt, travel u16]
 //
 // NEVER send: 0D (factory reset), 40/44/50 (calibration), 1a / AA, firmware update (other
 // interfaces), or any write not listed in `allowed()`. Every frame is checked by `allowed()`.
 
-import type { Driver, DriverFactory, KeyCap, Setting, Value } from './types';
+import type { Driver, DriverFactory, KeyCap, Setting, Socd, Value } from './types';
 import { sleep } from './types';
 
 const VID = 0x388d;
@@ -62,7 +64,26 @@ export const CMD = {
   READ_TRAVEL_SPEC: 0x60,
   READ_KEY_SPEC: 0x61,
   LIVE_TRAVEL: 0x63,
+  READ_KEY_TYPE: 0x67,
+  WRITE_KEY_TYPE: 0x66,
+  READ_SOCD: 0x56,
+  WRITE_SOCD: 0x46,
 } as const;
+
+/** key types (table 67/66) */
+export const KEY_NORMAL = 0x20;
+export const KEY_SOCD = 0x26;
+/** SOCD flags byte: prio << 4 | slot << 3 | rt (bits that may be set) */
+const SOCD_FLAG_BITS = 0x39;
+/** SOCD resolution modes (pair level). Key 1 stores the mode as its priority nibble, key 2 the mirror. */
+export const SOCD_MODES: [string, number][] = [
+  ['Last input', 0],
+  ['Key 1 wins', 1],
+  ['Key 2 wins', 2],
+  ['Neutral', 3],
+];
+/** key 2's priority nibble for a pair mode (official saveSOCDKeyCommand) */
+export const mirrorMode = (m: number) => (m === 1 ? 2 : m === 2 ? 1 : m);
 
 const POLLING: [string, number][] = [
   ['8000 Hz', 0x00],
@@ -244,6 +265,8 @@ const READS = new Map<number, number>([
   [CMD.READ_KEY_SPEC, KEY_SLOTS * 2],
   [CMD.READ_ACT, KEY_SLOTS * 2 * PROFILES],
   [CMD.READ_RT, KEY_SLOTS * 4 * PROFILES],
+  [CMD.READ_KEY_TYPE, KEY_SLOTS * PROFILES],
+  [CMD.READ_SOCD, KEY_SLOTS * 4 * PROFILES],
 ]);
 /** [cmd, table size] of every write we use */
 const WRITES = new Map<number, number>([
@@ -271,6 +294,14 @@ export function allowed(p: ArrayLike<number>, size = 63): boolean {
   if (p[6] !== 0 || len > chunkSize(size)) return false;
   const read = READS.get(cmd);
   if (read !== undefined) return len >= 1 && off + len <= read && tailZero(7);
+  // key type: one key at a time, only back to normal (20) or to SOCD (26) - never DKS/RS/HT
+  if (cmd === CMD.WRITE_KEY_TYPE) return len === 1 && off < KEY_SLOTS * PROFILES && (p[7] === KEY_NORMAL || p[7] === KEY_SOCD) && tailZero(8);
+  // SOCD entry: one whole 4-byte key entry [partner, flags, travel lo, travel hi]
+  if (cmd === CMD.WRITE_SOCD) {
+    if (len !== 4 || off % 4 !== 0 || off + 4 > KEY_SLOTS * 4 * PROFILES) return false;
+    const travel = p[9] | (p[10] << 8);
+    return p[7] < KEY_SLOTS && p[7] !== (off / 4) % KEY_SLOTS && (p[8] & ~SOCD_FLAG_BITS) === 0 && travel >= 1 && travel <= 0x3fff && tailZero(11);
+  }
   const write = WRITES.get(cmd);
   if (write !== undefined) {
     if (len < 1 || off + len > write || !tailZero(7 + len)) return false;
@@ -336,6 +367,45 @@ export function parseTravelSpec(d: ArrayLike<number>): TravelSpec {
 export const versionNumber = (d: ArrayLike<number>) => (d.length >= 2 ? d[1] * 100 + d[0] : 0);
 
 const rgb = (r: number, g: number, b: number) => ((r << 16) | (g << 8) | b) >>> 0;
+
+/** One SOCD pair as stored (key indices; raw travel per key). */
+export interface SocdPair {
+  k1: number;
+  k2: number;
+  mode: number;
+  rt: boolean;
+  raw1: number;
+  raw2: number;
+}
+
+/**
+ * Pairs from the key type table (one profile, 128 bytes) and the SOCD table (512 bytes), like the
+ * official reader: a type-26 key whose partner is type 26 too; key 1 is the one with slot bit 0.
+ */
+export function parseSocdPairs(types: ArrayLike<number>, table: ArrayLike<number>): SocdPair[] {
+  const seen = new Set<number>();
+  const out: SocdPair[] = [];
+  for (let k = 0; k < KEY_SLOTS; k++) {
+    if (types[k] !== KEY_SOCD || seen.has(k)) continue;
+    const partner = table[k * 4];
+    if (partner >= KEY_SLOTS || partner === k || types[partner] !== KEY_SOCD || seen.has(partner)) continue;
+    seen.add(k);
+    seen.add(partner);
+    const [k1, k2] = ((table[k * 4 + 1] >> 3) & 1) === 0 ? [k, partner] : [partner, k];
+    const f1 = table[k1 * 4 + 1];
+    out.push({ k1, k2, mode: (f1 >> 4) & 0x0f, rt: (f1 & 1) === 1, raw1: u16(table, k1 * 4 + 2), raw2: u16(table, k2 * 4 + 2) });
+  }
+  return out;
+}
+
+/** The two 4-byte entries of a pair: [key, bytes][] (key 1 = slot 0, key 2 = slot 1). */
+export function socdEntries(s: SocdPair): [number, number[]][] {
+  const rt = s.rt ? 1 : 0;
+  return [
+    [s.k1, [s.k2, (s.mode << 4) | rt, s.raw1 & 0xff, (s.raw1 >> 8) & 0xff]],
+    [s.k2, [s.k1, (mirrorMode(s.mode) << 4) | (1 << 3) | rt, s.raw2 & 0xff, (s.raw2 >> 8) & 0xff]],
+  ];
+}
 
 // ---------------------------------------------------------------------------------------------
 // transport
@@ -447,6 +517,8 @@ interface Magnetic {
   act: number[];
   /** rapid trigger table of the active profile (128 x [press, release]) */
   rt: number[];
+  /** key types and SOCD table of the active profile, when they could be read */
+  socd?: { types: number[]; table: number[] };
 }
 
 /** Layout positions that exist in the key matrix. */
@@ -557,6 +629,106 @@ class Hyzen implements Driver {
     return this.link.read(CMD.READ_RT, KEY_SLOTS * 4, KEY_SLOTS * 4 * this.profile);
   }
 
+  private readKeyTypes(): Promise<number[]> {
+    return this.link.read(CMD.READ_KEY_TYPE, KEY_SLOTS, KEY_SLOTS * this.profile);
+  }
+
+  private readSocdTable(): Promise<number[]> {
+    return this.link.read(CMD.READ_SOCD, KEY_SLOTS * 4, KEY_SLOTS * 4 * this.profile);
+  }
+
+  /** UI value for the SOCD pairs (positions = the per-key layout, keys present in the matrix). */
+  private socdValue(m: Magnetic): Socd {
+    const { types, table } = m.socd!;
+    const keys = present(m.idx);
+    const caps = hyzenCaps(m.idx).filter((c) => c.index >= 0);
+    const pos = (k: number) => keys.findIndex(([, kk]) => kk === k);
+    const lo = Math.max(0.01, r2(m.spec.minMm));
+    const hi = r2(m.spec.maxMm);
+    const entries: Socd['entries'] = [];
+    for (const s of parseSocdPairs(types, table)) {
+      const a = pos(s.k1);
+      const b = pos(s.k2);
+      if (a < 0 || b < 0) continue;
+      entries.push({ keys: [a, b], mode: s.mode, travel: clamp(r2(rawToMm(s.raw1, m.maxRaw[s.k1], m.spec.maxMm, true)), lo, hi), rapid: s.rt });
+    }
+    const modes = SOCD_MODES.map(([l, v]) => [l, v] as [string, number]);
+    for (const e of entries) if (!modes.some(([, v]) => v === e.mode)) modes.push([`Mode ${e.mode}`, e.mode]);
+    return {
+      kind: 'socd',
+      mode: 'pairs',
+      keys: caps,
+      max: Math.floor(keys.length / 2),
+      modes,
+      // DKS / RS / HT keys: making them SOCD would silently drop that function
+      unavailable: keys.map(([, k], i) => (types[k] === KEY_NORMAL || types[k] === KEY_SOCD ? -1 : i)).filter((i) => i >= 0),
+      travel: { min: lo, max: hi, step: 0.01, default: this.actMm(m, this.refKey(m)) },
+      rapid: true,
+      entries,
+    };
+  }
+
+  private async writeSocd(m: Magnetic, v: Socd): Promise<void> {
+    if (!m.socd) throw new Error('press Re-read first');
+    const { types, table } = m.socd;
+    const keys = present(m.idx);
+    const label = (k: number) => HYZEN_LAYOUT[m.idx.indexOf(k)]?.[1] ?? `#${k}`;
+    if (v.mode !== 'pairs' || v.keys.length !== keys.length) throw new Error("SOCD data doesn't match the keyboard - press Re-read");
+    if (v.entries.length > Math.floor(keys.length / 2)) throw new Error('too many SOCD pairs');
+    const lo = Math.max(0.01, r2(m.spec.minMm));
+    const hi = r2(m.spec.maxMm);
+    const old = parseSocdPairs(types, table);
+    const used = new Set<number>();
+    const pairs: SocdPair[] = v.entries.map((e) => {
+      if (e.keys.length !== 2 || e.keys[0] === e.keys[1]) throw new Error('every SOCD pair needs two different keys');
+      const [k1, k2] = e.keys.map((i) => {
+        const k = keys[i]?.[1];
+        if (k === undefined) throw new Error("SOCD data doesn't match the keyboard - press Re-read");
+        if (used.has(k)) throw new Error(`${label(k)} is in two SOCD pairs`);
+        if (types[k] !== KEY_NORMAL && types[k] !== KEY_SOCD) throw new Error(`${label(k)} has another advanced function (DKS/RS/HT) - remove it in Lofree HUB first`);
+        used.add(k);
+        return k;
+      });
+      const was = old.find((o) => o.k1 === k1 && o.k2 === k2);
+      if (!SOCD_MODES.some(([, x]) => x === e.mode) && was?.mode !== e.mode) throw new Error(`unknown SOCD mode ${e.mode}`);
+      const travel = clamp(r2(e.travel ?? this.actMm(m, k1)), lo, hi);
+      // keep the stored travel when the UI shows the same value
+      const same = was && r2(rawToMm(was.raw1, m.maxRaw[k1], m.spec.maxMm, true)) === travel;
+      return {
+        k1,
+        k2,
+        mode: e.mode,
+        rt: !!e.rapid,
+        raw1: same ? was.raw1 : mmToRaw(travel, m.maxRaw[k1], m.spec.maxMm, true),
+        raw2: same ? was.raw2 : mmToRaw(travel, m.maxRaw[k2], m.spec.maxMm, true),
+      };
+    });
+    const typeWrites = new Map<number, number>();
+    for (const o of old) for (const k of [o.k1, o.k2]) if (!used.has(k)) typeWrites.set(k, KEY_NORMAL);
+    const entryWrites: [number, number[]][] = [];
+    for (const s of pairs) {
+      // key 2 first, then key 1, like the official app
+      for (const [k, bytes] of socdEntries(s).reverse()) {
+        if (bytes.some((b, j) => table[k * 4 + j] !== b)) entryWrites.push([k, bytes]);
+      }
+      for (const k of [s.k1, s.k2]) if (types[k] !== KEY_SOCD) typeWrites.set(k, KEY_SOCD);
+    }
+    if (!typeWrites.size && !entryWrites.length) return;
+    // keys leaving SOCD go back to normal first, then the entries, then the new SOCD types
+    const typeBase = KEY_SLOTS * this.profile;
+    const tableBase = KEY_SLOTS * 4 * this.profile;
+    for (const [k, t] of typeWrites) if (t === KEY_NORMAL) await this.link.write(CMD.WRITE_KEY_TYPE, [t], typeBase + k);
+    for (const [k, bytes] of entryWrites) await this.link.write(CMD.WRITE_SOCD, bytes, tableBase + k * 4);
+    for (const [k, t] of typeWrites) if (t === KEY_SOCD) await this.link.write(CMD.WRITE_KEY_TYPE, [t], typeBase + k);
+    await sleep(lofreeTiming.settle);
+    const got = { types: await this.readKeyTypes(), table: await this.readSocdTable() };
+    m.socd = got;
+    const bad = new Set<string>();
+    for (const [k, t] of typeWrites) if (got.types[k] !== t) bad.add(label(k));
+    for (const [k, bytes] of entryWrites) if (bytes.some((b, j) => got.table[k * 4 + j] !== b)) bad.add(label(k));
+    if (bad.size) throw new Error(`keyboard didn't take the SOCD change for: ${[...bad].join(', ')}`);
+  }
+
   private async readMagnetic(): Promise<Magnetic> {
     const spec = parseTravelSpec(await this.link.read(CMD.READ_TRAVEL_SPEC, 56));
     const idx = keyIndices(await this.link.read(CMD.READ_DEF_MATRIX, MATRIX_SIZE));
@@ -660,6 +832,18 @@ class Hyzen implements Driver {
     if (magnetic) {
       this.mag = await this.readMagnetic();
       out.push(...this.triggerSettings(this.mag));
+      try {
+        this.mag.socd = { types: await this.readKeyTypes(), table: await this.readSocdTable() };
+        out.push({
+          key: 'socd',
+          label: 'SOCD (Snap Tap)',
+          group: 'Switches',
+          value: this.socdValue(this.mag),
+          hint: 'When both keys of a pair are held, only one counts - great for strafing (A/D). Each pair has its own actuation point and Rapid Trigger.',
+        });
+      } catch {
+        // tables didn't answer: leave SOCD out
+      }
     } else {
       out.push(text('switch_note', 'Note', 'Info', 'Actuation and Rapid Trigger need magnetic switch mode (set in Lofree HUB)'));
     }
@@ -810,6 +994,8 @@ class Hyzen implements Driver {
         for (const [, k] of present(m.idx)) rts.set(k, this.rtFor(m, k, mm));
         return this.writeTriggers(m, new Map(), rts);
       }
+      case 'socd:socd':
+        return this.writeSocd(mag(), v as Socd);
       case 'per_key_trigger:perKeyTrigger': {
         const m = mag();
         const p = v as Extract<Value, { kind: 'perKeyTrigger' }>;

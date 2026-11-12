@@ -77,20 +77,43 @@ const ERRORS_20: Record<number, string> = {
 
 // ---------------------------------------------------------------- model table / images
 
-const IMG = 'https://resource.logitechg.com/w_600,c_limit,q_auto,f_auto,dpr_1.0/d_transparent.gif/content/dam/gaming/en/products/';
-/** Matched against the name the mouse reports (feature 0x0005), most specific first. Images: Logitech's own CDN, top view. */
+const DAM = 'https://resource.logitechg.com/w_600,c_limit,q_auto,f_auto,dpr_1.0/d_transparent.gif/content/dam/gaming/en/';
+const IMG = DAM + 'products/';
+/**
+ * Matched against the name the mouse reports (feature 0x0005), most specific first. Images: Logitech's own CDN,
+ * top view (checked: HTTP 200, image/*, 600 px wide; a missing file there comes back as a 1x1 placeholder, not a 404).
+ */
 const MODELS: [RegExp, string | undefined][] = [
   [/SUPERLIGHT 2C/i, IMG + 'pro-x-superlight-2c-pdp/gallery/pro-x-superlight-2c-mouse-top-angle-black-gallery-1.png'],
   [/SUPERLIGHT 2 ?DEX|X2 DEX|2 DEX/i, IMG + 'pro-x-superlight-2-dex/gallery/new-gallery-assets-2025/pro-x-superlight-2-dex-mouse-top-angle-black-gallery-1.png'],
-  [/SUPERLIGHT 2/i, IMG + 'pro-x-superlight-2/new-gallery-assets-2025/pro-x-superlight-2-mice-top-angle-black-gallery-1.png'],
+  [/SUPERLIGHT 2|^PRO X ?2$/i, IMG + 'pro-x-superlight-2/new-gallery-assets-2025/pro-x-superlight-2-mice-top-angle-black-gallery-1.png'],
+  [/X3 SUPERSTRIKE/i, IMG + 'pro-x3-superstrike-pdp/gallery/pro-x3-superstrike-mouse-midnight-black-top-angle-gallery-1.png'],
+  [/SUPERSTRIKE/i, IMG + 'pro-x2-superstrike-pdp/2026/pro-x2-superstrike-top-angle-lifestyle-gallery-2.png'],
+  // original PRO X SUPERLIGHT (reports "PRO X SUPERLIGHT" or "PRO X Wireless")
+  [/PRO X SUPERLIGHT|^PRO X( WIRELESS)?$/i, IMG + 'pro-x-superlight/pro-x-superlight-black-gallery-6.png'],
+  [/PRO 2 LIGHTSPEED/i, IMG + 'pro-2-lightspeed/gallery/pro2-lightspeed-black-new-gallery1.png'],
+  [/\bPRO WIRELESS/i, IMG + 'pro-wireless-gaming-mouse/pro-wireless-carbon-gallery-1.png'],
+  // corded G PRO / PRO HERO
+  [/^(LOGITECH )?(G ?)?PRO( HERO)?( GAMING MOUSE)?$/i, IMG + 'pro-mouse/promouse-gallery-1.png'],
   [/G502 X PLUS/i, IMG + 'g502x-plus/2026-update/gallery/g502-x-plus-top-angle-black-gallery-1.png'],
   [/G502 X LIGHTSPEED/i, IMG + 'g502x-lightspeed/gallery/g502-x-lightspeed-mouse-top-angle-black-gallery-1.png'],
   [/G502 X\b/i, IMG + 'g502x-corded/gallery/g502x-corded-gallery-1-black.png'],
   [/G502 LIGHTSPEED/i, IMG + 'g502-lightspeed-gaming-mouse/g502-lightspeed-gallery-1.png'],
+  // G502 HERO / SE / Proteus: same shell
+  [/G502/i, DAM + 'non-braid/hyjal-g502-hero/2025/g502-hero-mouse-top-angle-gallery-1.png'],
   [/G903/i, IMG + 'g903-hero/2025-update/g903-lightspeed-mouse-top-angle-gallery-1.png'],
+  [/G703.*HERO/i, IMG + 'g703-hero/2025-update/g703-mouse-top-angle-gallery-1.png'],
+  [/G703/i, IMG + 'g703/g703-gallery-1.png'],
+  [/G705/i, IMG + 'mouse/g705-wireless-mouse/gallery/g705-gallery-3.png'],
+  [/G604/i, IMG + 'g604/g604-gallery-4.png'],
+  [/G603/i, IMG + 'g603/g603-gallery-1.png'],
+  [/G403/i, DAM + 'non-braid/g403/g403-hero-mouse-top-angle-black-gallery-1.png'],
   [/G309/i, IMG + 'G309-Lightspeed-Gaming-Mouse/gallery/g309-lightspeed-wireless-mouse-black-gallery-1.png'],
-  [/G305/i, IMG + 'g305/2025-update/g305-lightspeed-mouse-top-angle-black-gallery-1.png'],
-  [/PRO 2 LIGHTSPEED/i, IMG + 'pro-2-lightspeed/gallery/pro2-lightspeed-black-new-gallery1.png'],
+  [/G30[45] ?X SUPERLIGHT/i, IMG + 'g305-x-superlight-pdp/gallery/g305-x-superlight-top-angle-black-gallery-1.png'],
+  [/G30[45] ?X\b/i, IMG + 'g304-x-lightspeed-pdp/2026-update/gallery/pink/g304-x-pink-top-angle-gallery-1.png'],
+  [/G30[45]/i, IMG + 'g305/2025-update/g305-lightspeed-mouse-top-angle-black-gallery-1.png'],
+  // G102 / G203 (PRODIGY / LIGHTSYNC): same shell
+  [/G[12]0[23]\b/i, IMG + 'refreshed-g203/2025-update/g203-mouse-top-angle-black-gallery-1.png'],
 ];
 export function imageFor(name: string): string | undefined {
   return MODELS.find(([re]) => re.test(name))?.[1];

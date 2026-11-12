@@ -15,6 +15,8 @@ export interface FakeOpts {
   silentKeys?: number[];
   /** don't answer colour table reads */
   noColorRead?: boolean;
+  /** report SOCD support (status F[9] = 1) */
+  socd?: boolean;
 }
 
 export class FakeKeyboard {
@@ -30,6 +32,9 @@ export class FakeKeyboard {
   slot = 1;
   table = new Uint8Array(COLOR_TABLE);
   flags = 0x02;
+  /** SOCD switch and the raw pair table (20 x [valid, mode, hid1, hid2]) */
+  socdOn = 0;
+  socdTable = new Array<number>(80).fill(0);
   private listeners = new Set<(e: HIDInputReportEvent) => void>();
 
   constructor(private o: FakeOpts = {}) {
@@ -94,6 +99,7 @@ export class FakeKeyboard {
     } else if (c === 0x01) {
       const f = new Array(20).fill(0);
       f[12] = this.flags;
+      if (this.o.socd) f[9] = 1;
       this.reply([0x01, 0, 0, 0, 20, ...f]);
     } else if (c === 0x0a) {
       this.reply(hex('0a 00 00 00 12 02 01 03 09 04 00 0e 0f 06 07 0b 0c 10 08 a5 5a 04 04'));
@@ -121,6 +127,14 @@ export class FakeKeyboard {
       const k: KeyTrig = { mode: p[5], travel: (p[32] << 8) | p[28], press: (p[34] << 8) | p[30], release: (p[35] << 8) | p[31] };
       for (let col = 0; col < 22; col++)
         for (let row = 0; row < 8; row++) if (p[6 + col] & (1 << row)) this.keys.set(row * 22 + col, { ...k });
+    } else if (c === 0x24 && s1 === 0x02) {
+      this.reply([0x24, 0x02, 0, 0, 6, this.socdOn, 0, 0, 0, 0xfa, 0xe5]);
+    } else if (c === 0x24 && s1 === 0x03) {
+      if (w) this.socdOn = p[5];
+    } else if (c === 0x24 && s1 === 0x01) {
+      for (let pg = 0; pg < 2; pg++) this.reply([0x24, 0x01, 0, pg, 0x28, ...this.socdTable.slice(pg * 40, pg * 40 + 40)]);
+    } else if (c === 0x24 && s1 === 0x00) {
+      if (w) this.socdTable.splice(p[3] * 40, 40, ...p.slice(5, 45));
     } else if (c === 0x09 && s1 === 0x20) {
       this.reply([0x09, this.slot]);
     } else if (c === 0x09 && (s1 === 0x80 || s1 === 0x81)) {

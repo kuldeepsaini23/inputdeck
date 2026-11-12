@@ -42,7 +42,19 @@ export type Value =
       sensMin: number;
       sensMax: number;
     }
-  | { kind: 'perKeyColor'; keys: KeyCap[]; colors: number[] };
+  | { kind: 'perKeyColor'; keys: KeyCap[]; colors: number[] }
+  | {
+      /** what every key sends, per layer. write() gets the whole map; drivers write only what changed */
+      kind: 'keymap';
+      keys: KeyCap[];
+      /** per layer, per key (same order as keys): the keycode (16-bit QMK keycode for 'qmk-*') */
+      layers: number[][];
+      /** which keycode numbering `layers` uses (src/lib/keycodes.ts understands these) */
+      codes: KeycodeSet;
+    };
+
+/** Keycode numberings: QMK keycodes v2 (QMK 0.19+, VIA protocol 12+) and the older v1. */
+export type KeycodeSet = 'qmk-v2' | 'qmk-v1';
 
 export interface Setting {
   /** stable id used by write() */

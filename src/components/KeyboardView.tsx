@@ -15,6 +15,12 @@ export interface KeyLook {
   press?: number
   /** live test: pressed past its actuation point */
   fired?: boolean
+  /** small corner dot (e.g. key remapped this session) */
+  dot?: boolean
+  /** faded legend (e.g. a transparent key showing the layer below) */
+  dim?: boolean
+  /** tooltip */
+  title?: string
 }
 
 /**
@@ -129,12 +135,13 @@ export function KeyboardView({ keys, looks, selected, onSelect, interactive, kno
               tabIndex={interactive ? 0 : -1}
               role={interactive ? 'checkbox' : undefined}
               aria-checked={interactive ? selected.has(i) : undefined}
-              aria-label={k.label}
+              aria-label={look.title ?? k.label}
+              title={look.title}
               onKeyDown={(e) => onKey(e, i)}
             >
               {look.press !== undefined && look.press > 0.01 && <span className="press" style={{ height: `${Math.min(1, look.press) * 100}%` }} />}
-              <span className="relative">{k.label}</span>
-              {look.rt && <span className="rt" />}
+              <span className="relative" style={look.dim ? { opacity: 0.35 } : undefined}>{k.label}</span>
+              {(look.rt || look.dot) && <span className="rt" />}
             </div>
           )
         })}

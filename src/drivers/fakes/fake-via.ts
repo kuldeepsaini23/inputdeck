@@ -41,6 +41,8 @@ export interface FakeViaOpts {
   /** channels the firmware handles */
   channels?: number[];
   ignoreWrites?: boolean;
+  /** keymap layers the firmware reports (default 4) */
+  layers?: number;
   vendorId?: number;
   productId?: number;
 }
@@ -57,19 +59,39 @@ export class FakeVia {
   /** values per channel: [bri, effect, speed, hue, sat] */
   values = new Map<number, number[]>();
   saves: number[] = [];
-  keymap = new Uint8Array(4 * 4 * 2 * 2);
+  readonly rows = 4;
+  readonly cols = 4;
+  readonly layers: number;
+  /** dynamic keymap buffer: layer-major, rows x cols, 2 bytes big-endian per key */
+  keymap: Uint8Array;
+  /** set-keycode commands received: [layer, row, col, keycode] */
+  keyWrites: [number, number, number, number][] = [];
   private listeners = new Set<(e: HIDInputReportEvent) => void>();
 
   constructor(private o: FakeViaOpts = {}) {
     this.vendorId = o.vendorId ?? 0x3434;
     this.productId = o.productId ?? 0x0194;
     for (const ch of o.channels ?? [3]) this.values.set(ch, [200, 4, 128, 0, 255]);
+    this.layers = o.layers ?? 4;
+    this.keymap = new Uint8Array(this.layers * this.rows * this.cols * 2);
     // layer 0: Esc Q W E / Tab A S Enter / Space MO(1)
     const kc: [number, number][] = [[0, 0x29], [1, 0x14], [2, 0x1a], [3, 0x08], [4, 0x2b], [5, 0x04], [6, 0x16], [7, 0x28], [8, 0x2c], [9, 0x5221]];
-    for (const [i, k] of kc) {
-      this.keymap[i * 2] = k >> 8;
-      this.keymap[i * 2 + 1] = k & 0xff;
+    for (const [i, k] of kc) this.setKey(0, Math.floor(i / 4), i % 4, k);
+    // layer 1: F1 F2 F3 _ / transparent ... / Vol-, Vol+ on the split space
+    if (this.layers > 1) {
+      for (let i = 0; i < 16; i++) this.setKey(1, Math.floor(i / 4), i % 4, 0x0001);
+      [[0, 1, 0x3a], [0, 2, 0x3b], [2, 0, 0xaa], [2, 1, 0xa9]].forEach(([r, c, k]) => this.setKey(1, r, c, k));
     }
+  }
+
+  key(layer: number, row: number, col: number): number {
+    const o = ((layer * this.rows + row) * this.cols + col) * 2;
+    return (this.keymap[o] << 8) | this.keymap[o + 1];
+  }
+  setKey(layer: number, row: number, col: number, kc: number) {
+    const o = ((layer * this.rows + row) * this.cols + col) * 2;
+    this.keymap[o] = kc >> 8;
+    this.keymap[o + 1] = kc & 0xff;
   }
 
   async open() {
@@ -101,7 +123,7 @@ export class FakeVia {
     check(id === 0, 'report id');
     const p = Array.from(data as Uint8Array);
     check(p.length === REPORT_LEN, 'length');
-    check(allowed(p), `packet ${p.slice(0, 6).join(',')}`);
+    check(allowed(p, { layers: this.layers, rows: this.rows, cols: this.cols }), `packet ${p.slice(0, 6).join(',')}`);
     this.sent.push(p);
     const r = p.slice();
     const w = !this.o.ignoreWrites;
@@ -116,7 +138,11 @@ export class FakeVia {
         break;
       }
       case CMD.layerCount:
-        r[1] = 4;
+        r[1] = this.layers;
+        break;
+      case CMD.setKeycode:
+        this.keyWrites.push([p[1], p[2], p[3], (p[4] << 8) | p[5]]);
+        if (w) this.setKey(p[1], p[2], p[3], (p[4] << 8) | p[5]);
         break;
       case CMD.getBuffer: {
         const off = (p[1] << 8) | p[2];

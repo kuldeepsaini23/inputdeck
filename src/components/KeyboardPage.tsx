@@ -3,7 +3,9 @@ import { Gauge, Keyboard as KeyboardIcon, Lightbulb, SlidersHorizontal, ToggleRi
 import type { DeviceState } from '#/devices'
 import type { KeyCap, Setting, Value } from '#/drivers/types'
 import { cn } from '#/lib/utils'
+import { describe as describeKc, label as kcLabel } from '#/lib/keycodes'
 import { KeyboardView, type KeyLook } from './KeyboardView'
+import { KeyCard, KeyPicker, effective, type Keymap } from './KeymapCards'
 import { BigValue, Card, ChoiceSelect, Range, Segmented, SWATCHES, Toggle, hex, type Choice } from './kit'
 import { GenericCard, Hero, Pulse, shortHz, type Edit } from './parts'
 import { Dock, textOf } from './shell'
@@ -13,10 +15,11 @@ type PerKeyColor = Extract<Value, { kind: 'perKeyColor' }>
 type Float = Extract<Value, { kind: 'float' }>
 type Num = Extract<Value, { kind: 'number' }>
 
-const ORDER = ['Switches', 'Lighting', 'Performance']
+const ORDER = ['Switches', 'Lighting', 'Keys', 'Performance']
 const ICON: Record<string, React.ReactNode> = {
   Switches: <ToggleRight className="size-4" />,
   Lighting: <Lightbulb className="size-4" />,
+  Keys: <KeyboardIcon className="size-4" />,
   Performance: <Gauge className="size-4" />,
 }
 // per-key settings live on the Switches / Lighting tabs
@@ -92,10 +95,34 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
   const keys: KeyCap[] | undefined = pkT?.keys ?? pkC?.keys ?? dev.driver.layout?.()
   const inGroup = (g: string) => (edit ?? []).filter((s) => s.group === g)
 
+  // ---- key remapping (drivers with a keymap setting)
+  const kmS = get('keymap')
+  const km = kmS?.value.kind === 'keymap' ? kmS.value : undefined
+  const [layerPick, setLayer] = useState(0)
+  const [kSel, setKSel] = useState<number | undefined>(undefined)
+  const layer = km ? Math.min(layerPick, km.layers.length - 1) : 0
+  const keySel = km && kSel !== undefined && kSel < km.keys.length ? kSel : undefined
+  // the keymap as first read for this device, for the "changed" dots and Restore
+  const [original, setOriginal] = useState<{ id: string; n: number; layers: number[][] } | undefined>(undefined)
+  useEffect(() => {
+    if (km && (original?.id !== dev.id || original.n !== km.keys.length)) setOriginal({ id: dev.id, n: km.keys.length, layers: km.layers.map((l) => l.slice()) })
+  }, [km, dev.id, original])
+  const origLayers = original?.id === dev.id ? original.layers : undefined
+  const onKeys = active === 'Keys' && !!km
+
   // ---- keyboard looks for the current tab
   let looks: KeyLook[] = []
   let interactive = false
-  if (keys && active === 'Switches' && pkT && testing) {
+  let boardKeys = keys
+  if (onKeys) {
+    interactive = true
+    boardKeys = km!.keys.map((k, i) => ({ ...k, label: kcLabel(effective(km!, layer, i).code, km!.codes) }))
+    looks = km!.keys.map((_, i) => {
+      const code = km!.layers[layer][i]
+      const was = origLayers?.[layer]?.[i]
+      return { dot: was !== undefined && was !== code, dim: code === 1 && layer > 0, title: `${kcLabel(code, km!.codes) || 'None'}: ${describeKc(code, km!.codes)}` }
+    })
+  } else if (keys && active === 'Switches' && pkT && testing) {
     looks = keys.map((_, i) => {
       const mm = live.depth.get(i) ?? 0
       return { press: mm / (pkT.max || 4), fired: mm >= pkT.travel[i] - 1e-6 && mm > 0.05, rt: pkT.rapid[i] }
@@ -122,6 +149,8 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     ;[hero, cards] = switches()
   } else if (active === 'Lighting') {
     ;[hero, cards] = lighting()
+  } else if (onKeys) {
+    ;[hero, cards] = keymap()
   } else if (active === 'Performance') {
     const poll = get('polling')
     const label = choiceLabel(poll)
@@ -259,6 +288,35 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     return [h, c]
   }
 
+  function keymap(): [React.ReactNode, React.ReactNode] {
+    const m = km as Keymap
+    const assign = (code: number) => {
+      if (keySel === undefined) return
+      const layers = m.layers.map((l, li) => {
+        if (li !== layer) return l
+        const next = l.slice()
+        next[keySel] = code
+        return next
+      })
+      onEdit('keymap', { ...m, layers })
+    }
+    const code = keySel !== undefined ? m.layers[layer][keySel] : undefined
+    const legend = code === undefined ? undefined : kcLabel(code, m.codes) || 'None'
+    const changed = origLayers ? m.layers.reduce((n, l, li) => n + l.filter((c, i) => origLayers[li]?.[i] !== undefined && origLayers[li][i] !== c).length, 0) : 0
+    const h = (
+      <Hero brand={brand} label={`Keymap · layer ${layer}`} value={legend ?? `${m.layers.length}`} unit={legend ? undefined : m.layers.length === 1 ? 'layer' : 'layers'}
+        size={legend && legend.length > 6 ? Math.max(30, Math.round(400 / legend.length)) : 64}
+        sub={code !== undefined ? describeKc(code, m.codes) : changed ? `${changed} key${changed === 1 ? '' : 's'} remapped this session` : 'Click a key to remap it.'} />
+    )
+    const c = (
+      <>
+        <KeyPicker km={m} layer={layer} keyIndex={keySel} onPick={assign} className="col-span-2" />
+        <KeyCard km={m} layer={layer} keyIndex={keySel} original={origLayers} onPick={assign} />
+      </>
+    )
+    return [h, c]
+  }
+
   function lighting(): [React.ReactNode, React.ReactNode] {
     const mode = get('light_mode')
     const power = get('light_power')?.value as Extract<Value, { kind: 'toggle' }> | undefined
@@ -322,17 +380,40 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     return [h, c]
   }
 
-  const showBar = (interactive || testing) && keys
+  const showBar = (interactive || testing) && boardKeys
+  // keys tab: one key at a time; a click (or drag) picks the newly added key
+  const pickKey = (next: Set<number>) => setKSel([...next].find((i) => i !== keySel))
   return (
     <>
       <main className="scroll-thin relative z-10 flex h-[calc(100%-76px)] flex-col items-center overflow-y-auto px-16 pt-2 pb-[130px]">
         <div className="relative w-full" style={{ maxWidth: kbMax }}>
           <div className="pointer-events-none absolute -inset-x-20 -top-10 h-[120%] rounded-full bg-[radial-gradient(ellipse_at_center,rgb(230_232_236/0.08),transparent_65%)]" />
-          {keys ? (
-            <KeyboardView keys={keys} looks={looks} selected={interactive ? sel : new Set()} onSelect={setSel} interactive={interactive} knob={dev.driver.knob} maxWidth={kbMax} />
+          {boardKeys ? (
+            <KeyboardView keys={boardKeys} looks={looks} selected={onKeys ? new Set(keySel === undefined ? [] : [keySel]) : interactive ? sel : new Set()}
+              onSelect={onKeys ? pickKey : setSel} interactive={interactive} knob={dev.driver.knob} maxWidth={kbMax} />
           ) : (
             <div className="grid h-64 place-items-center"><KeyboardIcon className="size-40 text-white/10" strokeWidth={0.6} /></div>
           )}
+          {onKeys ? (
+            <div className="mt-3 flex h-9 items-center justify-between gap-4">
+              <span className="text-[12px] text-[var(--text-3)]">
+                {keySel !== undefined
+                  ? <><span className="display mr-1.5 text-[13px] font-semibold text-[var(--text)]">{km!.keys[keySel].label || 'Key'}</span>selected · pick what it sends below</>
+                  : 'click a key to remap it · dot = remapped this session · faded = from the layer below'}
+              </span>
+              {km!.layers.length > 1 && (
+                <span className="flex items-center gap-2.5">
+                  <span className="eyebrow">Layer</span>
+                  {km!.layers.length <= 8 ? (
+                    <Segmented label="Keymap layer" className="[&_button]:!px-3.5 [&_button]:!py-1.5 [&_button]:!text-[11px]"
+                      value={layer} options={km!.layers.map((_, l) => [String(l), l] as const)} onChange={setLayer} />
+                  ) : (
+                    <ChoiceSelect label="Keymap layer" className="!h-9 !w-28" v={{ kind: 'choice', options: km!.layers.map((_, l) => [`Layer ${l}`, l]), current: layer }} onChange={setLayer} />
+                  )}
+                </span>
+              )}
+            </div>
+          ) : (
           <div className={cn('mt-3 flex h-9 items-center justify-between', !showBar && 'invisible')}>
             <span className="text-[12px] text-[var(--text-3)]">{!testing && <span className="display mr-1.5 text-[13px] font-semibold text-[var(--text)]">{selIdx.length}</span>}
               {testing ? 'live test · press keys on your keyboard' : <>key{selIdx.length === 1 ? '' : 's'} selected · {selIdx.length === 0 ? 'editing all keys, click or drag to pick some' : 'click or drag over keys'}</>}</span>
@@ -349,6 +430,7 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
               )}
             </span>
           </div>
+          )}
         </div>
         <div className="mt-4 grid w-full max-w-[1300px] grid-cols-[minmax(240px,0.8fr)_2.6fr] gap-8">
           <div key={active} className="pt-2">{hero}</div>

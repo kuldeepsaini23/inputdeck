@@ -11,11 +11,14 @@
 // keymap. Without a definition we probe the standard lighting channels and draw a generic
 // ANSI 60% board.
 //
-// NEVER send: 0x03 set keyboard value, 0x05/0x13/0x15 keymap/encoder writes, 0x06 keymap
+// Key remapping: 0x05 set keycode (one key, one layer), only inside the board's layer count
+// and switch matrix, which the driver learns before it may send one.
+//
+// NEVER send: 0x03 set keyboard value, 0x13/0x15 encoder / bulk keymap writes, 0x06 keymap
 // reset, 0x0A EEPROM reset, 0x0B bootloader jump, 0x0C-0x10 macros, channel 0 (vendor custom)
 // or audio values. `allowed()` enforces an allowlist on every packet.
 
-import type { Driver, DriverFactory, KeyCap, Setting, Value } from './types';
+import type { Driver, DriverFactory, KeyCap, KeycodeSet, Setting, Value } from './types';
 
 export const USAGE_PAGE = 0xff60;
 export const USAGE = 0x61;
@@ -28,6 +31,7 @@ export const BUF_CHUNK = 28;
 export const CMD = {
   protocol: 0x01,
   getKbValue: 0x02,
+  setKeycode: 0x05,
   customSet: 0x07,
   customGet: 0x08,
   customSave: 0x09,
@@ -70,6 +74,10 @@ const CHANNEL_NAME: Record<number, string> = {
 /** Custom-value channels exist from protocol 11 (VIA v3) on; layer count from 9. */
 const PROTOCOL_V3 = 11;
 const PROTOCOL_BETA = 9;
+/** QMK keycodes v2 (QMK 0.19+) come with VIA protocol 12. */
+const PROTOCOL_KEYCODES_V2 = 12;
+/** The keymap buffer is addressed with a 16-bit offset. */
+const MAX_KEYMAP_BYTES = 0x10000;
 
 /** VIDs other drivers own; never claim them. */
 const EXCLUDED_VIDS = new Set([0x36a7, 0x373e, 0x37b0, 0x3710, 0x3554]);
@@ -99,8 +107,18 @@ const hexs = (p: ArrayLike<number>) => Array.from(p, hex2).join(' ');
 const channelValueOk = (ch: number | undefined, id: number | undefined) =>
   ch !== undefined && id !== undefined && (CHANNEL_VALUES[ch]?.includes(id) ?? false);
 
-/** Payload allowlist (32 bytes, no report ID). Everything else is refused. */
-export function allowed(p: ArrayLike<number>): boolean {
+/** What a keymap write may touch: layers 0..layers-1, rows 0..rows-1, cols 0..cols-1. */
+export interface KeymapBounds {
+  layers: number;
+  rows: number;
+  cols: number;
+}
+
+/**
+ * Payload allowlist (32 bytes, no report ID). Everything else is refused. Keymap writes (0x05)
+ * are only allowed when `km` (the board's layer count and matrix) is given and the key is inside it.
+ */
+export function allowed(p: ArrayLike<number>, km?: KeymapBounds): boolean {
   if (p.length === 0 || p.length > REPORT_LEN) return false;
   const tailZero = (from: number) => {
     for (let i = from; i < p.length; i++) if (p[i] !== 0) return false;
@@ -114,6 +132,16 @@ export function allowed(p: ArrayLike<number>): boolean {
       return (p[1] === KV_UPTIME || p[1] === KV_LAYOUT_OPTIONS || p[1] === KV_FIRMWARE) && tailZero(2);
     case CMD.getBuffer:
       return p.length > 3 && p[3] >= 1 && p[3] <= BUF_CHUNK && tailZero(4);
+    case CMD.setKeycode:
+      return (
+        !!km &&
+        p.length >= 6 &&
+        p[1] < km.layers &&
+        p[2] < km.rows &&
+        p[3] < km.cols &&
+        km.layers <= 32 &&
+        tailZero(6)
+      );
     case CMD.customGet:
       return channelValueOk(p[1], p[2]) && tailZero(3);
     case CMD.customSet:
@@ -130,6 +158,11 @@ export const protocolPkt = () => [CMD.protocol];
 export const layerCountPkt = () => [CMD.layerCount];
 export const kbValuePkt = (id: number) => [CMD.getKbValue, id];
 export const getBufferPkt = (offset: number, size: number) => [CMD.getBuffer, (offset >> 8) & 0xff, offset & 0xff, size];
+export const setKeycodePkt = (layer: number, row: number, col: number, kc: number) =>
+  [CMD.setKeycode, layer & 0xff, row & 0xff, col & 0xff, (kc >> 8) & 0xff, kc & 0xff];
+/** Byte offset of one keycode in the dynamic keymap buffer (layer-major, 2 bytes big-endian). */
+export const keymapOffset = (layer: number, row: number, col: number, rows: number, cols: number) =>
+  ((layer * rows + row) * cols + col) * 2;
 export const customGetPkt = (ch: number, id: number) => [CMD.customGet, ch, id];
 export const customSetPkt = (ch: number, id: number, ...data: number[]) => [CMD.customSet, ch, id, ...data.map((b) => b & 0xff)];
 export const customSavePkt = (ch: number) => [CMD.customSave, ch];
@@ -461,6 +494,8 @@ export const GENERIC_CAPS: KeyCap[] = ANSI60.flatMap((row, y) => {
 class Link {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly listeners = new Set<(d: Uint8Array) => void>();
+  /** set once the board's layer count + matrix are known; enables keymap writes */
+  bounds: KeymapBounds | undefined;
   private readonly onReport = (e: HIDInputReportEvent) => {
     if (e.reportId !== REPORT_ID) return;
     const d = new Uint8Array(e.data.buffer.slice(e.data.byteOffset, e.data.byteOffset + e.data.byteLength));
@@ -487,7 +522,7 @@ class Link {
    * (command not handled by this firmware) or timeout.
    */
   xfer(p: number[], echo = p.length): Promise<Uint8Array> {
-    if (!allowed(p)) return Promise.reject(new Error(`refusing to send ${hexs(p.slice(0, 8))}`));
+    if (!allowed(p, this.bounds)) return Promise.reject(new Error(`refusing to send ${hexs(p.slice(0, 8))}`));
     const buf = new Uint8Array(REPORT_LEN);
     buf.set(p);
     const head = Array.from(buf.subarray(0, Math.max(1, echo)));
@@ -542,6 +577,8 @@ class Via implements Driver {
   private lastEffect: number | undefined;
   private caps: KeyCap[] = GENERIC_CAPS;
   private layoutSource = 'generic ANSI 60% (no VIA definition)';
+  /** full keymap as last read / written (only with a definition, so we know the matrix) */
+  private km: { rows: number; cols: number; caps: KeyCap[]; layers: number[][]; codes: KeycodeSet } | undefined;
 
   constructor(private readonly link: Link) {
     const d = link.dev;
@@ -619,21 +656,34 @@ class Via implements Driver {
     return Array.from(r.subarray(3, 3 + len));
   }
 
-  /** Layer-0 keycodes for `matrix` positions (one buffer read per 14 keycodes). */
-  private async keycodes(cols: number, matrix: [number, number][]): Promise<number[]> {
-    const want = matrix.map(([r, c]) => (r * cols + c) * 2);
-    const end = Math.max(0, ...want) + 2;
-    const bytes = new Uint8Array(end);
-    for (let off = 0; off < end; off += BUF_CHUNK) {
-      const size = Math.min(BUF_CHUNK, end - off);
+  /** `len` bytes of the dynamic keymap buffer from `start` (28 bytes per request). */
+  private async buffer(start: number, len: number): Promise<Uint8Array> {
+    const bytes = new Uint8Array(len);
+    for (let at = 0; at < len; at += BUF_CHUNK) {
+      const size = Math.min(BUF_CHUNK, len - at);
+      const off = start + at;
       const r = await this.link.xfer(getBufferPkt(off, size));
-      bytes.set(r.subarray(4, 4 + size), off);
+      bytes.set(r.subarray(4, 4 + size), at);
     }
-    return want.map((o) => (bytes[o] << 8) | bytes[o + 1]);
+    return bytes;
   }
 
-  private async buildLayout(def: ViaDefinition | null): Promise<void> {
+  /** Every layer's keycodes for `matrix` positions (one buffer read per 14 keycodes). */
+  private async keycodes(rows: number, cols: number, layers: number, matrix: [number, number][]): Promise<number[][]> {
+    const perLayer = rows * cols * 2;
+    const bytes = await this.buffer(0, perLayer * layers);
+    return Array.from({ length: layers }, (_, l) =>
+      matrix.map(([r, c]) => {
+        const o = keymapOffset(l, r, c, rows, cols);
+        return (bytes[o] << 8) | bytes[o + 1];
+      }),
+    );
+  }
+
+  private async buildLayout(def: ViaDefinition | null, layers: number): Promise<void> {
     this.knob = undefined;
+    this.km = undefined;
+    this.link.bounds = undefined;
     if (!def) {
       this.caps = GENERIC_CAPS;
       this.layoutSource = 'generic ANSI 60% (no VIA definition)';
@@ -648,13 +698,22 @@ class Via implements Driver {
         options = [];
       }
     }
-    const { caps, matrix, knob } = toCaps(selectedKeys(def, options), def.matrix.cols);
+    const { rows, cols } = def.matrix;
+    const { caps, matrix, knob } = toCaps(selectedKeys(def, options), cols);
     this.knob = knob;
+    const fits = rows > 0 && cols > 0 && rows <= 255 && cols <= 255 && rows * cols * 2 * Math.max(1, layers) <= MAX_KEYMAP_BYTES;
+    const inMatrix = matrix.every(([r, c]) => r < rows && c < cols);
     try {
-      const kcs = await this.keycodes(def.matrix.cols, matrix);
-      caps.forEach((c, i) => (c.label = keycodeLabel(kcs[i])));
+      if (!fits || !inMatrix) throw new Error('matrix out of range');
+      const kcs = await this.keycodes(rows, cols, Math.max(1, layers), matrix);
+      caps.forEach((c, i) => (c.label = keycodeLabel(kcs[0][i])));
+      if (caps.length && layers > 0) {
+        const codes: KeycodeSet = this.protocol >= PROTOCOL_KEYCODES_V2 ? 'qmk-v2' : 'qmk-v1';
+        this.km = { rows, cols, caps: caps.map((c) => ({ ...c })), layers: kcs, codes };
+        this.link.bounds = { layers, rows, cols };
+      }
     } catch {
-      // legends stay blank
+      // legends stay blank, no remapping
     }
     this.caps = caps;
     this.layoutSource = 'VIA definition (usevia.app)';
@@ -713,6 +772,9 @@ class Via implements Driver {
         layers = 4;
       }
     }
+    // QMK's layer keys reach 32 layers at most. Before protocol 9 the layer count is a guess, so
+    // those boards only get legends (layer 0), no remapping.
+    const keymapLayers = this.protocol >= PROTOCOL_BETA ? clamp(layers, 1, 32) : 0;
     out.push(text('layers', 'Keymap layers', String(layers)));
     try {
       const s = Math.floor(be32(await this.kbValue(KV_UPTIME, 4)) / 1000);
@@ -724,8 +786,18 @@ class Via implements Driver {
     }
     if (def?.matrix) out.push(text('matrix', 'Switch matrix', `${def.matrix.rows} x ${def.matrix.cols}`));
 
-    await this.buildLayout(def);
+    await this.buildLayout(def, keymapLayers);
     out.push(text('layout_source', 'Layout', this.layoutSource));
+    if (this.km) {
+      const k = this.km;
+      out.push({
+        key: 'keymap',
+        label: 'Keymap',
+        group: 'Keys',
+        value: { kind: 'keymap', keys: k.caps.map((c) => ({ ...c })), layers: k.layers.map((l) => l.slice()), codes: k.codes },
+        hint: 'Changes are stored in the keyboard straight away.',
+      });
+    }
 
     // --- lighting (primary channel)
     this.light = undefined;
@@ -792,9 +864,42 @@ class Via implements Driver {
     await this.writeChecked(V_COLOR, [h, s], (g) => near(g[0], h) && Math.abs(g[1] - s) <= 1, 'colour');
   }
 
+  /** Write the keys that differ from what the board holds, one set-keycode each, reading each back. */
+  private async writeKeymap(v: Extract<Value, { kind: 'keymap' }>): Promise<void> {
+    const k = this.km;
+    if (!k) throw new Error('press Re-read first');
+    if (v.codes !== k.codes || v.layers.length !== k.layers.length || v.keys.length !== k.caps.length) {
+      throw new Error("keymap doesn't match this keyboard, press Re-read");
+    }
+    v.keys.forEach((c, i) => {
+      if (c.index !== k.caps[i].index) throw new Error("keymap doesn't match this keyboard, press Re-read");
+    });
+    for (let l = 0; l < k.layers.length; l++) {
+      const want = v.layers[l];
+      if (want.length !== k.caps.length) throw new Error("keymap doesn't match this keyboard, press Re-read");
+      for (let i = 0; i < want.length; i++) {
+        const kc = want[i];
+        if (kc === k.layers[l][i]) continue;
+        if (!Number.isInteger(kc) || kc < 0 || kc > 0xffff) throw new Error(`bad keycode ${kc}`);
+        const idx = k.caps[i].index;
+        const row = Math.floor(idx / k.cols);
+        const col = idx % k.cols;
+        await this.link.xfer(setKeycodePkt(l, row, col, kc), 6);
+        const back = await this.buffer(keymapOffset(l, row, col, k.rows, k.cols), 2);
+        const got = (back[0] << 8) | back[1];
+        k.layers[l][i] = got;
+        if (l === 0) this.caps = this.caps.map((c) => (c.index === idx ? { ...c, label: keycodeLabel(got) } : c));
+        if (got !== kc) {
+          throw new Error(`keyboard didn't take the key change (layer ${l}, reads back 0x${got.toString(16).padStart(4, '0')})`);
+        }
+      }
+    }
+  }
+
   private async writeInner(s: Setting): Promise<void> {
     const l = this.light;
     const v = s.value;
+    if (s.key === 'keymap' && v.kind === 'keymap') return this.writeKeymap(v);
     if (!l) throw new Error(`${s.key} can't be changed`);
     switch (`${s.key}:${v.kind}`) {
       case 'light_mode:choice': {

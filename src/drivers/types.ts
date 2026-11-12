@@ -51,6 +51,11 @@ export type Value =
       layers: number[][];
       /** which keycode numbering `layers` uses (src/lib/keycodes.ts understands these) */
       codes: KeycodeSet;
+      /**
+       * optional, per layer: positions (in `keys`) the device won't let you change on that layer
+       * (e.g. the Fn key, or Fn-layer system keys). The driver refuses changes to them.
+       */
+      locked?: number[][];
     }
   | {
       /**
@@ -78,7 +83,60 @@ export type Value =
       slotNames?: string[];
       macros: MacroStep[][];
     }
-  | Socd;
+  | Socd
+  | AdvancedKeys;
+
+/**
+ * Advanced key functions of analog (magnetic / Hall-effect) keyboards. Generic: any brand with
+ * DKS / Mod-Tap / Toggle keys can use it. write() gets the whole value; drivers rewrite the keys
+ * whose entry changed (removed, added, or different) and read them back.
+ *
+ * - `entries`: at most one per key (`key` = position in `keys`). Keys without an entry are plain keys.
+ * - Actions (`hold`, `tap`, `kc`, DKS `kc`) are basic HID keyboard usages, the same numbers as
+ *   MacroStep.kc (0x04 A … 0xE7 right Win); 0 = nothing.
+ * - `mt` (Mod-Tap): held longer than `delay` ms sends `hold`, a shorter tap sends `tap`.
+ * - `tgl` (Toggle): a tap latches `kc` on / off; holding longer than `delay` ms works like a normal key.
+ * - `dks` (Dynamic Keystroke): up to `dks.actions` keys, each with a bit mask of `dks.points` points
+ *   along the stroke. Bit 2k is stage k (0 press start, 1 bottom out, 2 release from bottom,
+ *   3 full release) and bit 2k+1 means "kept held from stage k to stage k+1". A key with mask 0 is unused.
+ *
+ * Example (A: tap A / hold Left Ctrl after 200 ms; D: DKS sending D through the stroke, then A on
+ * release from bottom):
+ *   { kind: 'advancedKeys', keys, modes: ['dks', 'mt', 'tgl'], mt: { min: 100, max: 1000, step: 10, default: 200 },
+ *     tgl: { min: 200, max: 1000, step: 10, default: 200 }, dks: { actions: 4, points: 7 },
+ *     entries: [ { key: posA, mode: 'mt', hold: 0xe0, tap: 0x04, delay: 200 },
+ *                { key: posD, mode: 'dks', actions: [{ kc: 0x07, mask: 0x0f }, { kc: 0x04, mask: 0x10 }] } ] }
+ */
+export interface AdvancedKeys {
+  kind: 'advancedKeys';
+  /** the board picture; entry keys are positions in this array */
+  keys: KeyCap[];
+  /** the functions this device has */
+  modes: AdvancedMode[];
+  /** positions that can't get an advanced function (e.g. knob, keys in SOCD) */
+  unavailable?: number[];
+  /** Mod-Tap hold time (ms), when 'mt' is in modes */
+  mt?: DelayRange;
+  /** Toggle hold time (ms), when 'tgl' is in modes */
+  tgl?: DelayRange;
+  /** DKS layout, when 'dks' is in modes */
+  dks?: { actions: number; points: number };
+  entries: AdvancedKey[];
+}
+
+export type AdvancedMode = 'dks' | 'mt' | 'tgl';
+
+export interface DelayRange {
+  min: number;
+  max: number;
+  step: number;
+  default: number;
+}
+
+export type AdvancedKey =
+  | { key: number; mode: 'mt'; hold: number; tap: number; delay: number }
+  | { key: number; mode: 'tgl'; kc: number; delay: number }
+  | { key: number; mode: 'dks'; actions: { kc: number; mask: number }[] };
 
 /**
  * SOCD / "Snap Tap": when two opposite keys (A/D) are held together, decide which one counts.
@@ -138,9 +196,10 @@ export type MacroStep =
 
 /**
  * Macro storage formats: QMK dynamic macros with (VIA protocol 11+) and without delays;
- * WLMouse / CompX-A event records (page 0x04); Pulsar / CompX-B 5-byte event records (0x300).
+ * WLMouse / CompX-A event records (page 0x04); Pulsar / CompX-B 5-byte event records (0x300);
+ * DAREU TG firmware event records (class 6 macro memory).
  */
-export type MacroFormat = 'qmk' | 'qmk-legacy' | 'wlmouse' | 'pulsar';
+export type MacroFormat = 'qmk' | 'qmk-legacy' | 'wlmouse' | 'pulsar' | 'dareu';
 
 /** Keycode numberings: QMK keycodes v2 (QMK 0.19+, VIA protocol 12+) and the older v1. */
 /** QMK keycode numbering: v1 = VIA protocol <= 10, v11 = protocol 11 (v2 layout, macros at 0x7702), v2 = protocol 12+ */

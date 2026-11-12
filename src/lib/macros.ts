@@ -29,8 +29,11 @@ const BY_ACTION: Record<number, 'tap' | 'down' | 'up'> = { [SS_TAP]: 'tap', [SS_
 /** Characters a text step may hold (typed with a US layout): printable ASCII, Tab, Enter. */
 export const textCharOk = (c: number) => c === 0x09 || c === 0x0a || (c >= 0x20 && c <= 0x7e);
 
-/** Mouse macro formats (WLMouse / Pulsar): keys, mouse buttons, wheel, delays; no text. */
-export const isMouseFormat = (f: MacroFormat | undefined) => f === 'wlmouse' || f === 'pulsar';
+/**
+ * Event-record formats (WLMouse / Pulsar mice, DAREU keyboards): keys, mouse buttons, wheel,
+ * 16-bit delays; no text.
+ */
+export const isMouseFormat = (f: MacroFormat | undefined) => f === 'wlmouse' || f === 'pulsar' || f === 'dareu';
 /** Longest delay a mouse macro step can hold (both store 16-bit milliseconds). */
 export const MOUSE_MAX_DELAY = 65535;
 export const MOUSE_BUTTONS = ['Left', 'Right', 'Middle', 'Back', 'Forward'];
@@ -62,7 +65,7 @@ export function stepProblem(s: MacroStep, format: MacroFormat): string | undefin
       return Number.isInteger(s.ms) && s.ms >= 0 && s.ms <= max ? undefined : `delay must be 0-${max} ms`;
     }
     case 'text':
-      if (mouse) return "this mouse can't type text: add the keys instead";
+      if (mouse) return `this ${format === 'dareu' ? 'keyboard' : 'mouse'} can't type text: add the keys instead`;
       for (let i = 0; i < s.text.length; i++) {
         if (!textCharOk(s.text.charCodeAt(i))) return `“${s.text[i]}” can't be typed by a macro (plain ASCII only)`;
       }
@@ -264,6 +267,64 @@ function decodePulsar(b: ArrayLike<number>): MacroStep[] {
   return out;
 }
 
+/**
+ * DAREU TG firmware macro memory (driver.dareu.com allinone, macro.js MACRO_EVENT_TYPE and
+ * macro.html MacroContent2MacroData): records, no header and no end byte (the length is stored
+ * separately); multi-byte values big-endian.
+ *   04 kc / 05 kc        key press / release (HID usage; modifiers are E0-E7)
+ *   01 mask              mouse buttons now held (1 L, 2 R, 4 M, 8 back, 0x10 forward), absolute
+ *   02 01 / 02 FF        wheel up / down
+ *   0A ms | 0B msHi msLo | 0C 3-byte ms   delay (the vendor picks the smallest that fits)
+ * The firmware also knows cursor (03), power (06/07), media (08/09), random delay (0D),
+ * digitizer (0E) and button make/break (0F/10); the vendor editor never writes them and we stop
+ * reading a macro at one of those (like at 00 / FE).
+ */
+function encodeDareu(steps: MacroStep[]): number[] {
+  const out: number[] = [];
+  let held = 0;
+  for (const s of steps) {
+    if (s.t === 'delay') {
+      if (s.ms <= 0xff) out.push(0x0a, s.ms);
+      else out.push(0x0b, s.ms >> 8, s.ms & 0xff);
+    } else if (s.t === 'wheel') out.push(0x02, s.dir === 1 ? 0x01 : 0xff);
+    else {
+      for (const e of pressEvents(s)) {
+        if (e.kind === 'key') out.push(e.down ? 0x04 : 0x05, e.kc);
+        else {
+          const bit = 1 << (e.btn - 1);
+          held = e.down ? held | bit : held & ~bit;
+          out.push(0x01, held);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function decodeDareu(b: ArrayLike<number>): MacroStep[] {
+  const out: MacroStep[] = [];
+  let held = 0;
+  let i = 0;
+  const LEN: Record<number, number> = { 0x01: 2, 0x02: 2, 0x04: 2, 0x05: 2, 0x0a: 2, 0x0b: 3, 0x0c: 4 };
+  while (i < b.length) {
+    const c = b[i];
+    const n = LEN[c];
+    if (!n || i + n > b.length) break;
+    const d = Array.from({ length: n - 1 }, (_, k) => b[i + 1 + k]);
+    i += n;
+    if (c === 0x04) out.push({ t: 'down', kc: d[0] });
+    else if (c === 0x05) out.push({ t: 'up', kc: d[0] });
+    else if (c === 0x02) out.push({ t: 'wheel', dir: d[0] < 0x80 ? 1 : -1 });
+    else if (c === 0x01) {
+      const now = d[0] & 0x1f;
+      for (let k = 0; k < 5; k++) if (held & ~now & (1 << k)) out.push({ t: 'mouse', a: 'up', btn: k + 1 });
+      for (let k = 0; k < 5; k++) if (now & ~held & (1 << k)) out.push({ t: 'mouse', a: 'down', btn: k + 1 });
+      held = now;
+    } else out.push({ t: 'delay', ms: Math.min(MOUSE_MAX_DELAY, d.reduce((a, x) => a * 256 + x, 0)) });
+  }
+  return mergeTaps(out);
+}
+
 /** Bytes of one macro (without its NUL). Throws on steps the format can't hold. */
 export function encodeMacro(steps: MacroStep[], format: MacroFormat): number[] {
   if (isMouseFormat(format)) {
@@ -271,7 +332,7 @@ export function encodeMacro(steps: MacroStep[], format: MacroFormat): number[] {
       const bad = stepProblem(s, format);
       if (bad) throw new Error(bad);
     }
-    return format === 'wlmouse' ? encodeWl(steps) : encodePulsar(steps);
+    return format === 'wlmouse' ? encodeWl(steps) : format === 'dareu' ? encodeDareu(steps) : encodePulsar(steps);
   }
   const out: number[] = [];
   const pre = format === 'qmk' ? [SS_PREFIX] : [];
@@ -289,6 +350,7 @@ export function encodeMacro(steps: MacroStep[], format: MacroFormat): number[] {
 export function decodeMacro(b: ArrayLike<number>, format: MacroFormat): MacroStep[] {
   if (format === 'wlmouse') return decodeWl(b);
   if (format === 'pulsar') return decodePulsar(b);
+  if (format === 'dareu') return decodeDareu(b);
   const out: MacroStep[] = [];
   const text = (c: number) => {
     const last = out[out.length - 1];

@@ -3,6 +3,7 @@ import { Keyboard, Mouse, Plus, RefreshCw } from 'lucide-react'
 import { exitDemo, pendingChanges, unitNumber, type DeviceState } from '#/devices'
 import { slug, useDevices } from '#/lib/device-context'
 import { cn } from '#/lib/utils'
+import { usePhoto } from './photo'
 import { Segmented, type Choice } from './kit'
 
 export function Backdrop() {
@@ -20,7 +21,7 @@ export const textOf = (d: DeviceState | undefined, key: string) => {
 }
 
 function DeviceTab({ d, active }: { d: DeviceState; active: boolean }) {
-  const img = d.driver.image()
+  const img = usePhoto(d.driver.image())
   const batt = textOf(d, 'battery')
   const sub = d.busy && !d.read ? 'Reading…' : d.error ? 'Needs attention' : d.driver.kind === 'mouse' ? `Wireless${batt ? ' · ' + batt.replace(/ .*/, '') : ''}` : 'Wired'
   return (
@@ -31,7 +32,7 @@ function DeviceTab({ d, active }: { d: DeviceState; active: boolean }) {
       aria-current={active ? 'page' : undefined}
     >
       <span className="grid size-[30px] place-items-center overflow-hidden rounded-full bg-black/40">
-        {img ? <img src={img} alt="" className="h-[28px] w-auto object-contain" /> : d.driver.kind === 'mouse' ? <Mouse className="size-4 opacity-70" /> : <Keyboard className="size-4 opacity-70" />}
+        {img.src ? <img src={img.src} onError={img.onError} alt="" className="h-[28px] w-auto object-contain" /> : d.driver.kind === 'mouse' ? <Mouse className="size-4 opacity-70" /> : <Keyboard className="size-4 opacity-70" />}
       </span>
       <span className="min-w-0 leading-tight" title={`${d.driver.brand()} ${d.driver.model()}`}>
         <span className={cn('display block max-w-[118px] truncate text-[10.5px] tracking-wide', active ? 'text-[var(--text)]' : 'text-[var(--text-2)]')}>{d.driver.model()}{unitNumber(d.id) > 1 ? ` #${unitNumber(d.id)}` : ''}</span>

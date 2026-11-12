@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { usePhoto } from './photo'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { getSkin, setSkin } from '#/drivers/wlmouse'
 import { Battery, Crosshair, Gauge, Info, Monitor, MousePointerClick, SlidersHorizontal, Zap } from 'lucide-react'
@@ -95,6 +96,14 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
   if (isLamzu && image) image = image.replace(/Device_\d+\.png/, `Device_${getSkin(dev.id)}.png`)
   const skins = isLamzu ? 6 : 12
   const skinN = Number((/Colors\/(\d+)\.png/.exec(image ?? '') ?? /Device_(\d+)\.png/.exec(image ?? ''))?.[1] ?? 1)
+  const photo = usePhoto(image)
+  // a colour that won't load (or doesn't exist for this model): go back to the first one, then to the drawing
+  useEffect(() => {
+    if (image && !photo.src && (isWl || isLamzu) && skinN !== 1) {
+      setSkin(dev.id, 1)
+      setSkinTick((x) => x + 1)
+    }
+  }, [image, photo.src, isWl, isLamzu, skinN, dev.id])
   const changeSkin = (d: number) => {
     const n = ((skinN - 1 + d + skins) % skins) + 1
     setSkin(dev.id, n)
@@ -282,16 +291,16 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
             <Receiver picture={screenEd.shown} round={dev.driver.screen.round} stored={screenEd.stored} />
           ) : (
           <div className={cn('relative -mt-[60px]', !pickable && 'float')} style={{ height: pickable ? 'min(58vh, 540px)' : 'min(64vh, 580px)', aspectRatio: '300 / 580' }}>
-            {image && /bbb\.pulsar\.gg/.test(image) ? (
+            {photo.src && /bbb\.pulsar\.gg/.test(photo.src) ? (
               // Pulsar's photos put the mouse on a big white X logo: show only the mouse body
               <div className="size-full drop-shadow-[0_40px_40px_rgb(0_0_0/0.8)]">
-                <img src={image} alt={`${dev.driver.brand()} ${dev.driver.model()}`}
+                <img src={photo.src} onError={photo.onError} alt={`${dev.driver.brand()} ${dev.driver.model()}`}
                   className="absolute top-1/2 left-1/2 aspect-square w-[204%] max-w-none -translate-x-1/2 -translate-y-1/2"
                   style={{ clipPath: 'inset(5.4% 25.8% 4.8% 26.9% round 23% / 21%)' }} />
               </div>
-            ) : image ? (
-              <img src={image} alt={`${dev.driver.brand()} ${dev.driver.model()}`} className={cn('size-full object-contain drop-shadow-[0_40px_40px_rgb(0_0_0/0.8)]', !tall && 'scale-[1.7]')}
-                onError={() => { if (isLamzu && skinN !== 1) { setSkin(dev.id, 1); setSkinTick((x) => x + 1) } }} />
+            ) : photo.src ? (
+              <img src={photo.src} alt={`${dev.driver.brand()} ${dev.driver.model()}`} className={cn('size-full object-contain drop-shadow-[0_40px_40px_rgb(0_0_0/0.8)]', !tall && 'scale-[1.7]')}
+                onError={photo.onError} />
             ) : (
               <MouseArt label={`${dev.driver.brand()} ${dev.driver.model()}`} />
             )}
@@ -321,7 +330,7 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
                 </div>
               )
             })}
-            {(isWl || isLamzu) && (
+            {(isWl || isLamzu) && photo.src && (
               <div className="absolute -bottom-12 left-1/2 flex -translate-x-1/2 items-center gap-1 text-[11px] whitespace-nowrap text-[var(--text-3)]">
                 <button type="button" data-press className="grid size-6 place-items-center rounded-full hover:text-[var(--text)]" onClick={() => changeSkin(-1)} aria-label="Previous photo colour"><ChevronLeft className="size-3.5" /></button>
                 Photo colour

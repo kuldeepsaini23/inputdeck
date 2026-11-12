@@ -1,4 +1,5 @@
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useRef, useState } from 'react'
+import { useNavigate } from '@tanstack/react-router'
 import { isDemo, useDeviceManager, webHidSupported } from '#/devices'
 import { ConnectSheet } from '#/components/ConnectSheet'
 
@@ -18,6 +19,25 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     setDemo(isDemo())
   }, [])
   // explain which device to pick, then open the browser's own device list
+  // A device that wasn't here before (picked in the browser list or plugged in) opens straight away.
+  // Devices found by the first scan, and ones that only reconnect, don't move the page.
+  const navigate = useNavigate()
+  const seen = useRef<Set<string> | null>(null)
+  const sawScan = useRef(false)
+  useEffect(() => {
+    if (mgr.scanning) {
+      sawScan.current = true
+      return
+    }
+    const ids = mgr.devices.map((d) => d.id)
+    if (!seen.current) {
+      if (sawScan.current) seen.current = new Set(ids)
+      return
+    }
+    const added = ids.filter((id) => !seen.current!.has(id))
+    for (const id of added) seen.current.add(id)
+    if (added.length) void navigate({ to: '/d/$id', params: { id: slug(added[added.length - 1]) } })
+  }, [mgr.devices, mgr.scanning, navigate])
   const requestConnect = () => (isDemo() ? void mgr.connect() : setSheet(true))
   return (
     <Ctx.Provider value={{ ...mgr, supported, demo, requestConnect }}>

@@ -10,7 +10,8 @@ import type { KeyCap, LiveLight } from '#/drivers/types'
 import { cn } from '#/lib/utils'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '#/components/ui/dialog'
 import { useDevices } from '#/lib/device-context'
-import { Card } from './kit'
+import type { LivePaint } from '#/lib/live-paint'
+import { Card, Toggle } from './kit'
 import { KeyboardView, type KeyLook } from './KeyboardView'
 
 export interface ProbeCell {
@@ -94,11 +95,25 @@ export function buildLiveReport(dev: DeviceState, l: Grid, keys: KeyCap[], probe
   return lines.join('\n')
 }
 
-export function LiveLightCard({ dev }: { dev: DeviceState }) {
+export function LiveLightCard({ dev, lp }: { dev: DeviceState; lp: LivePaint }) {
   const l = dev.driver.liveLight
   const canWrite = useDevices().canWrite(dev.id)
   const [open, setOpen] = useState(false)
   if (!l) return null
+  if (lp.usable) {
+    return (
+      <Card title="Per-key lighting (live)" className="col-span-3"
+        right={<Toggle label="Per-key lighting" checked={lp.on} disabled={!canWrite} onChange={lp.setOn} />}>
+        <p className="hint m-0">
+          {lp.on
+            ? 'On: select keys on the board and pick a colour (nothing selected = all keys). The keyboard shows these colours while InputDeck is open; your design is remembered in this browser and comes back next time.'
+            : 'Paint every key its own colour. The keyboard can’t store per-key colours, so they show while InputDeck is open (and until the keyboard is unplugged). Your normal lighting comes back when you switch this off.'}
+          {!canWrite && ' Press "Allow changes" first.'}
+        </p>
+        {lp.err && <p className="hint mt-2 mb-0 text-[var(--err)]">{lp.err}</p>}
+      </Card>
+    )
+  }
   return (
     <Card title="Per-key lighting (live)" className="col-span-3"
       right={<span className="eyebrow rounded-full border border-white/20 px-2 py-0.5 !text-[8px]">{l.experimental ? 'Needs a test' : 'Live'}</span>}>

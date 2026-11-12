@@ -593,6 +593,12 @@ const LED_KEYS: Record<number, { rows: number; cols: number; ids: readonly numbe
 };
 
 /** cell -> layout position (LiveLight.map), when the firmware table for this product and grid is known */
+/**
+ * Boards (pid -> firmware) whose live lighting a real-board guided test confirmed:
+ * A68 0.4.6 on 2026-11-12 (Q red / G green / M blue and the white top row looked exactly as sent).
+ */
+export const LIVE_CONFIRMED: Record<number, string[]> = { 0x0175: ['0.4.6'] };
+
 export function liveMapFor(pid: number, rows: number, cols: number, caps: KeyCap[]): (number | undefined)[] | undefined {
   const t = LED_KEYS[pid];
   if (!t || t.rows !== rows || t.cols !== cols) return undefined;
@@ -1031,7 +1037,6 @@ const sameLight = (a: Light, b: Light) =>
  * remembered effect (and brightness, if it changed) back, each read back.
  */
 class DareuLive implements LiveLight {
-  readonly experimental = true;
   /** ms between frame starts: never faster than the firmware's fps */
   readonly interval: number;
   private on = false;
@@ -1055,6 +1060,8 @@ class DareuLive implements LiveLight {
     private readonly profile: () => number,
     /** cell -> layout position from the firmware table, when known */
     readonly map?: (number | undefined)[],
+    /** true until a real board confirmed the grid and colour order (see LIVE_CONFIRMED) */
+    readonly experimental = true,
   ) {
     this.interval = Math.ceil(1000 / fps);
   }
@@ -1750,7 +1757,8 @@ class Dareu implements Driver {
       this.light = l;
       if (stream && !this.live?.active) {
         const map = liveMapFor(this.product.pid, stream.rows, stream.cols, this.caps);
-        this.live = new DareuLive(this.link, region, stream.rows, stream.cols, stream.fps, () => this.profile, map);
+        const confirmed = !!map && (LIVE_CONFIRMED[this.product.pid] ?? []).includes(this.fw ?? '');
+        this.live = new DareuLive(this.link, region, stream.rows, stream.cols, stream.fps, () => this.profile, map, !confirmed);
       }
       if (l.effect !== 0) this.lastEffect = l.effect;
       if (l.colors.length) this.lastColor = l.colors[0];

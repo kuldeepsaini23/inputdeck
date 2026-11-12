@@ -61,8 +61,12 @@ describe('live lighting: availability', () => {
     expect(d0.liveLight).toBeUndefined();
     const [, d, live] = await connect();
     expect(d.liveLight).toBe(live);
-    expect(live).toMatchObject({ rows: 5, cols: 15, experimental: true, active: false });
+    // A68 0.4.6 was confirmed on a real board (guided test, 2026-11-12)
+    expect(live).toMatchObject({ rows: 5, cols: 15, experimental: false, active: false });
     expect(live.map).toHaveLength(N);
+    // any other firmware build stays experimental until it is tested too
+    const [, , newer] = await connect({ stream: true }, (x) => { x.fw = [0, 4, 7]; });
+    expect(newer.experimental).toBe(true);
     const [, , other] = await connect({ stream: true }, (x) => {
       x.rows = 6;
       x.cols = 21;

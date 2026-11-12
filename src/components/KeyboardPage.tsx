@@ -9,6 +9,8 @@ import { KeyboardView, type KeyLook } from './KeyboardView'
 import { KeyCard, KeyPicker, effective, type Keymap } from './KeymapCards'
 import { MacroEditor, MacroList, UsageBar } from './MacroCards'
 import { LiveLightCard } from './LiveLightTest'
+import { useLivePaint } from '#/lib/live-paint'
+import { useDevices } from '#/lib/device-context'
 import { AdvancedCards, MODE_COLOR, MODE_NAME, advancedSummary, entryAt } from './AdvancedCards'
 import { SocdCard, socdColor, socdEntryLabel, socdEntryOf, socdPickKey, type SocdPick } from './SocdCards'
 import { BigValue, Card, ChoiceSelect, Range, Segmented, SWATCHES, Toggle, hex, type Choice } from './kit'
@@ -121,6 +123,8 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
   const brand = dev.driver.brand().toUpperCase()
   const pkT = get('per_key_trigger')?.value as PerKeyTrigger | undefined
   const pkC = get('per_key_color')?.value as PerKeyColor | undefined
+  // live per-key colours (boards that stream them; the design lives in this browser)
+  const lp = useLivePaint(dev, useDevices().canWrite(dev.id))
   const keys: KeyCap[] | undefined = pkT?.keys ?? pkC?.keys ?? dev.driver.layout?.()
 
   // ---- key remapping (drivers with a keymap setting)
@@ -254,6 +258,9 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     interactive = true
     // Rapid Trigger keys glow; the more sensitive, the brighter
     looks = pkT.rapid.map((on, i) => (on ? { tint: 0.35 + 0.65 * (1 - (pkT.sens[i] - pkT.sensMin) / (pkT.sensMax - pkT.sensMin || 1)), rt: true, title: `${pkT.keys[i]?.label}: Rapid Trigger ±${pkT.sens[i].toFixed(2)} mm` } : { dim: true }))
+  } else if (keys && active === 'Lighting' && lp.on) {
+    interactive = true
+    looks = keys.map((_, i) => ({ color: hex(lp.colors[i] ?? 0) }))
   } else if (keys && active === 'Lighting' && pkC) {
     interactive = true
     const on = (get('light_power')?.value as Extract<Value, { kind: 'toggle' }> | undefined)?.on ?? true
@@ -555,6 +562,45 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     return [h, c]
   }
 
+  /** Lighting tab while live per-key colours are on: paint keys, everything else is paused. */
+  function liveLighting(): [React.ReactNode, React.ReactNode] {
+    const idx = selIdx.length ? selIdx : lp.colors.map((_, i) => i)
+    const first = lp.colors[idx[0]] ?? 0
+    const keyColor = idx.every((i) => lp.colors[i] === first) ? first : null
+    const scope = selIdx.length ? `${selIdx.length} key${selIdx.length === 1 ? '' : 's'}` : 'all keys'
+    const used = new Set(lp.colors).size
+    const h = <Hero brand={brand} label="Per-key lighting · live" value={used} unit={used === 1 ? 'colour' : 'colours'} size={64}
+      sub="Select keys on the board, then pick a colour. Nothing selected paints every key." />
+    const c = (
+      <>
+        <Card title={`Colour · ${scope}`}>
+          <div className="flex items-center gap-4">
+            <label className="relative grid size-[112px] shrink-0 cursor-pointer place-items-center rounded-full bg-[conic-gradient(red,yellow,lime,cyan,blue,magenta,red)] shadow-[0_4px_10px_rgb(0_0_0/0.5)]" title="Pick any colour">
+              <span className="grid size-[80px] place-items-center rounded-full bg-[#141416]">
+                <span className="size-[42px] rounded-full" style={{ background: keyColor === null ? '#333' : hex(keyColor), boxShadow: keyColor === null ? undefined : `0 0 14px ${hex(keyColor)}` }} />
+              </span>
+              <input type="color" className="absolute inset-0 cursor-pointer opacity-0" aria-label="Pick any colour" value={keyColor === null ? '#ffffff' : hex(keyColor).toLowerCase()} onChange={(e) => lp.paint(selIdx, parseInt(e.target.value.slice(1), 16))} />
+            </label>
+            <div className="min-w-0">
+              <div className="display text-[12px] font-semibold">{keyColor === null ? 'Mixed' : hex(keyColor)}</div>
+              <div className="mt-3 grid w-[78px] grid-cols-3 gap-2">
+                {SWATCHES.slice(0, 9).map((sw) => (
+                  <button key={sw} type="button" className="swatch !size-[18px]" style={{ background: hex(sw) }} aria-label={`Paint ${scope} ${hex(sw)}`} aria-pressed={keyColor === sw} onClick={() => lp.paint(selIdx, sw)} />
+                ))}
+              </div>
+            </div>
+          </div>
+          <button type="button" className="chip mt-4 !text-[11px]" onClick={() => lp.paint(selIdx, 0)}>Turn {scope} off</button>
+        </Card>
+        <Card title="Effects paused" className="col-span-2">
+          <p className="hint m-0">While per-key colours are on, the keyboard shows only these colours: effects, colour and brightness changes wait until you switch per-key lighting off below. Brightness set on the keyboard still dims them.</p>
+        </Card>
+        <LiveLightCard dev={dev} lp={lp} />
+      </>
+    )
+    return [h, c]
+  }
+
   function lighting(): [React.ReactNode, React.ReactNode] {
     const mode = get('light_mode')
     const power = get('light_power')?.value as Extract<Value, { kind: 'toggle' }> | undefined
@@ -562,6 +608,7 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     const speed = get('light_speed')?.value as Num | undefined
     const color = get('light_color')?.value as Extract<Value, { kind: 'color' }> | undefined
     const rainbow = get('light_rainbow')?.value as Extract<Value, { kind: 'toggle' }> | undefined
+    if (lp.on) return liveLighting()
     const perKey = !!pkC && selIdx.length > 0
     const first = selIdx[0]
     const keyColor = perKey ? (selIdx.every((i) => pkC!.colors[i] === pkC!.colors[first]) ? pkC!.colors[first] : null) : color?.rgb ?? null
@@ -612,7 +659,7 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
           {bri && <Level label="Brightness" v={bri} onChange={(n) => onEdit('light_bri', { ...bri, current: n })} />}
           {speed && <Level label="Speed" v={speed} onChange={(n) => onEdit('light_speed', { ...speed, current: n })} />}
         </Card>
-        <LiveLightCard dev={dev} />
+        <LiveLightCard dev={dev} lp={lp} />
         {/* extra light zones (e.g. Lofree Hyzen: bottom strip and receiver) get a card each */}
         {[['strip_', 'Bottom light strip'], ['dongle_', 'Receiver light']].map(([pre, title]) => {
           const zone = extras('Lighting').filter((x) => x.key.startsWith(pre))

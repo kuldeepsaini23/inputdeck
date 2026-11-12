@@ -122,7 +122,7 @@ export function KeyboardView({ keys, looks, selected, onSelect, interactive, kno
           if (look.color) {
             style.background = `linear-gradient(180deg, ${look.color}, color-mix(in srgb, ${look.color} 62%, #000))`
             style.boxShadow = `inset 0 -5px 3px rgb(0 0 0 / 0.45), inset 0 1px 0 rgb(255 255 255 / 0.25), 0 1.5px 1px rgb(0 0 0 / 0.9), 0 2px 12px color-mix(in srgb, ${look.color} 55%, transparent)`
-            style.color = '#fff'
+            style.color = lightColour(look.color) ? '#111' : '#fff'
           } else if (look.tint !== undefined) {
             const a = (0.04 + 0.4 * look.tint).toFixed(3)
             style.background = `linear-gradient(180deg, rgb(201 206 214 / ${a}), rgb(201 206 214 / ${(+a * 0.5).toFixed(3)})), linear-gradient(180deg, #26262b, #161619)`
@@ -152,4 +152,13 @@ export function KeyboardView({ keys, looks, selected, onSelect, interactive, kno
       </div>
     </div>
   )
+}
+
+/** true for bright keycap colours (white, yellow, cyan…) that need a dark legend */
+export function lightColour(css: string): boolean {
+  const m = /^#?([0-9a-f]{6})$/i.exec(css.trim())
+  if (!m) return false
+  const n = parseInt(m[1], 16)
+  const [r, g, b] = [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]
+  return 0.299 * r + 0.587 * g + 0.114 * b > 170
 }

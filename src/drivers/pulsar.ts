@@ -313,7 +313,24 @@ const PULSAR_NO_PHOTO = new Set([28, 30, 31, 32, 33, 35, 108, 111, 113, 114, 115
 /** "By You XS-1" builds are customised shells of a stock model: show that model's photo (mid -> photo mid) */
 const PULSAR_PHOTO_OF: Record<number, number> = { 28: 1, 30: 29, 33: 17 };
 const PULSAR_PHOTO_MAX = 149;
+/**
+ * Top views (transparent, 600 px) from pulsar.gg's own store, for models the web app has no photo of.
+ * Only the label-free "top" shots are used (the newer gallery covers print "Medium" / "SIZE 2" next to the mouse).
+ */
+const PULSAR_SHOP = 'https://www.pulsar.gg/cdn/shop/products/';
+const PULSAR_SHOP_PHOTO: Record<string, string> = {
+  'X2 V2': 'X2V2gamingmouse_medium_White_Top_b60ca055-6bc8-440a-84bb-65f8779774dc-109345.png',
+  X2H: 'X2hgamingmouse_medium_White_8811f985-3def-4751-aabc-1de9ca72596e-856244.png',
+  X2A: 'X2AgamingMouse_top-234273.png',
+  'Xlite V3': 'PulsarXliteV3MiniGamingMouse_White_005-139775.png',
+  'Xlite V3 Large': 'PulsarXliteV3LargeGamingMouse_White_005-510293.png',
+};
+const pulsarShopPhoto = (model: string): string | undefined =>
+  PULSAR_SHOP_PHOTO[model] ? `${PULSAR_SHOP}${PULSAR_SHOP_PHOTO[model]}?width=600` : undefined;
+/** "By You XS-1" builds of shapes the web app has no photo of: the stock shape's store photo */
+const PULSAR_SHOP_OF: Record<number, string> = { 31: 'X2A', 32: 'X2A', 35: 'Xlite V3 Large' };
 function pulsarPhoto(mid: number): string | undefined {
+  if (PULSAR_SHOP_OF[mid]) return pulsarShopPhoto(PULSAR_SHOP_OF[mid]);
   const m = PULSAR_PHOTO_OF[mid] ?? mid;
   if (m < 1 || m > PULSAR_PHOTO_MAX || PULSAR_NO_PHOTO.has(m)) return undefined;
   return `https://bbb.pulsar.gg/cMouse/img/devices/mouse/57${hexByte(m)}.png`;
@@ -403,6 +420,7 @@ export function resolveVariant(vid: number, pid: number, cid?: number, mid?: num
   }
   if (cid === CID_PULSAR_GEN2 && b.brand === 'PULSAR') {
     v.model = PULSAR_CID6[mid] ?? v.model;
+    v.image = pulsarShopPhoto(v.model) ?? v.image;
     return v;
   }
   if (cid === CID_SCYROX && (b.brand === 'SCYROX' || b === UNKNOWN)) {

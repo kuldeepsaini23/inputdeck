@@ -103,9 +103,9 @@ describe('pulsar driver', () => {
     await drv.read()
     expect(drv.model()).toBe('X2 Crazylight Mini')
     expect(resolveVariant(0x3710, 0x5406, 87, 104).model).toBe('X3 LHD Crazylight Medium Desert')
-    // "By You" builds borrow the stock model's photo; X2A By You and unreleased mids (silhouette placeholder) get none
+    // "By You" builds borrow the stock model's photo (X2A: Pulsar's store); unreleased mids (silhouette placeholder) get none
     expect(resolveVariant(0x3710, 0x5406, 87, 28).image).toBe('https://bbb.pulsar.gg/cMouse/img/devices/mouse/5701.png')
-    expect(resolveVariant(0x3710, 0x5406, 87, 31).image).toBeUndefined()
+    expect(resolveVariant(0x3710, 0x5406, 87, 31).image).toBe('https://www.pulsar.gg/cdn/shop/products/X2AgamingMouse_top-234273.png?width=600')
     expect(resolveVariant(0x3710, 0x5406, 87, 108).image).toBeUndefined()
     expect(resolveVariant(0x3710, 0x5406, 87, 250).model).toBe('CrazyLight mouse')
   })

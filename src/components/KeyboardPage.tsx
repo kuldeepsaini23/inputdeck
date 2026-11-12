@@ -8,6 +8,7 @@ import { usedBytes, type Macros } from '#/lib/macros'
 import { KeyboardView, type KeyLook } from './KeyboardView'
 import { KeyCard, KeyPicker, effective, type Keymap } from './KeymapCards'
 import { MacroEditor, MacroList, UsageBar } from './MacroCards'
+import { LiveLightCard } from './LiveLightTest'
 import { AdvancedCards, MODE_COLOR, MODE_NAME, advancedSummary, entryAt } from './AdvancedCards'
 import { SocdCard, socdColor, socdEntryLabel, socdEntryOf, socdPickKey, type SocdPick } from './SocdCards'
 import { BigValue, Card, ChoiceSelect, Range, Segmented, SWATCHES, Toggle, hex, type Choice } from './kit'
@@ -611,6 +612,7 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
           {bri && <Level label="Brightness" v={bri} onChange={(n) => onEdit('light_bri', { ...bri, current: n })} />}
           {speed && <Level label="Speed" v={speed} onChange={(n) => onEdit('light_speed', { ...speed, current: n })} />}
         </Card>
+        <LiveLightCard dev={dev} />
         {/* extra light zones (e.g. Lofree Hyzen: bottom strip and receiver) get a card each */}
         {[['strip_', 'Bottom light strip'], ['dongle_', 'Receiver light']].map(([pre, title]) => {
           const zone = extras('Lighting').filter((x) => x.key.startsWith(pre))

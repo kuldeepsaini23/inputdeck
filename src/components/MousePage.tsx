@@ -1,7 +1,9 @@
 import { useMemo, useState } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { getSkin, setSkin } from '#/drivers/wlmouse'
-import { Battery, Crosshair, Gauge, Info, Monitor, MousePointerClick, SlidersHorizontal } from 'lucide-react'
+import { Battery, Crosshair, Gauge, Info, Monitor, MousePointerClick, SlidersHorizontal, Zap } from 'lucide-react'
+import { slotName, usedBytes, type Macros } from '#/lib/macros'
+import { MacroEditor, MacroList, UsageBar } from './MacroCards'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '#/components/ui/dialog'
 import type { DeviceState } from '#/devices'
 import type { Setting, Value } from '#/drivers/types'
@@ -14,11 +16,12 @@ import { MouseArt } from './MouseArt'
 
 type Dpi = Extract<Value, { kind: 'dpi' }>
 
-const ORDER = ['Performance', 'DPI', 'Buttons', 'Power', 'Dongle screen', 'Advanced']
+const ORDER = ['Performance', 'DPI', 'Buttons', 'Macros', 'Power', 'Dongle screen', 'Advanced']
 const ICON: Record<string, React.ReactNode> = {
   Performance: <Gauge className="size-4" />,
   DPI: <Crosshair className="size-4" />,
   Buttons: <MousePointerClick className="size-4" />,
+  Macros: <Zap className="size-4" />,
   Power: <Battery className="size-4" />,
   'Dongle screen': <Monitor className="size-4" />,
   Advanced: <SlidersHorizontal className="size-4" />,
@@ -46,6 +49,7 @@ const ACTION_GROUPS: [string, RegExp][] = [
   ['Mouse', /click|^back$|^forward$|scroll/i],
   ['DPI', /dpi|profile|polling|lod/i],
   ['Media', /volume|mute|play|track|stop/i],
+  ['Macro', /^macro/i],
   ['Off', /disabled/i],
 ]
 const actionGroup = (l: string) => ACTION_GROUPS.find(([, r]) => r.test(l))?.[0] ?? 'Other'
@@ -62,6 +66,7 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
   const active = tab && groups.includes(tab) ? tab : groups[0]
   const [btn, setBtn] = useState('btn1')
   const [stage, setStage] = useState<number | null>(null)
+  const [slot, setSlot] = useState(0)
   const screenEd = useScreenEditor(dev)
 
   const brand = dev.driver.brand().toUpperCase()
@@ -75,6 +80,9 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
 
   let left: React.ReactNode = null
   let right: React.ReactNode = null
+  /** replaces the mouse photo (Macros: the step editor needs the room) */
+  let center: React.ReactNode = null
+  const macS = get('macros')
   let spots = false
   let spotKeys: string[] = Object.keys(SPOTS)
 
@@ -227,6 +235,29 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
       </div>
     )
     right = <AdvancedCards get={get} onEdit={onEdit} model={dev.driver.model()} missing={missing} present={present} extras={(edit ?? []).filter(isExtra)} rest={inGroup('Advanced').filter((s) => !s.key.startsWith('rgb_') && s.value.kind !== 'text')} />
+  } else if (active === 'Macros' && macS?.value.kind === 'macros') {
+    const v: Macros = macS.value
+    const sl = Math.min(slot, v.slots - 1)
+    const steps = v.macros[sl] ?? []
+    const used = usedBytes(v)
+    // buttons whose action plays this macro ("Macro M<n>..." labels from the mouse drivers)
+    const bound = inGroup('Buttons').filter((s) => s.key in SPOTS && Number(/^Macro M(\d+)/.exec(choiceLabel(s) ?? '')?.[1]) === sl + 1)
+    left = (
+      <Hero brand={brand} label={`Macro · ${slotName(v, sl)}`} value={steps.length} unit={steps.length === 1 ? 'step' : 'steps'} size={64}
+        sub={<>
+          {bound.length ? `On button ${bound.map((s) => SPOTS[s.key].n).join(', ')}.` : 'Not on a button yet. Pick it as a button action in the Buttons tab.'}
+          {used !== undefined && v.maxBytes ? ` ${used} of ${v.maxBytes} bytes used.` : ''}
+        </>}>
+        {macS.hint && <p className="hint mt-3 mb-0">{macS.hint}</p>}
+      </Hero>
+    )
+    center = <MacroEditor v={v} slot={sl} onChange={(nv) => onEdit('macros', nv)} />
+    right = (
+      <>
+        <MacroList v={v} slot={sl} onSelect={setSlot} hint="Put a macro on a button in the Buttons tab." />
+        {v.maxBytes !== undefined && <section className="glass fade-in p-[21px] pt-[19px]"><UsageBar v={v} /></section>}
+      </>
+    )
   } else if (active) {
     left = <Hero brand={brand} label={active} value={dev.driver.model()} size={56} />
     right = <GenericCard title={active} settings={inGroup(active)} onEdit={onEdit} />
@@ -236,8 +267,11 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
   const pickable = active === 'Buttons'
   return (
     <>
-      <main className={cn('relative z-10 grid h-[calc(100%-76px)] gap-10 pr-10 pl-16 pb-[110px]', spots ? 'grid-cols-[minmax(240px,1fr)_minmax(520px,1.4fr)_360px]' : 'grid-cols-[minmax(260px,1fr)_minmax(300px,0.9fr)_360px]')}>
+      <main className={cn('relative z-10 grid h-[calc(100%-76px)] gap-10 pr-10 pl-16 pb-[110px]', spots ? 'grid-cols-[minmax(240px,1fr)_minmax(520px,1.4fr)_360px]' : center ? 'grid-cols-[minmax(240px,0.8fr)_minmax(460px,1.5fr)_340px]' : 'grid-cols-[minmax(260px,1fr)_minmax(300px,0.9fr)_360px]')}>
         <div key={`left-${active}`} className="min-h-0 pt-[74px]">{left}</div>
+        {center ? (
+          <div key={`center-${active}`} className="cascade scroll-thin -mr-2 min-h-0 overflow-y-auto pt-11 pr-2 pb-4">{center}</div>
+        ) : (
         <div className="relative grid min-h-0 place-items-center">
           <div className="breathe pointer-events-none absolute top-1/2 left-1/2 size-[min(520px,90%)] -translate-x-1/2 -translate-y-1/2 rounded-full bg-[radial-gradient(circle,rgb(230_232_236/0.12),transparent_65%)]" />
           {active === 'Advanced' && [360, 470, 580, 690].map((d, i) => (
@@ -297,6 +331,7 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
           </div>
           )}
         </div>
+        )}
         <div key={`right-${active}`} className="cascade scroll-thin -mr-2 flex min-h-0 flex-col gap-3.5 overflow-y-auto pt-11 pr-2 pb-4">{right}</div>
       </main>
       <Dock tabs={groups.map((g) => ({ id: g, label: TAB_LABEL[g] ?? g, icon: ICON[g] ?? <SlidersHorizontal className="size-4" /> }))} active={active ?? ''} onChange={setTab} />

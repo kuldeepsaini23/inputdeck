@@ -68,6 +68,14 @@ export type Value =
       delays?: boolean;
       /** longest single delay step (ms) */
       maxDelay?: number;
+      /** false when the device can't store text steps (mice: add keys instead) */
+      text?: boolean;
+      /** true when macros may press mouse buttons and scroll (mice) */
+      mouse?: boolean;
+      /** bytes one macro may use (macroSize), if each macro has its own limit */
+      maxPerMacro?: number;
+      /** labels for the slots (default M0, M1, ...) */
+      slotNames?: string[];
       macros: MacroStep[][];
     }
   | Socd;
@@ -118,15 +126,21 @@ export interface SocdEntry {
 
 /**
  * One macro step. `kc` is a basic HID keyboard usage (0x04 A … 0xE7 right Win; same as the QMK
- * basic keycodes). Text is typed as US-layout ASCII.
+ * basic keycodes). Text is typed as US-layout ASCII. Mouse steps (mice only): `btn` is
+ * 1 left, 2 right, 3 middle, 4 back, 5 forward; `dir` 1 scrolls up, -1 down.
  */
 export type MacroStep =
   | { t: 'tap' | 'down' | 'up'; kc: number }
+  | { t: 'mouse'; a: 'tap' | 'down' | 'up'; btn: number }
+  | { t: 'wheel'; dir: 1 | -1 }
   | { t: 'delay'; ms: number }
   | { t: 'text'; text: string };
 
-/** Macro storage formats: QMK dynamic macros with (VIA protocol 11+) and without delays. */
-export type MacroFormat = 'qmk' | 'qmk-legacy';
+/**
+ * Macro storage formats: QMK dynamic macros with (VIA protocol 11+) and without delays;
+ * WLMouse / CompX-A event records (page 0x04); Pulsar / CompX-B 5-byte event records (0x300).
+ */
+export type MacroFormat = 'qmk' | 'qmk-legacy' | 'wlmouse' | 'pulsar';
 
 /** Keycode numberings: QMK keycodes v2 (QMK 0.19+, VIA protocol 12+) and the older v1. */
 /** QMK keycode numbering: v1 = VIA protocol <= 10, v11 = protocol 11 (v2 layout, macros at 0x7702), v2 = protocol 12+ */

@@ -8,14 +8,19 @@ import {
   encodeDpi,
   encodeDpi50,
   frame,
+  KEEP,
+  MACRO_HELD,
+  MACRO_ONCE,
   PulsarDriver,
+  writable,
   pulsarFactory,
   resolveVariant,
   stageBytes,
   stageBytes3955,
 } from './pulsar'
 import { FakePulsar, type FakeCompxbOptions } from './fakes/fake-pulsar'
-import type { Setting } from './types'
+import type { MacroStep, Setting } from './types'
+import { encodeMacro } from '../lib/macros'
 
 const noSleep = () => Promise.resolve()
 
@@ -287,5 +292,106 @@ describe('factories', () => {
     const ok = new FakePulsar({ vendorId: 0x3554, productId: 0xf50a, cid: 2, mid: 19 })
     const drv = await compxbFactory.create(ok.asHid())
     expect(drv?.model()).toBe('Dragonfly F1S')
+  })
+})
+
+describe('pulsar macros (0x300 + 384 per button)', () => {
+  type M = Extract<Setting['value'], { kind: 'macros' }>
+  const rec = (fake: FakePulsar, i: number) => fake.map.subarray(0x300 + 384 * i, 0x300 + 384 * (i + 1))
+
+  it('reads one macro per button; erased (FF) records are empty', async () => {
+    const { fake, drv } = await open()
+    // a record as Pulsar's app writes it: name "ab", 2 events (A down 10 ms, A up), checksum
+    const r = rec(fake, 1)
+    r.set([2, 0x61, 0x62], 0)
+    r.set([2, 0x81, 4, 0, 0, 10, 0x41, 4, 0, 0, 0], 31)
+    r[42] = (0x55 - 2 - (0x81 + 4 + 10 + 0x41 + 4)) & 0xff
+    const s = await drv.read()
+    const v = find(s, 'macros').value as M
+    expect(v).toMatchObject({ kind: 'macros', slots: 5, format: 'pulsar', text: false, mouse: true, maxPerMacro: 350, maxDelay: 65535 })
+    expect(v.slotNames).toEqual(['M1 · Left', 'M2 · Right', 'M3 · Wheel', 'M4 · Back', 'M5 · Forward'])
+    expect(v.macros).toEqual([[], [{ t: 'tap', kc: 4 }], [], [], []])
+    const b2 = find(s, 'btn2').value as Choice
+    expect(b2.options).toContainEqual(['Macro M2', MACRO_ONCE])
+    expect(b2.options).toContainEqual(['Macro M2 (repeat while held)', MACRO_HELD])
+    // reading never writes
+    expect(fake.sent.some((d) => d[0] === 0x07)).toBe(false)
+  })
+
+  it('writes the whole record like the app (name, count, events, checksum) and reads it back', async () => {
+    const { fake, drv } = await open()
+    const s = await drv.read()
+    fake.sent = []
+    const v = find(s, 'macros').value as M
+    const steps: MacroStep[] = [{ t: 'tap', kc: 0x05 }, { t: 'delay', ms: 300 }, { t: 'mouse', a: 'tap', btn: 1 }, { t: 'wheel', dir: -1 }]
+    await drv.write({ ...find(s, 'macros'), value: { ...v, macros: [[], [], [], steps, []] } })
+    const writes = fake.sent.filter((d) => d[0] === 0x07)
+    const ev = encodeMacro(steps, 'pulsar')
+    expect(writes).toHaveLength(Math.ceil((33 + ev.length) / 10))
+    expect(writes.every((d) => { const a = (d[2] << 8) | d[3]; return a >= 0x300 + 384 * 3 && a + d[4] <= 0x300 + 384 * 3 + 383 })).toBe(true)
+    const r = rec(fake, 3)
+    expect([...r.subarray(0, 8)]).toEqual([7, ...[...'Macro 4'].map((c) => c.charCodeAt(0))])
+    expect(r[8]).toBe(0xff) // name padding
+    expect(r[31]).toBe(ev.length / 5)
+    expect([...r.subarray(32, 32 + ev.length)]).toEqual(ev)
+    expect(r[32 + ev.length]).toBe((0x55 - ev.length / 5 - ev.reduce((a, b) => a + b, 0)) & 0xff)
+    expect((find(await drv.read(), 'macros').value as M).macros[3]).toEqual(steps)
+    // the other records are untouched
+    expect([...rec(fake, 0).subarray(0, 40)].every((b) => b === 0xff)).toBe(true)
+  })
+
+  it('keeps the name the app gave a record; unchanged macros write nothing; too long is refused', async () => {
+    const { fake, drv } = await open()
+    rec(fake, 0).set([3, 0x41, 0x42, 0x43], 0)
+    rec(fake, 0).set([0, 0x55], 31)
+    const s = await drv.read()
+    const v = find(s, 'macros').value as M
+    fake.sent = []
+    await drv.write(find(s, 'macros'))
+    expect(fake.sent.some((d) => d[0] === 0x07)).toBe(false)
+    await drv.write({ ...find(s, 'macros'), value: { ...v, macros: [[{ t: 'tap', kc: 4 }], [], [], [], []] } })
+    expect([...rec(fake, 0).subarray(0, 4)]).toEqual([3, 0x41, 0x42, 0x43])
+    fake.sent = []
+    const many: MacroStep[] = Array.from({ length: 36 }, () => ({ t: 'tap', kc: 4 }))
+    await expect(drv.write({ ...find(s, 'macros'), value: { ...v, macros: [many, [], [], [], []] } })).rejects.toThrow(/at most 70/)
+    expect(fake.sent.some((d) => d[0] === 0x07)).toBe(false)
+  })
+
+  it('binds a button to its own record: type 6, param (button << 8) | 1 or 254', async () => {
+    const { fake, drv } = await open()
+    const s = await drv.read()
+    const b4 = find(s, 'btn4')
+    await drv.write({ ...b4, value: { ...(b4.value as Choice), current: MACRO_ONCE } })
+    expect([...fake.map.subarray(0x6c, 0x70)]).toEqual([6, 3, 1, (0x55 - 6 - 3 - 1) & 0xff])
+    expect(find(await drv.read(), 'btn4').value).toMatchObject({ current: MACRO_ONCE })
+    await drv.write({ ...b4, value: { ...(b4.value as Choice), current: MACRO_HELD } })
+    expect([...fake.map.subarray(0x6c, 0x6f)]).toEqual([6, 3, 254])
+    expect(find(await drv.read(), 'btn4').value).toMatchObject({ current: MACRO_HELD })
+    // the app's "until any key is pressed" (255) is kept as it is
+    fake.map.set([6, 3, 255, (0x55 - 6 - 3 - 255) & 0xff], 0x6c)
+    const b = find(await drv.read(), 'btn4').value as Choice
+    expect(b.current).toBe(KEEP)
+    expect(b.options[0][0]).toBe('Macro M4 (keep)')
+  })
+
+  it('allowlist: only the five records, never past byte 382 of a record', () => {
+    for (let i = 0; i < 5; i++) {
+      const base = 0x300 + 384 * i
+      expect(writable(base, 10)).toBe(true)
+      expect(writable(base + 373, 10)).toBe(true)
+      expect(writable(base + 374, 10)).toBe(false)
+      expect(writable(base + 383, 1)).toBe(false)
+    }
+    expect(writable(0x2ff, 1)).toBe(false)
+    expect(writable(0x300 + 384 * 5, 1)).toBe(false)
+    expect(writable(0x100, 10)).toBe(false) // ShortcutKey records stay read-only
+  })
+
+  it('unverified CompX-B mice get no macros', async () => {
+    const { fake, drv } = await open({ vendorId: 0x3554, productId: 0xf5f4, cid: 62, mid: 1, codec: 's50' })
+    const s = await drv.read()
+    expect(s.some((x) => x.key === 'macros')).toBe(false)
+    expect(fake.sent.some((d) => d[0] === 0x08 && ((d[2] << 8) | d[3]) >= 0x300 && ((d[2] << 8) | d[3]) < 0x1b00)).toBe(false)
+    expect((find(s, 'btn1').value as Choice).options.some(([l]) => /macro/i.test(l))).toBe(false)
   })
 })

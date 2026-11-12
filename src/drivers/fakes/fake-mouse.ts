@@ -20,6 +20,8 @@ export interface FakeOpts {
   mouseTarget?: number;
   /** shared receivers: [vid, pid] answered to the read-only 00/8B [02] query on target 1 */
   paired?: [number, number];
+  /** false: firmware without the macro page (04/xx answers "unsupported") */
+  macros?: boolean;
 }
 
 type Frame = { target: number; len: number; page: number; cmd: number; payload: number[] };
@@ -66,6 +68,16 @@ export class FakeMouse {
   upload: { head: number[]; data: Uint8Array; got: number }[] | null = null;
   pictures: Uint8Array[] = [];
   slots: (number[] | null)[] = [[0x00, 0x03, 0xf4, 0x80, 0x01, 0x68, 0x01, 0x68, 0x01], null, null, null, null, null, null, null];
+  /**
+   * Macro storage by id (page 0x04, shared by all profiles): M1 holds "tap A, 20 ms, left click",
+   * stored the way the official hub writes it. size = allocated bytes.
+   */
+  macros: Record<number, { data: number[]; name: string }> = {
+    1: { data: [0x02, 0x04, 0x03, 0x04, 0x20, 20, 0x01, 0x01, 0x01, 0x00], name: 'Macro1' },
+    2: { data: [], name: '' },
+    3: { data: [], name: '' },
+    4: { data: [], name: '' },
+  };
 
   constructor(readonly o: FakeOpts = {}) {
     this.vendorId = o.vendorId ?? 0x36a7;
@@ -255,6 +267,50 @@ export class FakeMouse {
       check(a.length === 19, 'a.length');
       this.colors[p] = a.slice(1);
       return [];
+    }
+    if (f.page === 4) {
+      if (this.o.macros === false) return null;
+      const be = (i: number) => ((a[i] << 24) | (a[i + 1] << 16) | (a[i + 2] << 8) | a[i + 3]) >>> 0;
+      if (c === 0x06) {
+        const m = this.macros[a[0]];
+        check(!!m, 'macro id ' + a[0]);
+        if (get) {
+          const name = [...m.name].map((ch) => ch.charCodeAt(0));
+          return [a[0], name.length, ...name, ...Array(56 - name.length).fill(0)];
+        }
+        check(a.length === 2 + a[1], 'macro name length');
+        m.name = String.fromCharCode(...a.slice(2));
+        return [];
+      }
+      check(a[0] === 0, 'macro id high byte');
+      const m = this.macros[a[1]];
+      check(!!m, 'macro id ' + a[1]);
+      const size = m.data.length;
+      switch (c) {
+        case 0x01:
+          // like a real HUAN M: an empty slot answers 0xA2 to the size query
+          if (get) return size === 0 ? null : [0, a[1], size >>> 24, (size >> 16) & 0xff, (size >> 8) & 0xff, size & 0xff];
+          check(a.length === 6, 'allocate length');
+          m.data = Array(be(2)).fill(0);
+          return [];
+        case 0x02:
+          check(!get && a.length === 2, 'delete');
+          m.data = [];
+          m.name = '';
+          return [];
+        case 0x03: {
+          const off = be(2);
+          const n = a[6];
+          if (get) {
+            check(off + n <= size && n <= 50 && f.len === n + 7, 'macro read range');
+            return [...a.slice(0, 7), ...m.data.slice(off, off + n)];
+          }
+          check(off + n <= size && n <= 51 && a.length === 7 + n, 'macro write range');
+          m.data.splice(off, n, ...a.slice(7));
+          return [];
+        }
+      }
+      return null;
     }
     if (f.page === 3) {
       if (c === 0x01) { if (get) return [p, this.combo[p]]; this.combo[p] = a[1]; return []; }

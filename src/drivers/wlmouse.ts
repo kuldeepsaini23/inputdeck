@@ -7,10 +7,13 @@
 // Reply status 0xA1 = OK, 0xA0 pending, 0xA2 unsupported, 0xA3 busy (resend), 0xA4 asleep.
 // No checksum. Layouts follow the official web hub (gm.wlmouse.gg, "WL MOUSE HUB" 1.0.47).
 // NEVER send: page 0xB0 (bootloader), 00/00 factory reset, 00/0D profile reset,
-// 00/0A, 00/26, 00/0B, 00/0F (pairing / dongle identity), macros. Screen pictures are only
-// written through uploadScreen()/clearScreen(), which the user starts and confirms.
+// 00/0A, 00/26, 00/0B, 00/0F (pairing / dongle identity). Page 0x04 (macros) only takes the
+// official hub's macro writes (macroWriteOk), only to the mouse, only on WLMouse itself.
+// Screen pictures are only written through uploadScreen()/clearScreen(), which the user starts
+// and confirms.
 
-import type { Driver, DriverFactory, ScreenImage, ScreenSupport, Setting, Value } from './types';
+import { decodeMacro, encodeMacro, MOUSE_MAX_DELAY } from '../lib/macros';
+import type { Driver, DriverFactory, MacroStep, ScreenImage, ScreenSupport, Setting, Value } from './types';
 import { sleep as realSleep } from './types';
 
 const VID = 0x36a7;
@@ -74,6 +77,58 @@ export const ACTIONS: [string, number, number[]][] = [
 ];
 /** Choice value for "whatever is on the button now" (keyboard key, macro...) - never written. */
 export const KEEP = 1000;
+
+// ---------------------------------------------------------------- macros (page 0x04)
+//
+// From the official web hub (WL MOUSE HUB, hidHelper + macro page), WLMouse only:
+//   04/01 [idHi, idLo, size32 BE]                    allocate ("AllocateMacroDataSize")
+//   04/03 [idHi, idLo, offset32 BE, n, n bytes]      data, n <= 51 per frame ("SetMacroData")
+//   04/06 [id, n, n name bytes]                      name ("setMacroName", GBK; we write ASCII)
+//   04/02 [idHi, idLo]                               delete ("DeleteMacro")
+//   04/81 [idHi, idLo] -> [idHi, idLo, size32 BE]    ("GetMacroDataSize")
+//   04/83 [idHi, idLo, offset32, n] -> [.. 7 bytes echo, n bytes]   n <= 50 ("GetMacroData")
+//   04/86 [id, 56] -> [id, n, name]                  ("getMacroName")
+// The hub offers macros 1-4. Bytes: see src/lib/macros.ts (format 'wlmouse').
+// A button runs macro `id` with type 16 [idHi, idLo, times] (run N times),
+// 17 [idHi, idLo] (repeat while held) or 18 [idHi, idLo] (repeat until pressed again).
+
+export const WL_MACRO_SLOTS = 4;
+/** Our own cap per macro: the hub sets none, ~250 key presses is plenty. */
+export const WL_MACRO_MAX = 1024;
+const MACRO_WCHUNK = 51;
+const MACRO_RCHUNK = 50;
+/** a stored size above this is treated as garbage (never read) */
+const MACRO_READ_MAX = 8192;
+/** Button choice values: macro `id` run once / repeated while held. */
+export const MACRO_ONCE = 200;
+export const MACRO_HELD = 300;
+const be32 = (n: number) => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
+const fromBe32 = (b: number[], i: number) => ((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]) >>> 0;
+const macroIdOk = (hi: number, lo: number) => hi === 0 && lo >= 1 && lo <= WL_MACRO_SLOTS;
+
+/** Is this page-0x04 SET exactly one of the hub's macro writes, within bounds? */
+export function macroWriteOk(cmd: number, p: number[]): boolean {
+  switch (cmd & 0x7f) {
+    case 0x01: {
+      if (p.length !== 6 || !macroIdOk(p[0], p[1])) return false;
+      const size = fromBe32(p, 2);
+      return size >= 1 && size <= WL_MACRO_MAX;
+    }
+    case 0x02:
+      return p.length === 2 && macroIdOk(p[0], p[1]);
+    case 0x03: {
+      const n = p[6];
+      if (p.length < 7 || !macroIdOk(p[0], p[1]) || n < 1 || n > MACRO_WCHUNK || p.length !== 7 + n) return false;
+      return fromBe32(p, 2) + n <= WL_MACRO_MAX;
+    }
+    case 0x06: {
+      const n = p[1];
+      return p.length >= 2 && p[0] >= 1 && p[0] <= WL_MACRO_SLOTS && n >= 1 && n <= 16 && p.length === 2 + n && p.slice(2).every((c) => c >= 0x20 && c <= 0x7e);
+    }
+    default:
+      return false;
+  }
+}
 
 // ---------------------------------------------------------------- other CompX-A brands
 //
@@ -345,6 +400,9 @@ export class WlMouseDriver implements Driver {
   /** per physical button 1..5 */
   private buttons: Button[] = [null, null, null, null, null];
   private hyper = false;
+  /** stored macro bytes (index = id - 1); null when not read / no macro page */
+  private macroBytes: number[][] | null = null;
+  private macroNames: (string | null)[] = [];
 
   /** where page/cmd sit in received DataViews: 0 = no report-id byte, 1 = leading report id */
   private rxOffset: number | null = null;
@@ -487,7 +545,8 @@ export class WlMouseDriver implements Driver {
     const c = cmd & 0x7f;
     const forbidden =
       page === 0xb0 ||
-      page === 0x04 || // macros
+      // macros: only the hub's own macro writes, to the mouse, on WLMouse
+      (page === 0x04 && !(this.verified && target === this.mouse && macroWriteOk(c, payload))) ||
       (page === 0x05 && [0x00, 0x04, 0x05, 0x07, 0x09].includes(c)) || // image upload / delete
       (page === 0x00 && [0x00, 0x0a, 0x0b, 0x0d, 0x0f, 0x26].includes(c));
     if (forbidden) throw new Error(`command ${hex2(page)}/${hex2(cmd)} is blocked`);
@@ -604,6 +663,88 @@ export class WlMouseDriver implements Driver {
     if (!v || v.length < 5 || v[1] !== btn) return null;
     const n = Math.min(v[4], v.length - 5);
     return { t: v[3], d: v.slice(5, 5 + n) };
+  }
+
+  /** 04/81 size, then 04/83 in 50-byte pieces (read-only). */
+  private async readMacroBytes(id: number): Promise<number[]> {
+    let sz: number[];
+    try {
+      sz = await this.get(this.mouse, 0x04, 0x01, 6, [0, id]);
+    } catch (e) {
+      // a real HUAN M answers 0xA2 for an empty slot; WLMouse's hub ignores the status and reads size 0
+      if (e instanceof Error && e.message === 'not supported') return [];
+      throw e;
+    }
+    if (sz.length < 6) throw new Error('short macro size reply');
+    let size = fromBe32(sz, 2);
+    if (size > MACRO_READ_MAX) size = 0; // erased / garbage
+    const out: number[] = [];
+    for (let off = 0; off < size; off += MACRO_RCHUNK) {
+      const n = Math.min(MACRO_RCHUNK, size - off);
+      const r = await this.get(this.mouse, 0x04, 0x03, n + 7, [0, id, ...be32(off), n]);
+      if (r.length < 7 + n) throw new Error('short macro data reply');
+      out.push(...r.slice(7, 7 + n));
+    }
+    return out;
+  }
+
+  /** every macro (ids 1-4) as steps; null when the firmware doesn't answer the macro page */
+  private async readMacros(): Promise<MacroStep[][] | null> {
+    this.macroBytes = null;
+    const bytes: number[][] = [];
+    const names: (string | null)[] = [];
+    for (let id = 1; id <= WL_MACRO_SLOTS; id++) {
+      try {
+        bytes.push(await this.readMacroBytes(id));
+      } catch {
+        return null;
+      }
+      const nm = await this.tryGet(this.mouse, 0x04, 0x06, 0x3a, [id, 56]);
+      // the name query is what tells macro-capable firmware apart (empty slots fail the size query)
+      if (!nm && id === 1) return null;
+      let name: string | null = null;
+      if (nm && nm.length >= 2 && nm[0] === id) {
+        const raw = nm.slice(2, 2 + Math.min(nm[1], 16));
+        if (raw.length && raw.every((c) => c >= 0x20 && c <= 0x7e)) name = String.fromCharCode(...raw).trim() || null;
+      }
+      names.push(name);
+    }
+    this.macroBytes = bytes;
+    this.macroNames = names;
+    return bytes.map((b) => decodeMacro(b, 'wlmouse'));
+  }
+
+  /** Rewrite the macros that changed, the way the hub saves one, and read each back. */
+  private async writeMacros(macros: MacroStep[][]): Promise<void> {
+    if (!this.macroBytes) throw new Error('macros were not read');
+    if (macros.length !== WL_MACRO_SLOTS) throw new Error(`need ${WL_MACRO_SLOTS} macros`);
+    const enc = macros.map((m, i) => {
+      const b = encodeMacro(m, 'wlmouse');
+      if (b.length > WL_MACRO_MAX) throw new Error(`macro M${i + 1} is too long (${b.length} of ${WL_MACRO_MAX} bytes)`);
+      return b;
+    });
+    for (let i = 0; i < WL_MACRO_SLOTS; i++) {
+      const id = i + 1;
+      const b = enc[i];
+      const old = this.macroBytes[i];
+      if (b.length === old.length && b.every((x, k) => x === old[k])) continue;
+      if (!b.length) {
+        await this.set(0x04, 0x02, [0, id], 60);
+      } else {
+        await this.set(0x04, 0x01, [0, id, ...be32(b.length)], 30);
+        for (let off = 0; off < b.length; off += MACRO_WCHUNK) {
+          const chunk = b.slice(off, off + MACRO_WCHUNK);
+          await this.set(0x04, 0x03, [0, id, ...be32(off), chunk.length, ...chunk], 30);
+        }
+        // the hub always names a macro after saving it
+        const name = this.macroNames[i] ?? `Macro${id}`;
+        await this.set(0x04, 0x06, [id, name.length, ...[...name].map((c) => c.charCodeAt(0))], 30);
+        this.macroNames[i] = name;
+      }
+      const back = await this.readMacroBytes(id);
+      this.macroBytes[i] = back;
+      if (back.length !== b.length || back.some((x, k) => x !== b[k])) throw new Error(`macro M${id} didn't read back the same`);
+    }
   }
 
   private colorOf(i: number): number {
@@ -777,6 +918,9 @@ export class WlMouseDriver implements Driver {
     const cb = await this.tryGet(this.mouse, 0x03, 0x01, 2, [p]);
     if (cb) out.push(s('combo', 'Button combination', 'Performance', toggle(byte(cb, 1) !== 0)));
 
+    // --- macros (WLMouse only: the other CompX-A hubs store macros differently)
+    const macros = this.verified ? await this.readMacros() : null;
+
     // --- buttons
     for (let bi = 0; bi < 5; bi++) {
       const btn = await this.readButton(bi + 1);
@@ -786,6 +930,15 @@ export class WlMouseDriver implements Driver {
       let current = ACTIONS.findIndex(
         (a) => a[1] === btn.t && (a[1] === 0 || (a[2].length === btn.d.length && a[2].every((x, k) => x === btn.d[k]))),
       );
+      if (macros) {
+        for (let id = 1; id <= WL_MACRO_SLOTS; id++) {
+          opts.push([`Macro M${id}`, MACRO_ONCE + id], [`Macro M${id} (repeat while held)`, MACRO_HELD + id]);
+        }
+        if (btn.d[0] === 0 && btn.d[1] >= 1 && btn.d[1] <= WL_MACRO_SLOTS) {
+          if (btn.t === 16 && btn.d.length === 3 && btn.d[2] === 1) current = MACRO_ONCE + btn.d[1];
+          if (btn.t === 17 && btn.d.length === 2) current = MACRO_HELD + btn.d[1];
+        }
+      }
       if (current < 0) {
         opts.unshift([`${describeAction(btn.t, btn.d)} (keep)`, KEEP]);
         current = KEEP;
@@ -794,6 +947,17 @@ export class WlMouseDriver implements Driver {
     }
     const db = await this.tryGet(this.mouse, 0x00, 0x08, 2, [p]);
     if (db) out.push(s('debounce', 'Click debounce', 'Buttons', { kind: 'number', min: 0, max: 15, current: byte(db, 1), unit: ' ms' }));
+    if (macros) {
+      out.push({
+        key: 'macros', label: 'Macros', group: 'Macros',
+        hint: 'Macros are shared by every profile. Put one on a button in the Buttons tab.',
+        value: {
+          kind: 'macros', slots: WL_MACRO_SLOTS, format: 'wlmouse', delays: true, maxDelay: MOUSE_MAX_DELAY,
+          text: false, mouse: true, maxPerMacro: WL_MACRO_MAX,
+          slotNames: Array.from({ length: WL_MACRO_SLOTS }, (_, i) => `M${i + 1}`), macros,
+        },
+      });
+    }
 
     // --- power
     const sl = await this.tryGet(this.mouse, 0x00, 0x07, 3, [p]);
@@ -875,6 +1039,13 @@ export class WlMouseDriver implements Driver {
     if (bi >= 0) {
       if (v.kind !== 'choice') throw bad();
       if (v.current === KEEP) return;
+      for (const [base, t] of [[MACRO_ONCE, 16], [MACRO_HELD, 17]]) {
+        const id = v.current - base;
+        if (id >= 1 && id <= WL_MACRO_SLOTS) {
+          if (!this.macroBytes) throw new Error('macros were not read');
+          return this.writeButton(bi, t, t === 16 ? [0, id, 1] : [0, id]);
+        }
+      }
       const a = ACTIONS[v.current];
       if (!a) throw new Error('unknown action');
       return this.writeButton(bi, a[1], a[2]);
@@ -903,6 +1074,9 @@ export class WlMouseDriver implements Driver {
     }
 
     switch (st.key) {
+      case 'macros':
+        if (v.kind !== 'macros') throw bad();
+        return this.writeMacros(v.macros);
       case 'profile':
         if (v.kind !== 'choice') throw bad();
         await this.set(0x00, 0x05, [v.current & 0xff], 150);

@@ -1,7 +1,10 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import { FakeMouse, type FakeOpts } from './fakes/fake-mouse';
-import type { Setting, Value } from './types';
-import { KEEP, WlMouseDriver, compxEntry, lodDecode, lodEncode, openWlMouse, setSkin, wlmouseFactory } from './wlmouse';
+import type { MacroStep, Setting, Value } from './types';
+import {
+  KEEP, MACRO_HELD, MACRO_ONCE, WL_MACRO_MAX, WlMouseDriver, compxEntry, lodDecode, lodEncode, macroWriteOk, openWlMouse, setSkin, wlmouseFactory,
+} from './wlmouse';
+import { encodeMacro } from '../lib/macros';
 
 // ------------------------------------------------------------------ fake mouse
 
@@ -114,7 +117,7 @@ describe('read', () => {
       expect(v('voice')).toEqual({ kind: 'toggle', on: true });
       expect(v('screen_images')).toEqual({ kind: 'text', text: '1 of 8: image 360×360' });
       const groups = new Set(settings.map((s) => s.group));
-      expect([...groups]).toEqual(['Info', 'Profile', 'DPI', 'Performance', 'Buttons', 'Power', 'Advanced', 'Dongle screen']);
+      expect([...groups]).toEqual(['Info', 'Profile', 'DPI', 'Performance', 'Buttons', 'Macros', 'Power', 'Advanced', 'Dongle screen']);
     });
   }
 
@@ -577,5 +580,139 @@ describe('other CompX-A brands', () => {
         }
       }
     }
+  });
+});
+
+// ------------------------------------------------------------------ macros (page 0x04)
+
+describe('macros', () => {
+  type M = Extract<Value, { kind: 'macros' }>;
+  type C = Extract<Value, { kind: 'choice' }>;
+  const macrosOf = (ss: Setting[]) => find(ss, 'macros').value as M;
+  const tapA: MacroStep[] = [{ t: 'tap', kc: 0x04 }, { t: 'delay', ms: 20 }, { t: 'mouse', a: 'tap', btn: 1 }];
+
+  it('reads the four hub macros (04/81 size, 04/83 data, 04/86 name), shared by all profiles', async () => {
+    const { fake, settings } = await setup();
+    const v = macrosOf(settings);
+    expect(find(settings, 'macros').group).toBe('Macros');
+    expect(v).toMatchObject({ kind: 'macros', slots: 4, format: 'wlmouse', text: false, mouse: true, maxPerMacro: WL_MACRO_MAX, maxDelay: 65535 });
+    expect(v.slotNames).toEqual(['M1', 'M2', 'M3', 'M4']);
+    expect(v.macros).toEqual([tapA, [], [], []]);
+    const fresh = new FakeMouse();
+    const drv = (await openWlMouse(fresh.asHid(), noSleep))!;
+    await drv.read();
+    const reads = fresh.sent.filter((f) => f.page === 4);
+    expect(reads.every((f) => (f.cmd & 0x80) !== 0)).toBe(true);
+    expect(reads.slice(0, 3)).toEqual([
+      { target: 2, len: 6, page: 4, cmd: 0x81, payload: [0, 1, 0, 0, 0, 0] },
+      { target: 2, len: 17, page: 4, cmd: 0x83, payload: [0, 1, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+      { target: 2, len: 0x3a, page: 4, cmd: 0x86, payload: [1, 56, ...Array(56).fill(0)] },
+    ]);
+    expect(fake.macros[1].name).toBe('Macro1');
+  });
+
+  it('saves a changed macro like the hub (allocate, 51-byte chunks, name) and reads it back', async () => {
+    const { fake, drv, settings } = await setup();
+    const v = macrosOf(settings);
+    const long: MacroStep[] = Array.from({ length: 30 }, (_, i) => ({ t: 'tap', kc: 0x04 + (i % 26) }));
+    await drv.write({ ...find(settings, 'macros'), value: { ...v, macros: [v.macros[0], long, [], []] } });
+    const bytes = encodeMacro(long, 'wlmouse');
+    expect(bytes).toHaveLength(120);
+    const sets = fake.sets();
+    expect(sets.map((f) => [f.page, f.cmd, f.payload.length])).toEqual([[4, 0x01, 6], [4, 0x03, 58], [4, 0x03, 58], [4, 0x03, 25], [4, 0x06, 8]]);
+    expect(sets[0].payload).toEqual([0, 2, 0, 0, 0, 120]);
+    expect(sets[2].payload.slice(0, 7)).toEqual([0, 2, 0, 0, 0, 51, 51]);
+    expect(sets[4].payload).toEqual([2, 6, ...[...'Macro2'].map((c) => c.charCodeAt(0))]);
+    expect(fake.macros[2].data).toEqual(bytes);
+    // unchanged macros are not touched; read-back frames follow the write
+    expect(sets.some((f) => f.payload[1] === 1 && f.cmd !== 0x06)).toBe(false);
+    expect(macrosOf(await drv.read()).macros[1]).toEqual(long);
+  });
+
+  it('keeps a macro name the hub gave it, deletes an emptied macro (04/02)', async () => {
+    const { fake, drv, settings } = await setup();
+    const v = macrosOf(settings);
+    await drv.write({ ...find(settings, 'macros'), value: { ...v, macros: [[{ t: 'tap', kc: 0x05 }], [], [], []] } });
+    expect(fake.sets().at(-1)!.payload).toEqual([1, 6, ...[...'Macro1'].map((c) => c.charCodeAt(0))]);
+    fake.sent = [];
+    await drv.write({ ...find(settings, 'macros'), value: { ...v, macros: [[], [], [], []] } });
+    expect(fake.sets()).toEqual([{ target: 2, len: 2, page: 4, cmd: 0x02, payload: [0, 1] }]);
+    expect(fake.macros[1].data).toEqual([]);
+  });
+
+  it('writing the macros unchanged sends nothing; text steps and over-long macros are refused before sending', async () => {
+    const { fake, drv, settings } = await setup();
+    const s = find(settings, 'macros');
+    const v = s.value as M;
+    await drv.write(s);
+    expect(fake.sets()).toHaveLength(0);
+    await expect(drv.write({ ...s, value: { ...v, macros: [[{ t: 'text', text: 'hi' }], [], [], []] } })).rejects.toThrow(/text/);
+    const huge: MacroStep[] = Array.from({ length: 260 }, () => ({ t: 'tap', kc: 0x04 }));
+    await expect(drv.write({ ...s, value: { ...v, macros: [huge, [], [], []] } })).rejects.toThrow(/too long/);
+    expect(fake.sets()).toHaveLength(0);
+  });
+
+  it('puts a macro on a button (type 16 run once / 17 while held) and reads it back', async () => {
+    const { fake, drv, settings } = await setup();
+    const b4 = find(settings, 'btn4');
+    const opts = b4.value as C;
+    expect(opts.options).toContainEqual(['Macro M2', MACRO_ONCE + 2]);
+    expect(opts.options).toContainEqual(['Macro M2 (repeat while held)', MACRO_HELD + 2]);
+    await drv.write(withValue(b4, { ...opts, current: MACRO_ONCE + 2 }));
+    expect(fake.sets()[0].payload).toEqual([2, 4, 0, 16, 3, 0, 2, 1]);
+    expect(find(await drv.read(), 'btn4').value).toMatchObject({ current: MACRO_ONCE + 2 });
+    await drv.write(withValue(b4, { ...opts, current: MACRO_HELD + 3 }));
+    expect(fake.buttons[2][4]).toEqual({ t: 17, d: [0, 3] });
+    expect(find(await drv.read(), 'btn4').value).toMatchObject({ current: MACRO_HELD + 3 });
+    // a hub binding we don't offer (run 5 times) stays as it is
+    fake.buttons[2][4] = { t: 16, d: [0, 1, 5] };
+    const b = find(await drv.read(), 'btn4').value as C;
+    expect(b.current).toBe(KEEP);
+    expect(b.options[0][0]).toBe('Macro 1 (keep)');
+  });
+
+  it('firmware without the macro page: no macros, no macro actions', async () => {
+    const { settings } = await setup({ macros: false });
+    expect(settings.some((s) => s.key === 'macros')).toBe(false);
+    expect((find(settings, 'btn1').value as C).options.some(([l]) => /macro/i.test(l))).toBe(false);
+  });
+
+  it('allowlist: only the hub macro writes, within bounds, to the mouse, on WLMouse', async () => {
+    const { fake, drv } = await setup();
+    const bad: [number, number, number[]][] = [
+      [2, 0x01, [0, 5, 0, 0, 0, 10]], // id 5
+      [2, 0x01, [0, 0, 0, 0, 0, 10]], // id 0
+      [2, 0x01, [1, 1, 0, 0, 0, 10]], // id high byte
+      [2, 0x01, [0, 1, 0, 0, 0, 0]], // size 0
+      [2, 0x01, [0, 1, 0, 0, 4, 1]], // size 1025
+      [2, 0x01, [0, 1, 0, 0, 0, 10, 0]], // wrong length
+      [2, 0x03, [0, 1, 0, 0, 3, 0xe0, 40, ...Array(40).fill(4)]], // offset 992 + 40 > 1024
+      [2, 0x03, [0, 1, 0, 0, 0, 0, 52, ...Array(52).fill(4)]], // 52 bytes
+      [2, 0x03, [0, 1, 0, 0, 0, 0, 5, 1, 2]], // length mismatch
+      [2, 0x02, [0, 1, 0]],
+      [2, 0x06, [1, 3, 0xc4, 0xe3, 0xba]], // not ASCII
+      [2, 0x06, [5, 1, 0x41]],
+      [2, 0x00, [0, 1]],
+      [2, 0x04, [0, 1]],
+      [2, 0x05, [0, 1]],
+      [2, 0x07, [0, 1]],
+      [0, 0x01, [0, 1, 0, 0, 0, 10]], // the receiver
+    ];
+    for (const [target, cmd, pl] of bad) await expect(drv.setTo(target, 4, cmd, pl, 0)).rejects.toThrow(/blocked/);
+    expect(fake.sent).toHaveLength(0);
+    expect(macroWriteOk(0x01, [0, 4, 0, 0, 4, 0])).toBe(true); // 1024
+    expect(macroWriteOk(0x03, [0, 4, 0, 0, 3, 0xcd, 51, ...Array(51).fill(4)])).toBe(true); // 973 + 51 = 1024
+    expect(macroWriteOk(0x02, [0, 4])).toBe(true);
+    expect(macroWriteOk(0x06, [4, 6, ...[...'Macro4'].map((c) => c.charCodeAt(0))])).toBe(true);
+  });
+
+  it('other CompX-A brands never get macros or page 0x04 writes', async () => {
+    const fake = new FakeMouse({ vendorId: 0x37b0, productId: 0x0010 });
+    const drv = (await openWlMouse(fake.asHid(), noSleep))!;
+    const settings = await drv.read();
+    expect(settings.some((s) => s.key === 'macros')).toBe(false);
+    expect(fake.sent.some((f) => f.page === 4)).toBe(false);
+    fake.sent = [];
+    await expect(drv.setTo(2, 4, 0x01, [0, 1, 0, 0, 0, 10], 0)).rejects.toThrow(/blocked/);
   });
 });

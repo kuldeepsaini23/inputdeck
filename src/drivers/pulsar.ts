@@ -19,7 +19,8 @@
 //
 // Only 3710:5406 (Pulsar 8K CrazyLight dongle) has been checked on real hardware: everything
 // else reports verified = false and the app keeps it read-only until the user allows changes.
-import type { DeviceKind, Driver, DriverFactory, Setting, Value } from './types';
+import { decodeMacro, encodeMacro, MOUSE_MAX_DELAY, PULSAR_MAX_EVENTS } from '../lib/macros';
+import type { DeviceKind, Driver, DriverFactory, MacroStep, Setting, Value } from './types';
 import { sleep as realSleep } from './types';
 import { ATK_DONGLES, ATK_MICE, atkPhoto } from './compxb-atk';
 
@@ -59,6 +60,20 @@ const A_RIPPLE = 0xb1;
 /** PAW3955 models keep their DPI stages here (Pulsar's web app: Sensor3955DPI = 6912), 6 bytes each */
 const A_DPI3955 = 0x1b00;
 const DPI3955_LEN = 6 * 8;
+/**
+ * Macros (Pulsar's web app: Macro = 768, functions la / gi / ua / ha): one 384-byte record per
+ * button, button i plays the record at 0x300 + 384 i. Record:
+ *   [nameLen 1-30, UTF-8 name padded with FF to 30 bytes, count <= 70, count x 5-byte event, checksum]
+ *   checksum = 0x55 - (count + every event byte)   (events: src/lib/macros.ts, format 'pulsar')
+ * A button runs its own record with type 6, param (buttonIndex << 8) | cycles
+ * (1-250 times, 254 = repeat while held, 255 = repeat until any key is pressed).
+ */
+const A_MACRO = 0x300;
+const MACRO_STRIDE = 384;
+export const PULSAR_MACRO_SLOTS = 5;
+/** bytes of a full record: 33 + 5 x 70 */
+const MACRO_REC_MAX = 33 + 5 * PULSAR_MAX_EVENTS;
+const macroBase = (i: number) => A_MACRO + MACRO_STRIDE * i;
 
 /** Addresses we may write, with their length. Anything else is refused. */
 const WRITABLE: [from: number, to: number][] = [
@@ -75,8 +90,10 @@ const WRITABLE: [from: number, to: number][] = [
   [A_RIPPLE, A_RIPPLE + 1],
   // Pulsar's own web app writes 3955 DPI stages here (6-byte records, function Si/ki)
   [A_DPI3955, A_DPI3955 + DPI3955_LEN - 1],
+  // macro records, one per button (never past a record's last used byte)
+  ...Array.from({ length: PULSAR_MACRO_SLOTS }, (_, i): [number, number] => [macroBase(i), macroBase(i) + MACRO_REC_MAX - 1]),
 ];
-const writable = (addr: number, len: number) => WRITABLE.some(([a, b]) => addr >= a && addr + len - 1 <= b);
+export const writable = (addr: number, len: number) => WRITABLE.some(([a, b]) => addr >= a && addr + len - 1 <= b);
 
 const MAP_SIZE = 0x100;
 
@@ -560,8 +577,16 @@ export const ACTIONS: [string, number, number][] = [
   ['Disabled', 0, 0],
 ];
 export const KEEP = 1000;
+/** Button choice values: play this button's macro once / repeat while held. */
+export const MACRO_ONCE = 100;
+export const MACRO_HELD = 101;
+const CYCLE_ONCE = 1;
+const CYCLE_HELD = 254;
 const BTN_KEYS = ['btn1', 'btn2', 'btn3', 'btn4', 'btn5'];
 const BTN_LABELS = ['Left button', 'Right button', 'Middle button (wheel click)', 'Back side button', 'Forward side button'];
+const BTN_SHORT = ['Left', 'Right', 'Wheel', 'Back', 'Forward'];
+/** button type "Macro" in Pulsar's web app */
+const TYPE_MACRO = 6;
 
 const s = (key: string, label: string, group: string, value: Value): Setting => ({ key, label, group, value });
 const text = (key: string, label: string, group: string, t: string) => s(key, label, group, { kind: 'text', text: t });
@@ -650,6 +675,8 @@ export class PulsarDriver implements Driver {
   private map3955 = new Uint8Array(DPI3955_LEN);
   private profile = 0;
   private profiles = 0;
+  /** per button: stored macro events + name bytes (name null = no valid record); null = macros off */
+  private macroRecs: { name: number[] | null; events: number[] }[] | null = null;
 
   constructor(
     private readonly device: HIDDevice,
@@ -716,6 +743,64 @@ export class PulsarDriver implements Driver {
       const n = Math.min(10, out.length - a);
       const r = await this.link.send(CMD_READ, base + a, new Array(n).fill(0));
       for (let i = 0; i < n; i++) out[a + i] = r[5 + i];
+    }
+  }
+
+  /** macros are offered on the hardware-verified Pulsar receiver, for mice whose buttons we map */
+  private get macrosOn(): boolean {
+    return this.verified && this.v.buttons;
+  }
+
+  /** One button's macro record, read the way Pulsar's app does (name, then count + events). */
+  private async readMacro(i: number): Promise<{ name: number[] | null; events: number[] }> {
+    const base = macroBase(i);
+    const head = new Uint8Array(10);
+    await this.readRange(base, head);
+    const nl = head[0];
+    if (nl < 1 || nl > 30) return { name: null, events: [] };
+    const nameBuf = new Uint8Array(nl);
+    nameBuf.set(head.subarray(1, 1 + Math.min(nl, 9)));
+    if (nl > 9) await this.readRange(base + 10, nameBuf.subarray(9));
+    const first = new Uint8Array(10);
+    await this.readRange(base + 31, first);
+    const count = first[0];
+    if (count > PULSAR_MAX_EVENTS) return { name: null, events: [] };
+    const rec = new Uint8Array(5 * count + 2); // count, events, checksum
+    rec.set(first.subarray(0, Math.min(10, rec.length)));
+    if (rec.length > 10) await this.readRange(base + 41, rec.subarray(10));
+    return { name: [...nameBuf], events: [...rec.subarray(1, 1 + 5 * count)] };
+  }
+
+  private async readMacros(): Promise<MacroStep[][]> {
+    const recs = [];
+    for (let i = 0; i < PULSAR_MACRO_SLOTS; i++) recs.push(await this.readMacro(i));
+    this.macroRecs = recs;
+    return recs.map((r) => decodeMacro(r.events, 'pulsar'));
+  }
+
+  /** Rewrite the records whose events changed (whole record, 10 bytes a frame) and read each back. */
+  private async writeMacros(macros: MacroStep[][]): Promise<void> {
+    const recs = this.macroRecs;
+    if (!recs) throw new Error('macros were not read');
+    if (macros.length !== PULSAR_MACRO_SLOTS) throw new Error(`need ${PULSAR_MACRO_SLOTS} macros`);
+    const enc = macros.map((m) => encodeMacro(m, 'pulsar'));
+    for (let i = 0; i < PULSAR_MACRO_SLOTS; i++) {
+      const ev = enc[i];
+      const old = recs[i];
+      if (ev.length === old.events.length && ev.every((x, k) => x === old.events[k]) && (old.name || !ev.length)) continue;
+      const name = old.name ?? [...`Macro ${i + 1}`].map((c) => c.charCodeAt(0));
+      const count = ev.length / 5;
+      const rec = new Array<number>(33 + ev.length).fill(0xff);
+      rec[0] = name.length;
+      name.forEach((c, k) => (rec[1 + k] = c));
+      rec[31] = count;
+      ev.forEach((c, k) => (rec[32 + k] = c));
+      rec[32 + ev.length] = (0x55 - count - ev.reduce((a, b) => a + b, 0)) & 0xff;
+      const base = macroBase(i);
+      for (let off = 0; off < rec.length; off += 10) await this.link.send(CMD_WRITE, base + off, rec.slice(off, off + 10));
+      const back = await this.readMacro(i);
+      recs[i] = back;
+      if (back.events.length !== ev.length || back.events.some((x, k) => x !== ev[k])) throw new Error(`macro M${i + 1} didn't read back the same`);
     }
   }
 
@@ -794,7 +879,9 @@ export class PulsarDriver implements Driver {
       if (v.angle && !v.r1Live) out.push(s('angle_snap', 'Angle snapping', 'Performance', toggle(m[A_ANGLE] !== 0)));
       if (v.ripple) out.push(s('ripple', 'Ripple control', 'Performance', toggle(m[A_RIPPLE] !== 0)));
 
-      // buttons
+      // macros (one per button) and buttons
+      this.macroRecs = null;
+      const macros = this.macrosOn ? await this.readMacros() : null;
       if (v.buttons) {
         for (let bi = 0; bi < 5; bi++) {
           const o = A_BTN + 4 * bi;
@@ -802,14 +889,30 @@ export class PulsarDriver implements Driver {
           const param = (m[o + 1] << 8) | m[o + 2];
           const opts: [string, number][] = ACTIONS.map((a, i) => [a[0], i]);
           let current = ACTIONS.findIndex((a) => a[1] === type && (type === 0 || a[2] === param));
+          if (macros) {
+            opts.push([`Macro M${bi + 1}`, MACRO_ONCE], [`Macro M${bi + 1} (repeat while held)`, MACRO_HELD]);
+            if (type === TYPE_MACRO && param >> 8 === bi && (param & 0xff) === CYCLE_ONCE) current = MACRO_ONCE;
+            if (type === TYPE_MACRO && param >> 8 === bi && (param & 0xff) === CYCLE_HELD) current = MACRO_HELD;
+          }
           if (current < 0) {
-            opts.unshift([`Custom (type ${type}) (keep)`, KEEP]);
+            opts.unshift([type === TYPE_MACRO ? `Macro M${(param >> 8) + 1} (keep)` : `Custom (type ${type}) (keep)`, KEEP]);
             current = KEEP;
           }
           out.push(s(BTN_KEYS[bi], BTN_LABELS[bi], 'Buttons', choice(opts, current)));
         }
       }
       if (!v.r1Live) out.push(s('debounce', 'Click debounce', 'Buttons', { kind: 'number', min: 0, max: 15, current: m[A_DEBOUNCE], unit: ' ms' }));
+      if (macros) {
+        out.push({
+          key: 'macros', label: 'Macros', group: 'Macros',
+          hint: 'Each button has its own macro (M1 = button 1 ...), kept per profile. Turn it on in the Buttons tab.',
+          value: {
+            kind: 'macros', slots: PULSAR_MACRO_SLOTS, format: 'pulsar', delays: true, maxDelay: MOUSE_MAX_DELAY,
+            text: false, mouse: true, maxPerMacro: 5 * PULSAR_MAX_EVENTS,
+            slotNames: BTN_SHORT.map((b, i) => `M${i + 1} · ${b}`), macros,
+          },
+        });
+      }
 
       // power (wireless only)
       if (this.wireless) {
@@ -831,6 +934,10 @@ export class PulsarDriver implements Driver {
     const vr = this.v;
     await this.batch(async () => {
       switch (st.key) {
+        case 'macros':
+          if (v.kind !== 'macros' || !this.macrosOn) throw new Error('bad value');
+          await this.writeMacros(v.macros);
+          return;
         case 'profile':
           if (v.kind !== 'choice' || v.current < 0 || v.current >= Math.max(1, this.profiles)) throw new Error('bad profile');
           await this.link.send(CMD_SET_PROFILE, 0, [v.current]);
@@ -905,7 +1012,11 @@ export class PulsarDriver implements Driver {
             if (!vr.buttons) throw new Error("this mouse's buttons can't be changed here");
             if (v.kind !== 'choice') throw new Error('bad value');
             if (v.current === KEEP) return;
-            const a = ACTIONS[v.current];
+            let a = ACTIONS[v.current];
+            if (v.current === MACRO_ONCE || v.current === MACRO_HELD) {
+              if (!this.macroRecs) throw new Error('macros were not read');
+              a = ['Macro', TYPE_MACRO, (bi << 8) | (v.current === MACRO_ONCE ? CYCLE_ONCE : CYCLE_HELD)];
+            }
             if (!a) throw new Error('bad action');
             if (bi === 0 && !(a[1] === 1 && a[2] === 0x0100)) {
               // never leave the mouse without a left click

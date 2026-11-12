@@ -29,17 +29,40 @@ const BY_ACTION: Record<number, 'tap' | 'down' | 'up'> = { [SS_TAP]: 'tap', [SS_
 /** Characters a text step may hold (typed with a US layout): printable ASCII, Tab, Enter. */
 export const textCharOk = (c: number) => c === 0x09 || c === 0x0a || (c >= 0x20 && c <= 0x7e);
 
+/** Mouse macro formats (WLMouse / Pulsar): keys, mouse buttons, wheel, delays; no text. */
+export const isMouseFormat = (f: MacroFormat | undefined) => f === 'wlmouse' || f === 'pulsar';
+/** Longest delay a mouse macro step can hold (both store 16-bit milliseconds). */
+export const MOUSE_MAX_DELAY = 65535;
+export const MOUSE_BUTTONS = ['Left', 'Right', 'Middle', 'Back', 'Forward'];
+
+/** Can `kc` go in a macro of this format? Mice take HID keyboard usages A…F24…Menu and modifiers. */
+export function keyOk(kc: number, format: MacroFormat): boolean {
+  if (!Number.isInteger(kc)) return false;
+  if (isMouseFormat(format)) return (kc >= 0x04 && kc <= 0xa4) || (kc >= 0xe0 && kc <= 0xe7);
+  return kc >= 1 && kc <= 0xff;
+}
+
 /** Why a step can't be stored in `format` (undefined when it can). */
 export function stepProblem(s: MacroStep, format: MacroFormat): string | undefined {
+  const mouse = isMouseFormat(format);
   switch (s.t) {
     case 'tap':
     case 'down':
     case 'up':
-      return Number.isInteger(s.kc) && s.kc >= 1 && s.kc <= 0xff ? undefined : `key 0x${(s.kc >>> 0).toString(16)} can't go in a macro`;
-    case 'delay':
-      if (format !== 'qmk') return "this keyboard's firmware can't store delays";
-      return Number.isInteger(s.ms) && s.ms >= 0 && s.ms <= MAX_DELAY ? undefined : `delay must be 0-${MAX_DELAY} ms`;
+      return keyOk(s.kc, format) ? undefined : `key 0x${(s.kc >>> 0).toString(16)} can't go in a macro`;
+    case 'mouse':
+      if (!mouse) return "a keyboard macro can't press mouse buttons";
+      return Number.isInteger(s.btn) && s.btn >= 1 && s.btn <= 5 && ['tap', 'down', 'up'].includes(s.a) ? undefined : 'unknown mouse button';
+    case 'wheel':
+      if (!mouse) return "a keyboard macro can't scroll";
+      return s.dir === 1 || s.dir === -1 ? undefined : 'unknown scroll direction';
+    case 'delay': {
+      if (format === 'qmk-legacy') return "this keyboard's firmware can't store delays";
+      const max = mouse ? MOUSE_MAX_DELAY : MAX_DELAY;
+      return Number.isInteger(s.ms) && s.ms >= 0 && s.ms <= max ? undefined : `delay must be 0-${max} ms`;
+    }
     case 'text':
+      if (mouse) return "this mouse can't type text: add the keys instead";
       for (let i = 0; i < s.text.length; i++) {
         if (!textCharOk(s.text.charCodeAt(i))) return `“${s.text[i]}” can't be typed by a macro (plain ASCII only)`;
       }
@@ -49,8 +72,207 @@ export function stepProblem(s: MacroStep, format: MacroFormat): string | undefin
   }
 }
 
+/** Why a whole macro can't be stored in `format` (undefined when it can). */
+export function macroProblem(steps: MacroStep[], format: MacroFormat): string | undefined {
+  try {
+    encodeMacro(steps, format);
+    return undefined;
+  } catch (e) {
+    return (e as Error).message;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// mouse formats
+
+/** HID modifier usage (0xE0-0xE7) -> its bit in the modifier byte, or -1. */
+const modBit = (kc: number) => (kc >= 0xe0 && kc <= 0xe7 ? kc - 0xe0 : -1);
+
+type Ev = { kind: 'key'; down: boolean; kc: number } | { kind: 'mouse'; down: boolean; btn: number };
+
+/** Key / button steps as press and release events (taps become a press then a release). */
+function pressEvents(s: MacroStep): Ev[] {
+  if (s.t === 'tap' || s.t === 'down' || s.t === 'up') {
+    const d = { kind: 'key' as const, down: true, kc: s.kc };
+    return s.t === 'tap' ? [d, { ...d, down: false }] : [{ ...d, down: s.t === 'down' }];
+  }
+  if (s.t === 'mouse') {
+    const d = { kind: 'mouse' as const, down: true, btn: s.btn };
+    return s.a === 'tap' ? [d, { ...d, down: false }] : [{ ...d, down: s.a === 'down' }];
+  }
+  return [];
+}
+
+/** Turn a press immediately followed by the release of the same key/button into one tap. */
+function mergeTaps(steps: MacroStep[]): MacroStep[] {
+  const out: MacroStep[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const a = steps[i];
+    const b = steps[i + 1];
+    if (a.t === 'down' && b?.t === 'up' && a.kc === b.kc) {
+      out.push({ t: 'tap', kc: a.kc });
+      i++;
+    } else if (a.t === 'mouse' && a.a === 'down' && b?.t === 'mouse' && b.a === 'up' && a.btn === b.btn) {
+      out.push({ t: 'mouse', a: 'tap', btn: a.btn });
+      i++;
+    } else out.push(a);
+  }
+  return out;
+}
+
+/**
+ * WLMouse / CompX-A macro bytes (official web hub, functions MA / RA): a list of records
+ *   02 kc / 03 kc       key press / release (HID usage)
+ *   09 bit / 0A bit     modifier press / release (bit 1 LCtrl, 2 LShift, 4 LAlt, 8 LGUI, 0x10.. right)
+ *   01 mask             mouse buttons now held (1 L, 2 R, 4 M, 8 back, 0x10 forward), absolute
+ *   10 01 / 10 FF       wheel up / down
+ *   20 ms | 21 msHi msLo  delay (8 / 16 bit; the hub also knows 22/23 for 24/32 bit)
+ */
+function encodeWl(steps: MacroStep[]): number[] {
+  const out: number[] = [];
+  let held = 0;
+  for (const s of steps) {
+    if (s.t === 'delay') {
+      if (s.ms <= 0xff) out.push(0x20, s.ms);
+      else out.push(0x21, s.ms >> 8, s.ms & 0xff);
+    } else if (s.t === 'wheel') out.push(0x10, s.dir === 1 ? 0x01 : 0xff);
+    else {
+      for (const e of pressEvents(s)) {
+        if (e.kind === 'key') {
+          const m = modBit(e.kc);
+          if (m >= 0) out.push(e.down ? 0x09 : 0x0a, 1 << m);
+          else out.push(e.down ? 0x02 : 0x03, e.kc);
+        } else {
+          const bit = 1 << (e.btn - 1);
+          held = e.down ? held | bit : held & ~bit;
+          out.push(0x01, held);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function decodeWl(b: ArrayLike<number>): MacroStep[] {
+  const out: MacroStep[] = [];
+  let held = 0;
+  let i = 0;
+  const bits = (m: number, f: (bit: number) => void) => {
+    for (let k = 0; k < 8; k++) if (m & (1 << k)) f(k);
+  };
+  while (i < b.length) {
+    const c = b[i];
+    const n = c === 0x21 ? 3 : c === 0x22 ? 4 : c === 0x23 ? 5 : 2;
+    if (i + n > b.length) break;
+    const d = Array.from({ length: n - 1 }, (_, k) => b[i + 1 + k]);
+    i += n;
+    switch (c) {
+      case 0x02: out.push({ t: 'down', kc: d[0] }); break;
+      case 0x03: out.push({ t: 'up', kc: d[0] }); break;
+      case 0x09: bits(d[0], (k) => out.push({ t: 'down', kc: 0xe0 + k })); break;
+      case 0x0a: bits(d[0], (k) => out.push({ t: 'up', kc: 0xe0 + k })); break;
+      case 0x01: {
+        const now = d[0] & 0x1f;
+        bits(held & ~now, (k) => out.push({ t: 'mouse', a: 'up', btn: k + 1 }));
+        bits(now & ~held, (k) => out.push({ t: 'mouse', a: 'down', btn: k + 1 }));
+        held = now;
+        break;
+      }
+      case 0x10: out.push({ t: 'wheel', dir: d[0] === 0x01 ? 1 : -1 }); break;
+      case 0x20: case 0x21: case 0x22: case 0x23:
+        out.push({ t: 'delay', ms: Math.min(MOUSE_MAX_DELAY, d.reduce((a, x) => a * 256 + x, 0)) });
+        break;
+      default:
+        // unknown record: the official hub stops reading the macro here too
+        return mergeTaps(out);
+    }
+  }
+  return mergeTaps(out);
+}
+
+/** Pulsar: a tap is stored as press, PULSAR_TAP_MS, release (the web app's own default gap). */
+export const PULSAR_TAP_MS = 10;
+/** Pulsar keeps at most this many events per macro (web app: contexts.length < 70). */
+export const PULSAR_MAX_EVENTS = 70;
+
+/**
+ * Pulsar / CompX-B macro events (Pulsar web app, functions la / gi), 5 bytes each:
+ *   [status << 6 | type, valueLo, valueHi, delayHi, delayLo]   status 2 press, 1 release, 0 other
+ *   type 0 modifier bits (as above), 1 key (HID usage), 4 mouse buttons (1 L, 2 R, 4 M, 8 back,
+ *   0x10 forward), 6 wheel (value 1 up, 0xFF down). The delay is the wait AFTER the event.
+ */
+function encodePulsar(steps: MacroStep[]): number[] {
+  const ev: { st: number; type: number; value: number; delay: number }[] = [];
+  for (const s of steps) {
+    if (s.t === 'delay') {
+      const last = ev[ev.length - 1];
+      if (!last) throw new Error("a macro can't start with a delay on this mouse");
+      if (last.delay + s.ms > MOUSE_MAX_DELAY) throw new Error(`delays in a row may add up to ${MOUSE_MAX_DELAY} ms`);
+      last.delay += s.ms;
+    } else if (s.t === 'wheel') ev.push({ st: 0, type: 6, value: s.dir === 1 ? 0x01 : 0xff, delay: 0 });
+    else {
+      const es = pressEvents(s);
+      es.forEach((e, k) => {
+        const m = e.kind === 'key' ? modBit(e.kc) : -1;
+        const type = e.kind === 'mouse' ? 4 : m >= 0 ? 0 : 1;
+        const value = e.kind === 'mouse' ? 1 << (e.btn - 1) : m >= 0 ? 1 << m : e.kc;
+        ev.push({ st: e.down ? 2 : 1, type, value, delay: es.length === 2 && k === 0 ? PULSAR_TAP_MS : 0 });
+      });
+    }
+  }
+  if (ev.length > PULSAR_MAX_EVENTS) throw new Error(`a macro holds at most ${PULSAR_MAX_EVENTS} presses/releases on this mouse`);
+  return ev.flatMap((e) => [(e.st << 6) | e.type, e.value & 0xff, (e.value >> 8) & 0xff, (e.delay >> 8) & 0xff, e.delay & 0xff]);
+}
+
+function decodePulsar(b: ArrayLike<number>): MacroStep[] {
+  const raw: MacroStep[] = [];
+  /** index in raw of a press that was followed by exactly the tap gap */
+  const tapGap = new Set<number>();
+  for (let i = 0; i + 5 <= b.length; i += 5) {
+    const st = b[i] >> 6;
+    const type = b[i] & 0x0f;
+    const value = b[i + 1] | (b[i + 2] << 8);
+    const delay = (b[i + 3] << 8) | b[i + 4];
+    const t = st === 2 ? 'down' : 'up';
+    const before = raw.length;
+    if (type === 0) for (let k = 0; k < 8; k++) value & (1 << k) && raw.push({ t, kc: 0xe0 + k });
+    else if (type === 1) value >= 1 && value <= 0xff && raw.push({ t, kc: value });
+    else if (type === 4) for (let k = 0; k < 5; k++) value & (1 << k) && raw.push({ t: 'mouse', a: t, btn: k + 1 });
+    else if (type === 6) raw.push({ t: 'wheel', dir: (value & 0xff) === 0x01 ? 1 : -1 });
+    // other types (mouse movement, menu key...) can't be shown and are left out
+    if (raw.length === before) continue;
+    if (st === 2 && delay === PULSAR_TAP_MS && raw.length === before + 1) tapGap.add(before);
+    else if (delay > 0) raw.push({ t: 'delay', ms: delay });
+  }
+  // a press with the tap gap, then its release: one tap
+  const out: MacroStep[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const a = raw[i];
+    const b2 = raw[i + 1];
+    const tap =
+      tapGap.has(i) &&
+      ((a.t === 'down' && b2?.t === 'up' && a.kc === b2.kc) ||
+        (a.t === 'mouse' && b2?.t === 'mouse' && b2.a === 'up' && a.btn === b2.btn));
+    if (tap) {
+      out.push(a.t === 'mouse' ? { t: 'mouse', a: 'tap', btn: a.btn } : { t: 'tap', kc: (a as { kc: number }).kc });
+      i++;
+    } else {
+      out.push(a);
+      if (tapGap.has(i)) out.push({ t: 'delay', ms: PULSAR_TAP_MS });
+    }
+  }
+  return out;
+}
+
 /** Bytes of one macro (without its NUL). Throws on steps the format can't hold. */
 export function encodeMacro(steps: MacroStep[], format: MacroFormat): number[] {
+  if (isMouseFormat(format)) {
+    for (const s of steps) {
+      const bad = stepProblem(s, format);
+      if (bad) throw new Error(bad);
+    }
+    return format === 'wlmouse' ? encodeWl(steps) : encodePulsar(steps);
+  }
   const out: number[] = [];
   const pre = format === 'qmk' ? [SS_PREFIX] : [];
   for (const s of steps) {
@@ -58,13 +280,15 @@ export function encodeMacro(steps: MacroStep[], format: MacroFormat): number[] {
     if (bad) throw new Error(bad);
     if (s.t === 'delay') out.push(SS_PREFIX, SS_DELAY, ...[...String(s.ms)].map((c) => c.charCodeAt(0)), DELAY_END);
     else if (s.t === 'text') for (let i = 0; i < s.text.length; i++) out.push(s.text.charCodeAt(i));
-    else out.push(...pre, ACTION[s.t], s.kc);
+    else if (s.t === 'tap' || s.t === 'down' || s.t === 'up') out.push(...pre, ACTION[s.t], s.kc);
   }
   return out;
 }
 
 /** Steps of one macro's bytes (without NUL). Unknown action codes are skipped like QMK does. */
 export function decodeMacro(b: ArrayLike<number>, format: MacroFormat): MacroStep[] {
+  if (format === 'wlmouse') return decodeWl(b);
+  if (format === 'pulsar') return decodePulsar(b);
   const out: MacroStep[] = [];
   const text = (c: number) => {
     const last = out[out.length - 1];
@@ -120,10 +344,10 @@ export function encodeMacros(macros: MacroStep[][], format: MacroFormat): number
   return macros.flatMap((m) => [...encodeMacro(m, format), 0]);
 }
 
-/** Bytes one macro takes, including its NUL (undefined if it can't be stored). */
+/** Bytes one macro takes, including the NUL of QMK formats (undefined if it can't be stored). */
 export function macroSize(steps: MacroStep[], format: MacroFormat): number | undefined {
   try {
-    return encodeMacro(steps, format).length + 1;
+    return encodeMacro(steps, format).length + (isMouseFormat(format) ? 0 : 1);
   } catch {
     return undefined;
   }
@@ -270,14 +494,20 @@ export function withMacro(v: Macros, slot: number, steps: MacroStep[]): Macros {
   return { ...v, macros: v.macros.map((m, i) => (i === slot ? steps : m)) };
 }
 
-/** Does this value fit the device (every step storable, total within maxBytes)? */
+/** Does this value fit the device (every step storable, total within maxBytes, each macro within maxPerMacro)? */
 export function fits(v: Macros): boolean {
   if (!v.format) return true;
   const n = usedBytes(v);
-  return n !== undefined && (v.maxBytes === undefined || n <= v.maxBytes);
+  if (n === undefined || (v.maxBytes !== undefined && n > v.maxBytes)) return false;
+  const per = v.maxPerMacro;
+  return per === undefined || v.macros.every((m) => (macroSize(m, v.format!) ?? Infinity) <= per);
 }
 
+/** Label of a macro slot ("M0", or the device's own slot name). */
+export const slotName = (v: Macros, slot: number) => v.slotNames?.[slot] ?? `M${slot}`;
+
 const keyName = (kc: number) => kcLabel(kc, 'qmk-v2') || `0x${kc.toString(16)}`;
+const btnName = (btn: number) => `${MOUSE_BUTTONS[btn - 1] ?? `Button ${btn}`} click`;
 
 /** Short chip text for a step. */
 export function stepText(s: MacroStep): string {
@@ -288,6 +518,10 @@ export function stepText(s: MacroStep): string {
       return `↓ ${keyName(s.kc)}`;
     case 'up':
       return `↑ ${keyName(s.kc)}`;
+    case 'mouse':
+      return `${s.a === 'down' ? '↓ ' : s.a === 'up' ? '↑ ' : ''}${btnName(s.btn)}`;
+    case 'wheel':
+      return s.dir === 1 ? 'Scroll ↑' : 'Scroll ↓';
     case 'delay':
       return `${s.ms} ms`;
     case 'text':
@@ -298,6 +532,6 @@ export function stepText(s: MacroStep): string {
 /** One-line preview of a macro for the slot list. */
 export function macroSummary(steps: MacroStep[], max = 32): string {
   if (!steps.length) return 'Empty';
-  const t = steps.filter((s) => s.t !== 'up').map(stepText).join(' ');
+  const t = steps.filter((s) => s.t !== 'up' && !(s.t === 'mouse' && s.a === 'up')).map(stepText).join(' ');
   return t.length > max ? t.slice(0, max - 1) + '…' : t;
 }

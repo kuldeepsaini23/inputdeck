@@ -50,7 +50,9 @@ export class FakePulsar {
     this.mid = o.mid ?? 96
     this.link = o.link ?? 5
     const m = this.map
-    const set = (a: number, v: number) => { m[a] = v; m[a + 1] = (0x55 - v) & 0xff }
+    // macro records (one per button at 0x300 + 384 i) are erased flash on a real mouse
+    m.fill(0xff, 0x300, 0x300 + 384 * 5)
+    const set =(a: number, v: number) => { m[a] = v; m[a + 1] = (0x55 - v) & 0xff }
     const stages = o.stages ?? [400, 800, 1000, 12800]
     set(0x00, 0x40) // 8000 Hz
     set(0x02, stages.length)

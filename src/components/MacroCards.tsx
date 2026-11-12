@@ -1,33 +1,33 @@
-// Macros tab on the keyboard page: slot list, step editor (chips) with recording, byte usage.
+// Macros tab on the keyboard and mouse pages: slot list, step editor (chips) with recording, byte usage.
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight, Circle, Plus, Square, Trash2, X } from 'lucide-react'
-import type { MacroStep } from '#/drivers/types'
+import type { MacroFormat, MacroStep } from '#/drivers/types'
 import { categories, describe, search, type Keycode } from '#/lib/keycodes'
 import {
-  MAX_DELAY, fits, hidFromCode, insertSteps, macroSize, macroSummary, moveStep, normalize, removeStep, stepProblem,
-  stepText, stepsFromRecording, textCharOk, usedBytes, withMacro, type Macros, type RecordedKey,
+  MAX_DELAY, MOUSE_BUTTONS, fits, hidFromCode, insertSteps, keyOk, macroProblem, macroSize, macroSummary, moveStep, normalize,
+  removeStep, slotName, stepProblem, stepText, stepsFromRecording, textCharOk, usedBytes, withMacro, type Macros, type RecordedKey,
 } from '#/lib/macros'
 import { cn } from '#/lib/utils'
 import { Card, Segmented } from './kit'
 
 /** Keys a macro can press: basic HID usages only (QMK stores 8-bit keycodes in macros). */
 const KEY_CATS = ['basic', 'mods', 'nav', 'fkeys', 'numpad', 'media']
-const macroKeyOk = (k: Keycode) => k.code >= 0x04 && k.code <= 0xff
 
-/** List of macro slots (M0…). */
-export function MacroList({ v, slot, onSelect }: { v: Macros; slot: number; onSelect: (n: number) => void }) {
+/** List of macro slots (M0…, or the device's own slot names). */
+export function MacroList({ v, slot, onSelect, hint = 'Put a macro on a key in the Keys tab.' }: { v: Macros; slot: number; onSelect: (n: number) => void; hint?: string }) {
+  const named = !!v.slotNames
   return (
     <Card title={`Macros · ${v.slots} slot${v.slots === 1 ? '' : 's'}`}>
       <div className="scroll-thin -mr-1 flex max-h-[300px] flex-col gap-1.5 overflow-y-auto pr-1" role="radiogroup" aria-label="Macro slot">
         {v.macros.map((m, i) => (
           <button key={i} type="button" role="radio" aria-checked={i === slot} onClick={() => onSelect(i)}
             className={cn('flex h-11 shrink-0 items-center gap-3 rounded-[12px] px-3 text-left', i === slot ? 'plat' : 'raised text-[var(--text-2)]')}>
-            <span className="display w-8 shrink-0 text-[12px] font-semibold">M{i}</span>
+            <span className={cn('display shrink-0 truncate text-[12px] font-semibold', named ? 'max-w-[45%]' : 'w-8')}>{slotName(v, i)}</span>
             <span className={cn('min-w-0 flex-1 truncate text-[11px]', i === slot ? 'opacity-70' : m.length ? '' : 'text-[var(--text-4)]')}>{macroSummary(m)}</span>
           </button>
         ))}
       </div>
-      <p className="hint mt-3 mb-0">Put a macro on a key in the Keys tab.</p>
+      <p className="hint mt-3 mb-0">{hint}</p>
     </Card>
   )
 }
@@ -61,8 +61,11 @@ export function MacroEditor({ v, slot, onChange, className }: {
   const steps = v.macros[slot] ?? []
   const format = v.format ?? 'qmk'
   const delays = v.delays !== false
+  const texts = v.text !== false
+  const mouse = !!v.mouse
+  const name = slotName(v, slot)
   const [sel, setSel] = useState<number | undefined>(undefined)
-  const [adding, setAdding] = useState<'key' | 'delay' | 'text' | undefined>(undefined)
+  const [adding, setAdding] = useState<Adding | undefined>(undefined)
   const [recording, setRecording] = useState(false)
   const [recDelays, setRecDelays] = useState(true)
   const [rec, setRec] = useState<RecordedKey[]>([])
@@ -78,9 +81,14 @@ export function MacroEditor({ v, slot, onChange, className }: {
   /** Replace this macro's steps, refusing changes that don't fit the keyboard. */
   const commit = (next: MacroStep[], select?: number) => {
     const nv = withMacro(v, slot, next)
-    const bad = next.map((s) => stepProblem(s, format)).find(Boolean)
+    const bad = next.map((s) => stepProblem(s, format)).find(Boolean) ?? macroProblem(next, format)
     if (bad) return setProblem(bad)
-    if (!fits(nv)) return setProblem(`That doesn't fit: the keyboard has room for ${v.maxBytes} bytes of macros.`)
+    if (!fits(nv)) {
+      const per = v.maxPerMacro !== undefined && (macroSize(next, format) ?? 0) > v.maxPerMacro
+      return setProblem(per
+        ? `That doesn't fit: one macro can use ${v.maxPerMacro} bytes on this ${mouse ? 'mouse' : 'keyboard'}.`
+        : `That doesn't fit: the ${mouse ? 'mouse' : 'keyboard'} has room for ${v.maxBytes} bytes of macros.`)
+    }
     setProblem(undefined)
     onChange(nv)
     setSel(select)
@@ -99,7 +107,7 @@ export function MacroEditor({ v, slot, onChange, className }: {
       e.stopPropagation()
       if (e.repeat) return
       const kc = hidFromCode(e.code)
-      if (kc === undefined) return
+      if (kc === undefined || !keyOk(kc, format)) return
       recRef.current = [...recRef.current, { type, kc, at: e.timeStamp || performance.now() }]
       setRec(recRef.current)
     }
@@ -111,7 +119,7 @@ export function MacroEditor({ v, slot, onChange, className }: {
       window.removeEventListener('keydown', down, true)
       window.removeEventListener('keyup', up, true)
     }
-  }, [recording])
+  }, [recording, format])
   const recOpts = { delays: delays && recDelays, maxDelay: v.maxDelay ?? MAX_DELAY }
   const recSteps = useMemo(() => stepsFromRecording(rec, recOpts), [rec, recOpts.delays, recOpts.maxDelay]) // eslint-disable-line react-hooks/exhaustive-deps
   const stopRecording = () => {
@@ -126,7 +134,7 @@ export function MacroEditor({ v, slot, onChange, className }: {
   const s = selIdx !== undefined ? steps[selIdx] : undefined
 
   return (
-    <Card className={className} title={`M${slot} · ${steps.length} step${steps.length === 1 ? '' : 's'}${thisBytes !== undefined ? ` · ${thisBytes} bytes` : ''}`}
+    <Card className={className} title={`${name} · ${steps.length} step${steps.length === 1 ? '' : 's'}${thisBytes !== undefined ? ` · ${thisBytes} bytes` : ''}`}
       right={
         <span className="flex items-center gap-1.5">
           {delays && (
@@ -142,7 +150,7 @@ export function MacroEditor({ v, slot, onChange, className }: {
         </span>
       }>
       <div className={cn('recess scroll-thin flex max-h-[148px] min-h-[64px] flex-wrap content-start gap-1.5 overflow-y-auto rounded-[14px] p-3', recording && 'ring-1 ring-[#ff4545]/50')}
-        role="listbox" aria-label={`Steps of macro M${slot}`}>
+        role="listbox" aria-label={`Steps of macro ${name}`}>
         {shown.length === 0 && <span className="hint self-center">{recording ? 'Recording… press keys on your keyboard, then Stop.' : 'No steps yet. Record keys or add steps below.'}</span>}
         {shown.map((x, i) => {
           const live = recording && i >= at && i < at + recSteps.length
@@ -165,6 +173,16 @@ export function MacroEditor({ v, slot, onChange, className }: {
               options={[['Tap', 'tap'], ['Hold', 'down'], ['Release', 'up']] as const}
               onChange={(t) => commit(steps.map((y, k) => (k === selIdx ? { t, kc: s.kc } : y)), selIdx)} />
           )}
+          {s.t === 'mouse' && (
+            <Segmented label="Button action" className="[&_button]:!px-3 [&_button]:!py-1 [&_button]:!text-[10.5px]" value={s.a}
+              options={[['Click', 'tap'], ['Hold', 'down'], ['Release', 'up']] as const}
+              onChange={(a) => commit(steps.map((y, k) => (k === selIdx ? { t: 'mouse', a, btn: s.btn } : y)), selIdx)} />
+          )}
+          {s.t === 'wheel' && (
+            <Segmented label="Scroll direction" className="[&_button]:!px-3 [&_button]:!py-1 [&_button]:!text-[10.5px]" value={s.dir}
+              options={[['Up', 1], ['Down', -1]] as const}
+              onChange={(dir) => commit(steps.map((y, k) => (k === selIdx ? { t: 'wheel', dir } : y)), selIdx)} />
+          )}
           {s.t === 'delay' && (
             <NumberField label="Delay (ms)" value={s.ms} max={v.maxDelay ?? MAX_DELAY} onCommit={(ms) => commit(steps.map((y, k) => (k === selIdx ? { t: 'delay', ms } : y)), selIdx)} />
           )}
@@ -183,10 +201,10 @@ export function MacroEditor({ v, slot, onChange, className }: {
       {!recording && (
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
           <span className="eyebrow mr-1">{selIdx === undefined ? 'Add' : `Add after step ${selIdx + 1}`}</span>
-          {(['key', ...(delays ? ['delay'] : []), 'text'] as const).map((k) => (
+          {(['key', ...(mouse ? ['mouse', 'wheel'] : []), ...(delays ? ['delay'] : []), ...(texts ? ['text'] : [])] as Adding[]).map((k) => (
             <button key={k} type="button" className={cn('chip flex items-center gap-1 !text-[11px]', adding === k && 'plat !border-transparent')} aria-pressed={adding === k}
-              onClick={() => setAdding(adding === k ? undefined : (k as 'key' | 'delay' | 'text'))}>
-              <Plus className="size-3" />{k === 'key' ? 'Tap key' : k === 'delay' ? 'Delay' : 'Text'}
+              onClick={() => setAdding(adding === k ? undefined : k)}>
+              <Plus className="size-3" />{ADD_LABEL[k]}
             </button>
           ))}
           {steps.length > 0 && (
@@ -194,7 +212,18 @@ export function MacroEditor({ v, slot, onChange, className }: {
           )}
         </div>
       )}
-      {!recording && adding === 'key' && <MacroKeyPicker onPick={(kc) => add([{ t: 'tap', kc }])} />}
+      {!recording && adding === 'key' && <MacroKeyPicker format={format} onPick={(kc) => add([{ t: 'tap', kc }])} />}
+      {!recording && adding === 'mouse' && (
+        <div className="mt-3 flex flex-wrap items-center gap-1.5">
+          {MOUSE_BUTTONS.map((b, i) => <button key={b} type="button" className="chip !text-[11px]" onClick={() => add([{ t: 'mouse', a: 'tap', btn: i + 1 }])}>{b} click</button>)}
+        </div>
+      )}
+      {!recording && adding === 'wheel' && (
+        <div className="mt-3 flex flex-wrap items-center gap-1.5">
+          <button type="button" className="chip !text-[11px]" onClick={() => add([{ t: 'wheel', dir: 1 }])}>Scroll up</button>
+          <button type="button" className="chip !text-[11px]" onClick={() => add([{ t: 'wheel', dir: -1 }])}>Scroll down</button>
+        </div>
+      )}
       {!recording && adding === 'delay' && (
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
           {[50, 100, 250, 500, 1000].map((ms) => <button key={ms} type="button" className="chip !text-[11px]" onClick={() => add([{ t: 'delay', ms }])}>{ms} ms</button>)}
@@ -207,25 +236,38 @@ export function MacroEditor({ v, slot, onChange, className }: {
 
       {problem && <p className="hint mt-3 mb-0 text-[var(--warn)]">{problem}</p>}
       <p className="hint mt-3 mb-0">
-        {recording ? 'Every key you press is captured, Esc and Tab too; click Stop when done.' : `Text is typed as plain ASCII with a US layout.${delays ? '' : " This keyboard's firmware can't store delays."}`}
+        {recording
+          ? 'Every key you press is captured, Esc and Tab too; click Stop when done.'
+          : mouse
+            ? 'The mouse plays the macro itself, with or without InputDeck open.'
+            : `Text is typed as plain ASCII with a US layout.${delays ? '' : " This keyboard's firmware can't store delays."}`}
       </p>
     </Card>
   )
 }
+
+type Adding = 'key' | 'mouse' | 'wheel' | 'delay' | 'text'
+const ADD_LABEL: Record<Adding, string> = { key: 'Tap key', mouse: 'Mouse click', wheel: 'Scroll', delay: 'Delay', text: 'Text' }
 
 function stepTitle(s: MacroStep): string {
   switch (s.t) {
     case 'tap': return `Tap ${describe(s.kc)}`
     case 'down': return `Hold ${describe(s.kc)} down`
     case 'up': return `Release ${describe(s.kc)}`
+    case 'mouse': {
+      const b = `${MOUSE_BUTTONS[s.btn - 1] ?? `button ${s.btn}`} mouse button`
+      return s.a === 'tap' ? `Click the ${b}` : s.a === 'down' ? `Hold the ${b} down` : `Release the ${b}`
+    }
+    case 'wheel': return s.dir === 1 ? 'Scroll up one notch' : 'Scroll down one notch'
     case 'delay': return `Wait ${s.ms} ms`
     case 'text': return `Type “${s.text}”`
   }
 }
 
-/** Compact keycode grid for macro steps (basic keys only). */
-function MacroKeyPicker({ onPick }: { onPick: (kc: number) => void }) {
-  const cats = useMemo(() => categories('qmk-v2').filter((c) => KEY_CATS.includes(c.id)).map((c) => ({ ...c, codes: c.codes.filter(macroKeyOk) })), [])
+/** Compact keycode grid for macro steps (basic keys only, those the format can store). */
+function MacroKeyPicker({ format, onPick }: { format: MacroFormat; onPick: (kc: number) => void }) {
+  const macroKeyOk = (k: Keycode) => k.code >= 0x04 && keyOk(k.code, format)
+  const cats = useMemo(() => categories('qmk-v2').filter((c) => KEY_CATS.includes(c.id)).map((c) => ({ ...c, codes: c.codes.filter(macroKeyOk) })).filter((c) => c.codes.length), [format]) // eslint-disable-line react-hooks/exhaustive-deps
   const [cat, setCat] = useState(cats[0].id)
   const [q, setQ] = useState('')
   const shown = q.trim() ? search(q).filter(macroKeyOk).slice(0, 36) : cats.find((c) => c.id === cat)?.codes ?? []

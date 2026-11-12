@@ -29,7 +29,7 @@ import {
   versionNumber,
   writeFrames,
 } from './lofree';
-import { KEY_NORMAL, KEY_SOCD, mirrorMode, parseSocdPairs, socdEntries } from './lofree';
+import { KEY_NORMAL, KEY_SOCD, LED_BYTES, mirrorMode, parseSocdPairs, rawHex, socdEntries } from './lofree';
 import type { Socd } from './types';
 
 const hex = (s: string) => s.split(/\s+/).filter(Boolean).map((b) => parseInt(b, 16));
@@ -106,6 +106,13 @@ describe('packets', () => {
     // live travel: only 63 [01] / 63 []
     expect(allowed(writeFrames(CMD.LIVE_TRAVEL, [1], 0)[0])).toBe(true);
     expect(allowed(writeFrames(CMD.LIVE_TRAVEL, [2], 0)[0])).toBe(false);
+    // LED location (1B, 128 bytes) and LED colours (21, 480 bytes): reads only, inside the table
+    expect(allowed(readFrames(CMD.READ_LED_MAP, KEY_SLOTS, 0)[2])).toBe(true);
+    expect(allowed(readFrames(CMD.READ_LED_COLORS, LED_BYTES, 0)[8])).toBe(true);
+    expect(allowed(readFrames(CMD.READ_LED_MAP, 1, KEY_SLOTS)[0])).toBe(false);
+    expect(allowed(readFrames(CMD.READ_LED_COLORS, 1, LED_BYTES)[0])).toBe(false);
+    expect(allowed(writeFrames(CMD.READ_LED_COLORS, [0xff, 0, 0], 0)[0])).toBe(false);
+    expect(allowed(writeFrames(CMD.READ_LED_MAP, [1], 0)[0])).toBe(false);
     // 31-byte receiver frames
     expect(allowed(startPkt(true, 31), 31)).toBe(true);
     expect(allowed(startPkt(true, 31), 63)).toBe(false);
@@ -538,5 +545,106 @@ describe('SOCD', () => {
     const s = find(await d.read(), 'socd');
     const v = s.value as Socd;
     await expect(d.write(withValue(s, { ...v, entries: [{ keys: [posOf(v, 'A'), posOf(v, 'D')], mode: 0, travel: 1, rapid: false }] }))).rejects.toThrow(/didn't take the SOCD change for: A, D \(A: sent key type 26, reads back 20\)$/);
+  });
+});
+
+describe('diagnose', () => {
+  /** commands a read-only probe may send (data frames) */
+  const READ_CMDS = [CMD.READ_VERSION, CMD.READ_DONGLE_VERSION, CMD.READ_FUNC, CMD.READ_DEF_MATRIX, CMD.READ_LED_MAP, CMD.READ_LED_COLORS] as number[];
+  const onlyReads = (sent: number[][]) => {
+    for (const p of sent) {
+      if (p[2] === 0x01 || p[2] === 0x02) expect(p[3]).toBe(0x18); // START / END of a read
+      else {
+        expect(READ_CMDS).toContain(p[2]);
+        expect(p.slice(7).every((b) => b === 0)).toBe(true); // no payload
+      }
+    }
+  };
+
+  it('rawHex folds trailing zeros', () => {
+    expect(rawHex(pad(hex('00 00 21 38')))).toBe('00 00 21 38 +59x00');
+    expect(rawHex([0, 0])).toBe('+2x00');
+    expect(rawHex([1, 2])).toBe('01 02');
+  });
+
+  it('sends only read transactions, with the exact 1B / 21 frames, and reports raw replies', async () => {
+    const [f, d] = await connect();
+    f.sent = [];
+    const progress: [number, number][] = [];
+    const r = await d.diagnose!((done, total) => progress.push([done, total]));
+    onlyReads(f.sent);
+    // exactly the probe's commands, in order (START / END left out)
+    const cmds = f.sent.filter((p) => p[2] > 2).map((p) => p[2]);
+    expect([...new Set(cmds)]).toEqual([CMD.READ_VERSION, CMD.READ_FUNC, CMD.READ_DEF_MATRIX, CMD.READ_LED_MAP, CMD.READ_LED_COLORS]);
+    // 1B: 128 bytes in 56/56/16 frames; 21 (twice): 480 bytes = 8 x 56 + 32
+    expect(f.frames(CMD.READ_LED_MAP)).toEqual([pad(hex('00 00 1b 38 00 00 00')), pad(hex('00 00 1b 38 38 00 00')), pad(hex('00 00 1b 10 70 00 00'))]);
+    const c = f.frames(CMD.READ_LED_COLORS);
+    expect(c.length).toBe(18);
+    expect(c.slice(0, 9).map((p) => [p[3], p[4] | (p[5] << 8)])).toEqual([
+      [56, 0], [56, 56], [56, 112], [56, 168], [56, 224], [56, 280], [56, 336], [56, 392], [32, 448],
+    ]);
+    expect(progress.at(-1)).toEqual([7, 7]);
+    expect(progress.map(([n]) => n)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    // raw frames and their interpretation
+    expect(r).toContain('> 00 00 21 38 +59x00');
+    expect(r).toContain('< 00 00 21 38 00 00 00 00 80 FF 01 80 FE');
+    expect(r).toContain('firmware 132');
+    expect(r).toContain('effect 0A (Wave)');
+    expect(r).toContain('colour #112233');
+    expect(r).toContain('67/67 layout keys found');
+    // Esc is layout position 0 -> key index fakeIndex(0) = 3 -> LED 0 -> R 00, G 80, B FF
+    expect(r).toContain(' Esc:3->0 ');
+    expect(r).toContain(' Esc:#0080FF ');
+    expect(r).toContain('67 distinct LEDs for 67 keys; LED range 0..66');
+    expect(r).toMatch(/light strip \(90 LEDs from byte 210\): #4680B9 /);
+    expect(r).toContain('identical to the first read');
+    expect(r).not.toContain('FAILED');
+    // nothing changed on the device and the driver still works
+    await d.read();
+    await d.close();
+  });
+
+  it('sees a live frame when the colours change between reads', async () => {
+    const [f, d] = await connect();
+    let n = 0;
+    const send = f.sendReport.bind(f);
+    f.sendReport = async (id, data) => {
+      const p = data as Uint8Array;
+      if (p[2] === CMD.READ_LED_COLORS && (p[4] | (p[5] << 8)) === 0 && n++ === 1) f.leds[0] ^= 0xff;
+      return send(id, data);
+    };
+    const r = await d.diagnose!();
+    expect(r).toContain('1 of 480 bytes changed between the two reads');
+    await d.close();
+  });
+
+  it('receiver: 31-byte frames and the receiver version', async () => {
+    const [f, d] = await connect({ productId: 0x0025 });
+    f.sent = [];
+    const progress: [number, number][] = [];
+    const r = await d.diagnose!((done, total) => progress.push([done, total]));
+    onlyReads(f.sent);
+    expect(f.sent.every((p) => p.length === 31)).toBe(true);
+    expect(f.frames(CMD.READ_LED_COLORS).length).toBe(40); // 2 x 480 / 24
+    expect(progress.at(-1)).toEqual([8, 8]);
+    expect(r).toContain('receiver firmware 107');
+    await d.close();
+  });
+
+  it('firmware without 1B / 21: reports the failure, closes the read and carries on', async () => {
+    const [f, d] = await connect({ unanswered: [CMD.READ_LED_MAP, CMD.READ_LED_COLORS] });
+    f.sent = [];
+    const r = await d.diagnose!();
+    onlyReads(f.sent);
+    expect(r.match(/FAILED: no answer \(read 1B\)/g)?.length).toBe(1);
+    expect(r.match(/FAILED: no answer \(read 21\)/g)?.length).toBe(2);
+    // after the unanswered frame the read is closed with END 02 18
+    const i = f.sent.findIndex((p) => p[2] === CMD.READ_LED_MAP);
+    expect(f.sent[i + 1]).toEqual(pad(hex('00 00 02 18')));
+    expect(r).toContain('closing the read:');
+    expect(r).toContain('firmware 132');
+    // the keyboard is still usable afterwards
+    expect(find(await d.read(), 'fw').value).toEqual({ kind: 'text', text: '132' });
+    await d.close();
   });
 });

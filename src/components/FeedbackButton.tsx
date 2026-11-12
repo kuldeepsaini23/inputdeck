@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Check, ClipboardCopy, MessageSquareWarning, ThumbsUp } from 'lucide-react'
+import { Check, ClipboardCopy, MessageSquareWarning, Stethoscope, ThumbsUp } from 'lucide-react'
 import type { DeviceState } from '#/devices'
 import type { Setting, Value } from '#/drivers/types'
 import { cn } from '#/lib/utils'
@@ -36,7 +36,7 @@ function show(v: Value): string {
   }
 }
 
-export function buildReport(dev: DeviceState, verdict: Verdict | null, note: string): string {
+export function buildReport(dev: DeviceState, verdict: Verdict | null, note: string, diag?: string): string {
   const d = dev.driver
   const settings: Setting[] = dev.read ?? []
   const lines = [
@@ -52,6 +52,7 @@ export function buildReport(dev: DeviceState, verdict: Verdict | null, note: str
   lines.push('', 'Settings as read from the device:')
   for (const s of settings) lines.push(`- [${s.group}] ${s.label} (${s.key}): ${show(s.value)}`)
   if (!settings.length) lines.push('- (nothing could be read)')
+  if (diag) lines.push('', 'Diagnostics (read-only):', diag)
   return lines.join('\n')
 }
 
@@ -61,8 +62,21 @@ export function FeedbackButton({ dev }: { dev: DeviceState }) {
   const [verdict, setVerdict] = useState<Verdict | null>(null)
   const [note, setNote] = useState('')
   const [copied, setCopied] = useState(false)
+  const [diag, setDiag] = useState<string>()
+  const [diagPct, setDiagPct] = useState<number | null>(null)
+  const runDiag = async () => {
+    if (!dev.driver.diagnose || diagPct !== null) return
+    setDiagPct(0)
+    try {
+      setDiag(await dev.driver.diagnose((d, t) => setDiagPct(t ? d / t : 0)))
+    } catch (e) {
+      setDiag(`diagnostics stopped: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setDiagPct(null)
+    }
+  }
   const copy = async () => {
-    const text = buildReport(dev, verdict, note)
+    const text = buildReport(dev, verdict, note, diag)
     try {
       await navigator.clipboard.writeText(text)
     } catch {
@@ -106,6 +120,22 @@ export function FeedbackButton({ dev }: { dev: DeviceState }) {
               placeholder={verdict === 'wrong' ? 'e.g. lift-off shows "Code 3", the brand app says 0.7 mm' : 'e.g. changed DPI and polling, all saved fine'}
               className="recess w-full resize-none rounded-2xl border-0 bg-transparent px-4 py-3 text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--text-4)]" />
           </label>
+          {dev.driver.diagnose && (
+            <div className="raised rounded-2xl p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="display text-[12px] font-semibold">Diagnostics</div>
+                  <p className="hint m-0 mt-1">Asks the {dev.driver.kind} about features we can't confirm yet. Only reads, so nothing on the device changes. Takes a few seconds.</p>
+                </div>
+                <button type="button" disabled={diagPct !== null || dev.saving} onClick={() => void runDiag()}
+                  className="chip display flex shrink-0 items-center gap-1.5 !text-[11px] font-semibold disabled:opacity-50">
+                  <Stethoscope className="size-3.5" />
+                  {diagPct !== null ? `${Math.round(diagPct * 100)}%` : diag ? 'Run again' : 'Run'}
+                </button>
+              </div>
+              {diag && <p className="hint m-0 mt-2 text-[var(--ok)]">Done, and included in the report below.</p>}
+            </div>
+          )}
           <button type="button" onClick={() => void copy()} className="plat display flex items-center justify-center gap-2 rounded-full py-3 text-[13px] font-semibold">
             {copied ? <><Check className="size-4" /> Copied — paste it to the developer</> : <><ClipboardCopy className="size-4" /> Copy report</>}
           </button>

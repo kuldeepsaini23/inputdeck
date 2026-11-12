@@ -267,6 +267,12 @@ export interface Driver {
   readonly screen?: ScreenSupport;
   /** keyboards with analog switches: stream live key travel (mm) until the returned stop() runs */
   travelTest?(onSample: (pos: number, mm: number) => void): Promise<() => Promise<void>>;
+  /**
+   * Read-only probe for features we can't confirm without the hardware (e.g. undocumented lighting
+   * commands). MUST only send requests that read; never anything that changes the device.
+   * Returns a plain-text report the user copies and sends to the developer.
+   */
+  diagnose?(onProgress?: (done: number, total: number) => void): Promise<string>;
   read(): Promise<Setting[]>;
   write(s: Setting): Promise<void>;
   close(): Promise<void>;

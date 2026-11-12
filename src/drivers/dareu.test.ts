@@ -491,7 +491,8 @@ describe('SOCD', () => {
       frame(13, 11, 3, 0, [2, A, 0xfe, D, 0xff]), // wrong marker
       frame(13, 11, 3, 0, [2, A, 0xff, D, 0xff, 7]), // trailing junk
       frame(13, 11, 12, 0, [11, ...Array.from({ length: 11 }, (_, i) => [i + 1, 0xff]).flat()]), // > 10 keys
-      frame(13, 17 | GET, 2, 1, [1, A]), // FUNC_AND_SOCD bulk read: not used
+      frame(13, 17, 2, 1, [1, A]), // FUNC_AND_SOCD is read-only
+      frame(13, 17 | GET, 5, 1, [1, A, 0, 0, 0]), // FUNC_AND_SOCD with an "honest" size byte
       frame(13, 1, 2, 0, [1, A]), // old-firmware removal = normal trigger reset
     ];
     for (const f of no) expect(allowed(f), head(f).join(' ')).toBe(false);

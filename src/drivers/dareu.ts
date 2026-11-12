@@ -38,14 +38,44 @@ export const LED = { ID_LIST: 0, ATTRIBUTE: 1, EFFECT: 2, BRIGHTNESS: 3 } as con
 /** class 5 */
 export const PFL = { ACTIVE: 3 } as const;
 /** class 13 */
-export const MAG = { KEY_FUNCTION: 0, SINGLE_TRIGGER: 2, RAPID_TRIGGER: 3, GLOBAL_TRAVEL: 7, SOCD: 11 } as const;
+export const MAG = {
+  KEY_FUNCTION: 0,
+  NORMAL_TRIGGER: 1,
+  SINGLE_TRIGGER: 2,
+  RAPID_TRIGGER: 3,
+  MT: 4,
+  TGL: 5,
+  DKS: 6,
+  GLOBAL_TRAVEL: 7,
+  SOCD: 11,
+  RT_ADAPTIVE: 14,
+  FUNC_AND_SOCD: 17,
+} as const;
 
-/** Per-key function ids (class 13 cmd 0). 3..6 = MT / TGL / DKS / SOCD (edited in the official app only). */
+/** Per-key function ids (class 13 cmd 0 / cmd 17). 3..6 = MT / TGL / DKS / SOCD. */
 export const FN_NORMAL = 0;
 export const FN_SINGLE = 1;
 export const FN_RAPID = 2;
+export const FN_MT = 3;
+export const FN_TGL = 4;
+export const FN_DKS = 5;
+export const FN_SOCD = 6;
 /** MT / TGL / DKS: keys with these can't be put in SOCD (it would silently drop them) */
-const FN_OTHER_SPECIAL = new Set([3, 4, 5]);
+const FN_OTHER_SPECIAL = new Set([FN_MT, FN_TGL, FN_DKS]);
+/**
+ * Vendor GetAllMaKeyInformation: a cmd-0 function id >= 7 (the number of known ids) is treated
+ * as a normal-trigger key.
+ */
+export const normFunc = (f: number) => (f >= 7 ? FN_NORMAL : f);
+/** Key ids >= 170 are the knob (rotate / press): the vendor's key-travel page never offers them. */
+export const KNOB_KEY_MIN = 170;
+/** keys per FUNC_AND_SOCD request (vendor GetFunctionAndSOCD) */
+export const FUNC_SOCD_BATCH = 14;
+/** Magnetic products whose JSON says `KeyTravel.RtSelfAdaptive: true`. */
+export const RT_ADAPTIVE_PIDS = new Set([
+  0x0117, 0x0119, 0x0126, 0x0166, 0x0175, 0x0191, 0x0194, 0x0195, 0x0196, 0x0198, 0x0199, 0x0209, 0x0214,
+  0x0216, 0x0229, 0x0236,
+]);
 
 /** SOCD (class 13 cmd 11 "ST_FUNCTION"): 4 groups, last input wins inside a group. */
 export const SOCD_GROUPS = 4;
@@ -94,6 +124,10 @@ export const dareuTiming = {
   tries: 20,
   /** pause after the fire-and-forget polling write */
   pollSettle: 300,
+  /** extra read-backs of keys that didn't match yet (the vendor never reads back right away) */
+  verifyRetries: 3,
+  /** wait before each extra read-back */
+  verifySettle: 150,
 };
 
 const hex2 = (b: number) => b.toString(16).toUpperCase().padStart(2, '0');
@@ -216,7 +250,17 @@ export function allowed(f: ArrayLike<number>): boolean {
       }
       return false;
     case CLS.MAGNETIC:
+      if (get && cmd === MAG.FUNC_AND_SOCD) {
+        // vendor GetFunctionAndSOCD: profile in the header, size n + 1, keys 4 bytes apart
+        const n = pl(0);
+        if (!profOk || n < 1 || n > FUNC_SOCD_BATCH || size !== n + 1) return false;
+        for (let i = 0; i < n; i++) {
+          if (pl(1 + 4 * i) === 0 || pl(2 + 4 * i) || pl(3 + 4 * i) || pl(4 + 4 * i)) return false;
+        }
+        return zeroFrom(1 + 4 * n);
+      }
       if (prof !== 0) return false;
+      if (cmd === MAG.RT_ADAPTIVE) return size === 1 && (get ? zeroFrom(0) : pl(0) <= 1 && zeroFrom(1));
       if (get && cmd === MAG.GLOBAL_TRAVEL) return (size === 1 || size === 2) && zeroFrom(0);
       if (get && cmd === MAG.KEY_FUNCTION) return keyList({ 2: 28 }, 'zero');
       if (cmd === MAG.SINGLE_TRIGGER) return keyList({ 2: 18, 3: 18 }, get ? 'zero' : 'set');
@@ -332,6 +376,37 @@ export function keyFuncPkt(keys: number[]): Uint8Array<ArrayBuffer> {
 }
 export const parseKeyFuncs = (r: ArrayLike<number>, n: number) => Array.from({ length: n }, (_, i) => r[PAYLOAD + 2 * i + 2]);
 
+/**
+ * FUNC_AND_SOCD GET (vendor GetFunctionAndSOCD, class 13 cmd 17): [n, (key, 0, 0, 0) x n] with
+ * the active profile in the header and a size byte of n + 1 (vendor quirk, copied exactly).
+ * The vendor trusts this over cmd 0 when it answers.
+ */
+export function funcSocdPkt(profile: number, keys: number[]): Uint8Array<ArrayBuffer> {
+  if (keys.length < 1 || keys.length > FUNC_SOCD_BATCH) throw new Error('1..14 keys per FUNC_AND_SOCD frame');
+  const p = new Array<number>(1 + 4 * keys.length).fill(0);
+  p[0] = keys.length;
+  keys.forEach((k, i) => (p[1 + 4 * i] = k));
+  return frame(CLS.MAGNETIC, MAG.FUNC_AND_SOCD | GET, keys.length + 1, profile, p);
+}
+export interface FuncSocd {
+  key: number;
+  func: number;
+  /** IsSOCD byte */
+  socd: number;
+  /** SOCD group (0..3, FF = none) */
+  group: number;
+}
+/** Reply: (key, function, is SOCD, group) x n at payload 1 + 4i. */
+export const parseFuncSocd = (r: ArrayLike<number>, n: number): FuncSocd[] =>
+  Array.from({ length: n }, (_, i) => {
+    const b = PAYLOAD + 1 + 4 * i;
+    return { key: r[b], func: r[b + 1], socd: r[b + 2], group: r[b + 3] };
+  });
+
+export const getRtAdaptivePkt = () => frame(CLS.MAGNETIC, MAG.RT_ADAPTIVE | GET, 1, 0);
+export const setRtAdaptivePkt = (on: boolean) => frame(CLS.MAGNETIC, MAG.RT_ADAPTIVE, 1, 0, [on ? 1 : 0]);
+export const parseRtAdaptive = (r: ArrayLike<number>) => r[PAYLOAD] === 1;
+
 const enc = (v: number, wide: boolean) => (wide ? [(v >> 8) & 0xff, v & 0xff] : [v & 0xff]);
 const dec = (r: ArrayLike<number>, at: number, wide: boolean) => (wide ? (r[at] << 8) | r[at + 1] : r[at]);
 
@@ -387,6 +462,22 @@ export function setRtPkt(u: Units, keys: number[], travel: number, press: number
 }
 
 const isEditable = (f: number) => f === FN_NORMAL || f === FN_SINGLE || f === FN_RAPID;
+
+const FN_NAMES: Record<number, string> = { 0: 'normal', 1: 'single', 2: 'RT', 3: 'MT', 4: 'TGL', 5: 'DKS', 6: 'SOCD' };
+const mm2 = (v: number) => String(Math.round(v * 10000) / 10000);
+
+/** One key's trigger in words, mm and raw device units, for error messages and Feedback. */
+export function describeTrig(k: KeyTrig, u: Units): string {
+  const fn = `${FN_NAMES[k.func] ?? 'function'} (${k.func})`;
+  if (k.func === FN_SINGLE) return `${fn} ${mm2(k.travel)} mm [raw ${raw(k.travel, u.single)}]`;
+  if (k.func === FN_RAPID) {
+    return (
+      `${fn} start ${mm2(k.travel)} / press ${mm2(k.press)} / release ${mm2(k.release)} mm ` +
+      `[raw ${raw(k.travel, u.rtInit)}/${raw(k.press, u.rtPress)}/${raw(k.release, u.rtRelease)}]`
+    );
+  }
+  return fn;
+}
 
 // --- SOCD
 
@@ -484,6 +575,8 @@ export function planKeyTrigs(
   travel: number[],
   rapid: boolean[],
   sens: number[],
+  /** positions without an adjustable switch (knob) */
+  fixed: ReadonlySet<number> = new Set(),
 ): [number, KeyTrig][] {
   const n = old.length;
   if (travel.length !== n || rapid.length !== n || sens.length !== n) {
@@ -495,6 +588,7 @@ export function planKeyTrigs(
     const travelChanged = raw(travel[i], u.single) !== raw(t0, u.single);
     const sensChanged = raw(sens[i], u.rtPress) !== raw(s0, u.rtPress);
     if (!travelChanged && rapid[i] === r0 && !(rapid[i] && sensChanged)) return;
+    if (fixed.has(i)) throw new Error(`${labels[i] ?? '?'} has no adjustable switch`);
     if (!isEditable(o.func)) {
       throw new Error(`${labels[i] ?? '?'} uses a special key function (${o.func}) - change it in the DAREU app`);
     }
@@ -612,6 +706,12 @@ class Dareu implements Driver {
   private fwRaw: number[] = [0, 0, 0];
   /** SOCD group per layout key (-1 = none), when the board has SOCD */
   private socd: number[] | undefined;
+  /** the board answers FUNC_AND_SOCD (class 13 cmd 17) */
+  private funcSocd: boolean | undefined;
+  /** RT self-adaptive switch (products with RtSelfAdaptive), when readable */
+  private rtAdaptive: boolean | undefined;
+  /** layout positions without an adjustable switch (knob ids >= 170) */
+  private readonly fixed: Set<number>;
 
   constructor(
     private readonly link: Link,
@@ -623,6 +723,7 @@ class Dareu implements Driver {
     this.units = unitsFor(product);
     this.ranges = this.units ? rangesFor(product) : undefined;
     this.sensDefault = product.rt?.[1]?.[4] ?? 0.3;
+    this.fixed = new Set(this.caps.map((c, i) => (c.index >= KNOB_KEY_MIN ? i : -1)).filter((i) => i >= 0));
   }
 
   brand() {
@@ -689,26 +790,69 @@ class Dareu implements Driver {
     return r[PAYLOAD + 1];
   }
 
-  /** Every layout key's function + values, parallel to the layout. */
-  private async readKeyTrigs(u: Units): Promise<KeyTrig[]> {
-    const ids = this.caps.map((c) => c.index);
-    // the vendor asks one key at a time
-    const funcs: number[] = [];
-    for (const id of ids) funcs.push(parseKeyFuncs(await this.link.xfer(keyFuncPkt([id])), 1)[0]);
-    const out: KeyTrig[] = funcs.map((f) => ({ func: f, travel: 0, press: 0, release: 0 }));
-    const single = ids.map((_, i) => i).filter((i) => funcs[i] === FN_SINGLE);
-    for (let s = 0; s < single.length; s += 18) {
-      const chunk = single.slice(s, s + 18);
-      const v = parseSingle(await this.link.xfer(getSinglePkt(u, chunk.map((i) => ids[i]))), u, chunk.length);
-      chunk.forEach((i, j) => (out[i].travel = v[j]));
-    }
-    const rapid = ids.map((_, i) => i).filter((i) => funcs[i] === FN_RAPID);
-    for (let s = 0; s < rapid.length; s += rtBatch(u)) {
-      const chunk = rapid.slice(s, s + rtBatch(u));
-      const v = parseRt(await this.link.xfer(getRtPkt(u, chunk.map((i) => ids[i]))), u, chunk.length);
-      chunk.forEach((i, j) => Object.assign(out[i], v[j]));
+  /** cmd 17 (FUNC_AND_SOCD) functions of these key ids; undefined when the board doesn't answer it. */
+  private async readFuncSocd(ids: number[]): Promise<number[] | undefined> {
+    const out: number[] = [];
+    for (let s = 0; s < ids.length; s += FUNC_SOCD_BATCH) {
+      const chunk = ids.slice(s, s + FUNC_SOCD_BATCH);
+      let r: Uint8Array;
+      try {
+        r = await this.link.xfer(funcSocdPkt(this.profile, chunk));
+      } catch {
+        return undefined;
+      }
+      const v = parseFuncSocd(r, chunk.length);
+      // a reply that doesn't echo our keys isn't one we understand
+      if (v.some((x, j) => x.key !== chunk[j])) return undefined;
+      out.push(...v.map((x) => x.func));
     }
     return out;
+  }
+
+  /**
+   * Functions of these layout positions, the way the vendor reads them (GetAllMaKeyInformation):
+   * cmd 0 one key at a time (ids >= 7 count as normal), then cmd 17 overrides when the board has it.
+   * `full` = initial read (always does both); read-backs use cmd 17 alone once it worked.
+   */
+  private async readFuncs(pos: number[], full: boolean): Promise<number[]> {
+    const ids = pos.map((i) => this.caps[i].index);
+    let funcs: number[] | undefined;
+    if (full || !this.funcSocd) {
+      funcs = [];
+      for (const id of ids) funcs.push(normFunc(parseKeyFuncs(await this.link.xfer(keyFuncPkt([id])), 1)[0]));
+    }
+    if (full || this.funcSocd) {
+      const fs = await this.readFuncSocd(ids);
+      if (full) this.funcSocd = !!fs;
+      if (fs) funcs = fs;
+    }
+    if (!funcs) throw new Error('no key functions');
+    return funcs;
+  }
+
+  /** Function + values of these layout positions (same order). */
+  private async readTrigs(u: Units, pos: number[], full: boolean): Promise<KeyTrig[]> {
+    const funcs = await this.readFuncs(pos, full);
+    const out: KeyTrig[] = funcs.map((f) => ({ func: f, travel: 0, press: 0, release: 0 }));
+    const idOf = (j: number) => this.caps[pos[j]].index;
+    const single = pos.map((_, j) => j).filter((j) => funcs[j] === FN_SINGLE);
+    for (let s = 0; s < single.length; s += 18) {
+      const chunk = single.slice(s, s + 18);
+      const v = parseSingle(await this.link.xfer(getSinglePkt(u, chunk.map(idOf))), u, chunk.length);
+      chunk.forEach((j, k) => (out[j].travel = v[k]));
+    }
+    const rapid = pos.map((_, j) => j).filter((j) => funcs[j] === FN_RAPID);
+    for (let s = 0; s < rapid.length; s += rtBatch(u)) {
+      const chunk = rapid.slice(s, s + rtBatch(u));
+      const v = parseRt(await this.link.xfer(getRtPkt(u, chunk.map(idOf))), u, chunk.length);
+      chunk.forEach((j, k) => Object.assign(out[j], v[k]));
+    }
+    return out;
+  }
+
+  /** Every layout key's function + values, parallel to the layout. */
+  private readKeyTrigs(u: Units): Promise<KeyTrig[]> {
+    return this.readTrigs(u, this.caps.map((_, i) => i), true);
   }
 
   /** firmware 0.3.0+ can take keys out of SOCD without touching their triggers */
@@ -840,7 +984,7 @@ class Dareu implements Driver {
       this.keyTrigs = keys;
       const firstRt = keys.find((k) => k.func === FN_RAPID);
       if (firstRt) this.sensDefault = firstRt.press;
-      const editable = keys.filter((k) => isEditable(k.func));
+      const editable = keys.filter((k, i) => isEditable(k.func) && !this.fixed.has(i));
       const allRt = editable.length > 0 && editable.every((k) => k.func === FN_RAPID);
       const travels = editable.map((k) => shown(k, global, this.sensDefault)[0]);
       const act = travels.length > 0 && travels.every((t) => Math.abs(t - travels[0]) < 1e-6) ? travels[0] : global;
@@ -858,6 +1002,23 @@ class Dareu implements Driver {
         value: { kind: 'float', min: r.sensMin, max: Math.max(r.sensMax, this.sensDefault), step: r.step, current: this.sensDefault, unit: ' mm' },
       });
       out.push({ key: 'per_key_trigger', label: 'Per-key actuation', group: 'Per-key', value: this.perKeyValue(keys, global) });
+
+      // --- RT self-adaptive (products whose JSON says RtSelfAdaptive; the vendor hides it when GET fails)
+      this.rtAdaptive = undefined;
+      if (RT_ADAPTIVE_PIDS.has(this.product.pid)) {
+        try {
+          this.rtAdaptive = parseRtAdaptive(await this.link.xfer(getRtAdaptivePkt()));
+          out.push({
+            key: 'rt_adaptive',
+            label: 'RT self-adaptive',
+            group: 'Switches',
+            value: { kind: 'toggle', on: this.rtAdaptive },
+            hint: 'Rapid Trigger keys adapt their actuation and release points to how you press them.',
+          });
+        } catch {
+          // older firmware: no switch
+        }
+      }
 
       // --- SOCD (only boards whose product JSON says SupportSOCD)
       this.socd = undefined;
@@ -938,25 +1099,44 @@ class Dareu implements Driver {
     if (changes.length === 0) return;
     for (const f of planPackets(changes, this.caps, u)) await this.link.xfer(f);
     const cache = this.keyTrigs.slice();
-    const bad: string[] = [];
-    for (const [i, want] of changes) {
-      const id = this.caps[i].index;
-      const label = this.caps[i].label;
+    const want = new Map(changes);
+    // read back; keys that don't match yet get a few more tries after a pause (the vendor never
+    // reads back right away, so a firmware that applies the change a little later must not fail)
+    let pending = changes.map(([i]) => i);
+    let failure = new Map<number, string>();
+    for (let attempt = 0; ; attempt++) {
+      failure = new Map();
+      let back: KeyTrig[] | undefined;
+      let err = '';
       try {
-        const func = parseKeyFuncs(await this.link.xfer(keyFuncPkt([id])), 1)[0];
-        let got: KeyTrig = { func, travel: 0, press: 0, release: 0 };
-        if (func === FN_SINGLE) got.travel = parseSingle(await this.link.xfer(getSinglePkt(u, [id])), u, 1)[0];
-        if (func === FN_RAPID) got = { func, ...parseRt(await this.link.xfer(getRtPkt(u, [id])), u, 1)[0] };
-        cache[i] = got;
-        if (!sameTrig(got, want, u)) bad.push(label);
-      } catch {
-        bad.push(label);
+        back = await this.readTrigs(u, pending, false);
+      } catch (e) {
+        err = e instanceof Error ? e.message : String(e);
       }
+      pending.forEach((i, j) => {
+        const got = back?.[j];
+        if (got) cache[i] = got;
+        if (!got) failure.set(i, `no answer (${err})`);
+        else if (!sameTrig(got, want.get(i)!, u)) failure.set(i, describeTrig(got, u));
+      });
+      pending = [...failure.keys()];
+      if (!pending.length || attempt >= dareuTiming.verifyRetries) break;
+      await sleep(dareuTiming.verifySettle);
     }
     this.keyTrigs = cache;
     const rt = cache.find((k) => k.func === FN_RAPID);
     if (rt) this.sensDefault = rt.press;
-    if (bad.length) throw new Error(`keyboard didn't take the trigger change for: ${bad.join(', ')}`);
+    if (failure.size) {
+      const [first, gotText] = [...failure][0];
+      let adaptive = '';
+      if (this.rtAdaptive !== undefined) adaptive = `; RT self-adaptive ${this.rtAdaptive ? 'on' : 'off'}`;
+      const labels = [...failure.keys()].map((i) => this.caps[i].label);
+      throw new Error(
+        `keyboard didn't take the trigger change for: ${labels.join(', ')} ` +
+          `(${this.caps[first].label} #${this.caps[first].index}: sent ${describeTrig(want.get(first)!, u)}, ` +
+          `reads back ${gotText}; TravelVersion ${u.tv}, fw ${this.fw ?? '?'}, functions via cmd ${this.funcSocd ? 17 : 0}${adaptive})`,
+      );
+    }
   }
 
   /** Apply `fn` to every editable key and write the keys that change. */
@@ -966,7 +1146,7 @@ class Dareu implements Driver {
     const u = this.units!;
     const changes: [number, KeyTrig][] = [];
     keys.forEach((k, i) => {
-      if (!isEditable(k.func)) return;
+      if (!isEditable(k.func) || this.fixed.has(i)) return;
       const n = fn(k, i);
       if (n && !sameTrig(n, k, u)) changes.push([i, n]);
     });
@@ -1046,11 +1226,21 @@ class Dareu implements Driver {
           p.travel,
           p.rapid,
           p.sens,
+          this.fixed,
         );
         return this.writeKeyTrigs(changes);
       }
       case 'socd:socd':
         return this.writeSocd(v as Socd);
+      case 'rt_adaptive:toggle': {
+        if (this.rtAdaptive === undefined) throw new Error('press Re-read first');
+        const on = (v as Extract<Value, { kind: 'toggle' }>).on;
+        await this.link.xfer(setRtAdaptivePkt(on));
+        const got = parseRtAdaptive(await this.link.xfer(getRtAdaptivePkt()));
+        this.rtAdaptive = got;
+        if (got !== on) throw new Error(`keyboard didn't take the RT self-adaptive change (reads back ${got ? 'on' : 'off'})`);
+        return;
+      }
       case 'light_power:toggle': {
         const l = light();
         const on = (v as Extract<Value, { kind: 'toggle' }>).on;

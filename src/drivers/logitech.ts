@@ -83,7 +83,7 @@ const IMG = DAM + 'products/';
  * Matched against the name the mouse reports (feature 0x0005), most specific first. Images: Logitech's own CDN,
  * top view (checked: HTTP 200, image/*, 600 px wide; a missing file there comes back as a 1x1 placeholder, not a 404).
  */
-const MODELS: [RegExp, string | undefined][] = [
+export const MODELS: [RegExp, string | undefined][] = [
   [/SUPERLIGHT 2C/i, IMG + 'pro-x-superlight-2c-pdp/gallery/pro-x-superlight-2c-mouse-top-angle-black-gallery-1.png'],
   [/SUPERLIGHT 2 ?DEX|X2 DEX|2 DEX/i, IMG + 'pro-x-superlight-2-dex/gallery/new-gallery-assets-2025/pro-x-superlight-2-dex-mouse-top-angle-black-gallery-1.png'],
   [/SUPERLIGHT 2|^PRO X ?2$/i, IMG + 'pro-x-superlight-2/new-gallery-assets-2025/pro-x-superlight-2-mice-top-angle-black-gallery-1.png'],

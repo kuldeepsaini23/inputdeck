@@ -49,7 +49,7 @@ export const MODELS: ReadonlyMap<number, Model> = new Map([
 ]);
 
 /** Top view on a transparent background, from orbitalworks.co (checked: HTTP 200, image/png). */
-const PHOTO = 'https://orbitalworks.co/cdn/shop/files/White_Front_6909c3d1-64c1-49a4-9d7a-940dd2150b54.png?width=600';
+export const PHOTO = 'https://orbitalworks.co/cdn/shop/files/White_Front_6909c3d1-64c1-49a4-9d7a-940dd2150b54.png?width=600';
 
 // ---------------------------------------------------------------- commands
 

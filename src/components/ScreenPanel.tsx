@@ -1,11 +1,19 @@
 import { useRef, useState } from 'react'
-import { ImagePlus, Trash2, Upload, X } from 'lucide-react'
+import { Image as ImageIcon, ImagePlus, Trash2, Upload, X } from 'lucide-react'
 import type { DeviceState } from '#/devices'
 import { useDevices } from '#/lib/device-context'
 import { encodeStill, loadPreviews, readGif, savePreviews, type Draft } from '#/lib/screen-image'
 import { cn } from '#/lib/utils'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '#/components/ui/dialog'
 import { Card } from './kit'
+import { textOf } from './shell'
+
+/** What the receiver reports it holds, e.g. "2 of 8: image 360×360, GIF 224×224" -> ["image 360×360", "GIF 224×224"]. */
+export function storedPictures(dev: DeviceState): string[] {
+  const t = textOf(dev, 'screen_images')
+  const m = t && /^\d+ of \d+: (.+)$/.exec(t)
+  return m ? m[1].split(', ') : []
+}
 
 const kb = (n: number) => `${Math.ceil(n / 1024)} KB`
 
@@ -80,20 +88,30 @@ export function useScreenEditor(dev: DeviceState) {
   const remove = (id: string) => setDrafts((d) => d.filter((x) => x.id !== id))
   const makeMain = (id: string) => setDrafts((d) => [...d.filter((x) => x.id === id), ...d.filter((x) => x.id !== id)])
   const shown = drafts[0]?.preview ?? lastSent[0]
-  return { sc, drafts, lastSent, used, progress, error, add, upload, clear, remove, makeMain, shown }
+  // pictures already on the receiver (put there by InputDeck or the WLMouse hub); the receiver can't send the pixels back
+  const stored = storedPictures(dev)
+  return { sc, drafts, lastSent, used, progress, error, add, upload, clear, remove, makeMain, shown, stored }
 }
 
 export type ScreenEditor = ReturnType<typeof useScreenEditor>
 
 /** The receiver with its round screen, showing the main picture. */
-export function Receiver({ picture, round = true }: { picture?: string; round?: boolean }) {
+export function Receiver({ picture, round = true, stored = [] }: { picture?: string; round?: boolean; stored?: string[] }) {
   return (
     <div className="float relative grid aspect-square w-[min(330px,80%)] place-items-center rounded-[56px] border border-white/15 bg-[linear-gradient(180deg,#29292d,#0f0f11)] shadow-[inset_0_2px_1px_rgb(255_255_255/0.1),inset_0_-6px_10px_rgb(0_0_0/0.6),0_40px_60px_rgb(0_0_0/0.8)]">
       <div className={cn('relative size-[76%] overflow-hidden bg-[#020203] shadow-[inset_0_3px_6px_rgb(0_0_0/0.9)]', round ? 'rounded-full' : 'rounded-[30px]')}>
         {picture ? (
           <img key={picture} src={picture} alt="Picture on the receiver screen" className="num-anim size-full object-cover" />
         ) : (
-          <div className="grid size-full place-items-center text-center text-[11px] text-[var(--text-3)]">No picture<br />from InputDeck yet</div>
+          stored.length ? (
+            <div className="flex size-full flex-col items-center justify-center gap-2 bg-[radial-gradient(circle_at_50%_40%,#1d1d21,#050506)] px-8 text-center">
+              <ImageIcon className="size-6 text-[var(--text-2)]" />
+              <span className="display text-[12px] font-semibold">{stored.length} picture{stored.length === 1 ? '' : 's'} on the screen</span>
+              <span className="text-[10.5px] leading-snug text-[var(--text-3)]">{stored[0]}. The receiver can't send the picture back, so it can't be previewed here.</span>
+            </div>
+          ) : (
+            <div className="grid size-full place-items-center text-center text-[11px] text-[var(--text-3)]">No pictures<br />on the screen</div>
+          )
         )}
         <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(135deg,rgb(255_255_255/0.1),transparent_45%)]" />
       </div>
@@ -102,7 +120,8 @@ export function Receiver({ picture, round = true }: { picture?: string; round?: 
 }
 
 export function ScreenCards({ ed }: { ed: ScreenEditor }) {
-  const { sc, drafts, lastSent, used, progress, error } = ed
+  const { sc, drafts, lastSent, used, progress, error, stored } = ed
+  const showStored = !drafts.length && stored.length > 0
   const input = useRef<HTMLInputElement>(null)
   const [confirm, setConfirm] = useState<'upload' | 'clear' | null>(null)
   const [over, setOver] = useState(false)
@@ -111,7 +130,7 @@ export function ScreenCards({ ed }: { ed: ScreenEditor }) {
   const pct = Math.min(1, used / sc.maxBytes)
   return (
     <>
-      <Card title="Pictures" right={<span className="text-[11px] text-[var(--text-3)]">{drafts.length} of {sc.slots}</span>}>
+      <Card title="Pictures" right={<span className="text-[11px] text-[var(--text-3)]">{showStored ? `${stored.length} on receiver` : `${drafts.length} of ${sc.slots}`}</span>}>
         <div
           className={cn('grid grid-cols-4 gap-2.5 rounded-2xl transition-colors', over && 'bg-white/5')}
           onDragOver={(e) => { e.preventDefault(); setOver(true) }}
@@ -120,6 +139,17 @@ export function ScreenCards({ ed }: { ed: ScreenEditor }) {
         >
           {Array.from({ length: sc.slots }, (_, i) => {
             const d = drafts[i]
+            if (showStored && stored[i]) {
+              const p = lastSent[i]
+              return (
+                <button key={`s${i}`} type="button" data-press disabled={busy} onClick={() => input.current?.click()} title={`On the receiver: ${stored[i]}. Add pictures to replace them.`}
+                  aria-label={`Picture ${i + 1} on the receiver, ${stored[i]}. Add pictures to replace`}
+                  className="relative grid aspect-square place-items-center overflow-hidden rounded-xl border border-white/20 bg-[radial-gradient(circle,#202024,#0a0a0b)] text-[var(--text-2)]">
+                  {p ? <img src={p} alt="" className={cn('size-full object-cover', sc.round && 'rounded-full')} /> : <ImageIcon className="size-4" />}
+                  {i === 0 && <span className="eyebrow absolute bottom-1 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-1.5 py-0.5 !text-[7px] !text-white">Main</span>}
+                </button>
+              )
+            }
             if (d) {
               return (
                 <div key={d.id} className="group relative aspect-square overflow-hidden rounded-xl border border-white/30 bg-black fade-in">
@@ -145,7 +175,7 @@ export function ScreenCards({ ed }: { ed: ScreenEditor }) {
           <div className="flex justify-between text-[10.5px] text-[var(--text-3)]"><span>Space used</span><span className="display">{kb(used)} / {kb(sc.maxBytes)}</span></div>
           <div className="recess mt-1.5 h-1.5 overflow-hidden rounded-full"><div className="plat h-full rounded-full transition-[width] duration-300" style={{ width: `${pct * 100}%` }} /></div>
           <p className="hint mt-2 mb-0">
-            Drop pictures here or click a slot. Stills are cropped to the {sc.round ? 'round ' : ''}{sc.width}×{sc.height} screen and use {kb(sc.width * sc.height * 2)} each{sc.gifSize ? `; GIFs must be ${sc.gifSize}×${sc.gifSize}` : ''}. The first one is the main picture.
+            {showStored && 'Your receiver already has pictures. New ones replace them. '}Drop pictures here or click a slot. Stills are cropped to the {sc.round ? 'round ' : ''}{sc.width}×{sc.height} screen and use {kb(sc.width * sc.height * 2)} each{sc.gifSize ? `; GIFs must be ${sc.gifSize}×${sc.gifSize}` : ''}. The first one is the main picture.
           </p>
         </div>
         {busy ? (

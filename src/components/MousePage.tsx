@@ -238,7 +238,7 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
           ))}
           <div className="pointer-events-none absolute bottom-[6%] left-1/2 h-12 w-[70%] -translate-x-1/2 rounded-[50%] bg-[radial-gradient(closest-side,rgb(0_0_0/0.9),transparent)]" />
           {active === 'Dongle screen' && dev.driver.screen ? (
-            <Receiver picture={screenEd.shown} round={dev.driver.screen.round} />
+            <Receiver picture={screenEd.shown} round={dev.driver.screen.round} stored={screenEd.stored} />
           ) : (
           <div className={cn('relative -mt-[60px]', !pickable && 'float')} style={{ height: pickable ? 'min(58vh, 540px)' : 'min(64vh, 580px)', aspectRatio: '300 / 580' }}>
             {image ? (

@@ -31,6 +31,19 @@ function show(v: Value): string {
     }
     case 'perKeyColor':
       return `${v.keys.length} keys, ${new Set(v.colors).size} colours`
+    case 'keymap': {
+      const changed = v.layers.map((l, li) => `layer ${li}: ${l.length} keys`).join(', ')
+      return `${v.keys.length} keys, ${v.layers.length} layer${v.layers.length === 1 ? '' : 's'} (${changed})`
+    }
+    case 'macros':
+      return `${v.slots} slots (${v.format}), ${v.macros.filter((m) => m.length).length} used: ${v.macros.map((m, i) => (m.length ? `M${i}=${m.length} steps` : '')).filter(Boolean).join(' ') || 'none'}`
+    case 'socd': {
+      const used = v.entries.filter((e) => e.keys.length)
+      const lab = (k: number) => v.keys[k]?.label ?? `#${k}`
+      return `${v.mode}, ${used.length} in use${used.length ? ': ' + used.map((e) => e.keys.map(lab).join('+')).join(' | ') : ''}`
+    }
+    case 'advancedKeys':
+      return `${v.modes.join('/')}; ${v.entries.length} set${v.entries.length ? ': ' + v.entries.map((e) => `${v.keys[e.key]?.label ?? '#' + e.key}=${e.mode}`).join(' ') : ''}`
     default:
       return JSON.stringify(v).slice(0, 200)
   }
@@ -75,19 +88,36 @@ export function FeedbackButton({ dev }: { dev: DeviceState }) {
       setDiagPct(null)
     }
   }
+  const [copyAgain, setCopyAgain] = useState(false)
   const copy = async () => {
-    const text = buildReport(dev, verdict, note, diag)
+    let d = diag
+    // the diagnostics are part of the report: run them first if they haven't been (read-only)
+    if (dev.driver.diagnose && !d && diagPct === null) {
+      setDiagPct(0)
+      try {
+        d = await dev.driver.diagnose((x, t) => setDiagPct(t ? x / t : 0))
+      } catch (e) {
+        d = `diagnostics stopped: ${e instanceof Error ? e.message : String(e)}`
+      } finally {
+        setDiagPct(null)
+      }
+      setDiag(d)
+    }
+    const text = buildReport(dev, verdict, note, d)
+    let ok = true
     try {
       await navigator.clipboard.writeText(text)
     } catch {
-      // clipboard blocked: fall back to a hidden textarea
+      // clipboard blocked (or the click is too long ago after the diagnostics): try a hidden textarea
       const t = document.createElement('textarea')
       t.value = text
       document.body.appendChild(t)
       t.select()
-      document.execCommand('copy')
+      ok = document.execCommand('copy')
       t.remove()
     }
+    setCopyAgain(!ok)
+    if (!ok) return
     setCopied(true)
     setTimeout(() => setCopied(false), 2500)
   }
@@ -136,8 +166,12 @@ export function FeedbackButton({ dev }: { dev: DeviceState }) {
               {diag && <p className="hint m-0 mt-2 text-[var(--ok)]">Done, and included in the report below.</p>}
             </div>
           )}
-          <button type="button" onClick={() => void copy()} className="plat display flex items-center justify-center gap-2 rounded-full py-3 text-[13px] font-semibold">
-            {copied ? <><Check className="size-4" /> Copied — paste it to the developer</> : <><ClipboardCopy className="size-4" /> Copy report</>}
+          <button type="button" disabled={diagPct !== null} onClick={() => void copy()} className="plat display flex items-center justify-center gap-2 rounded-full py-3 text-[13px] font-semibold disabled:opacity-70">
+            {diagPct !== null
+              ? <><Stethoscope className="size-4" /> Running diagnostics… {Math.round(diagPct * 100)}%</>
+              : copied ? <><Check className="size-4" /> Copied — paste it to the developer</>
+              : copyAgain ? <><ClipboardCopy className="size-4" /> Ready — click again to copy</>
+              : <><ClipboardCopy className="size-4" /> {dev.driver.diagnose && !diag ? 'Run diagnostics & copy report' : 'Copy report'}</>}
           </button>
         </DialogContent>
       </Dialog>

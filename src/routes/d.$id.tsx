@@ -4,6 +4,7 @@ import { MousePage } from '#/components/MousePage'
 import { KeyboardPage } from '#/components/KeyboardPage'
 import { Backdrop, SaveBar, TopBar } from '#/components/shell'
 import { FeedbackButton } from '#/components/FeedbackButton'
+import { DeviceTools, SharedProfileBanner, SharedProfileNote, useSharedProfile } from '#/components/ProfileTools'
 import { unslug, useDevices } from '#/lib/device-context'
 import { useT } from '#/lib/i18n'
 import type { Value } from '#/drivers/types'
@@ -20,6 +21,8 @@ function DevicePage() {
   const mgr = useDevices()
   const t = useT()
   const dev = mgr.devices.find((d) => d.id === unslug(id))
+  // a shared profile link (/d/<id>#p=...)
+  const [shared, dismissShared] = useSharedProfile()
 
   // keep the "Saved to device" note up for a moment
   const [, tick] = useState(0)
@@ -38,6 +41,7 @@ function DevicePage() {
           <div className="fade-in">
             <p className="text-[var(--text-2)]">{mgr.scanning ? t('Looking for the device…') : t("This device isn't connected.")}</p>
             <Link to="/" className="chip mt-4 inline-block no-underline">{t('Back to start')}</Link>
+            {!mgr.scanning && shared?.file && <SharedProfileNote file={shared.file} />}
           </div>
         </main>
       </div>
@@ -55,6 +59,7 @@ function DevicePage() {
         activeId={dev.id}
         profile={profile?.value.kind === 'choice' ? profile.value : undefined}
         onProfile={(v) => profile?.value.kind === 'choice' && onEdit('profile', { ...profile.value, current: v })}
+        tools={<DeviceTools dev={dev} />}
       />
       {dev.driver.kind === 'mouse' ? (
         <MousePage dev={dev} tab={tab} setTab={setTab} onEdit={onEdit} />
@@ -82,6 +87,7 @@ function DevicePage() {
           <span className="eyebrow !text-[8px]">{t('Untested · changes on')}</span> {t('Make view-only')}
         </button>
       )}
+      {shared && !dev.error && <SharedProfileBanner dev={dev} shared={shared} onDone={dismissShared} />}
       <SaveBar dev={dev} savedAt={dev.savedAt} />
       <FeedbackButton dev={dev} />
     </div>

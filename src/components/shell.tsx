@@ -48,7 +48,7 @@ function DeviceTab({ d, active }: { d: DeviceState; active: boolean }) {
   )
 }
 
-export function TopBar({ activeId, profile, onProfile }: { activeId?: string; profile?: Choice; onProfile?: (v: number) => void }) {
+export function TopBar({ activeId, profile, onProfile, tools }: { activeId?: string; profile?: Choice; onProfile?: (v: number) => void; tools?: React.ReactNode }) {
   const { devices, requestConnect, scan, scanning, supported, demo } = useDevices()
   const t = useT()
   return (
@@ -65,7 +65,7 @@ export function TopBar({ activeId, profile, onProfile }: { activeId?: string; pr
           </button>
         )}
       </div>
-      <nav aria-label={t('Devices')} className="pill-glass no-scrollbar absolute left-1/2 flex max-w-[calc(100%-600px)] -translate-x-1/2 items-center gap-1 overflow-x-auto p-1 [&>*]:shrink-0">
+      <nav aria-label={t('Devices')} className={cn('pill-glass no-scrollbar absolute left-1/2 flex -translate-x-1/2 items-center gap-1 overflow-x-auto p-1 [&>*]:shrink-0', tools ? 'max-w-[calc(100%-860px)]' : 'max-w-[calc(100%-600px)]')}>
         {devices.map((d) => <DeviceTab key={d.id} d={d} active={d.id === activeId} />)}
         {supported && (
           <button type="button" onClick={requestConnect} aria-label={t('Connect a device')} title={t('Connect a device')}
@@ -82,6 +82,7 @@ export function TopBar({ activeId, profile, onProfile }: { activeId?: string; pr
       </nav>
       <div className="relative z-10 flex shrink-0 items-center gap-3">
         <LanguagePicker />
+        {tools}
         {profile && onProfile && (
           <Segmented label={t('Profile')} className="pill-glass !p-[3px]" value={profile.current}
             options={profile.options.map(([, v], i) => [`P${i + 1}`, v] as const)} onChange={onProfile} />

@@ -3,6 +3,7 @@
 // interfaces; we keep one driver per vendor:product pair.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Driver, DriverFactory, Setting } from './drivers/types';
+import { History, type Change } from './lib/history';
 import { wlmouseFactory } from './drivers/wlmouse';
 import { wraithFactory } from './drivers/wraith';
 import { compxbFactory, pulsarFactory } from './drivers/pulsar';
@@ -137,16 +138,36 @@ export function useDeviceManager() {
   /** devices whose driver may hold outdated values (the user was away, maybe in the brand's own app) */
   const stale = useRef(new Set<string>());
 
+  /** undo / redo per device; `histTick` re-renders when a stack changes */
+  const histories = useRef(new Map<string, History>());
+  const [histTick, setHistTick] = useState(0);
+  const historyOf = useCallback((id: string) => {
+    let h = histories.current.get(id);
+    if (!h) histories.current.set(id, (h = new History()));
+    return h;
+  }, []);
+  /** Forget undo steps: the values they hold no longer match the device (new read, other profile). */
+  const clearHistory = useCallback((id: string) => {
+    const h = histories.current.get(id);
+    if (h && (h.canUndo || h.canRedo)) {
+      h.clear();
+      setHistTick((n) => n + 1);
+    }
+  }, []);
+
   const patch = useCallback((id: string, p: Partial<DeviceState>) => {
     setDevices((list) => list.map((d) => (d.id === id ? { ...d, ...p } : d)));
   }, []);
 
   /** Store a fresh read in React state and in `latest` at once, keeping unwritten edits. */
   const storeRead = useCallback((id: string, settings: Setting[], extra: Partial<DeviceState> = {}) => {
+    // the device holds something else than we knew (first read, changed elsewhere): old undo steps don't apply
+    const before = latest.current.find((d) => d.id === id)?.read;
+    if (!before || JSON.stringify(before) !== JSON.stringify(settings)) clearHistory(id);
     const upd = (d: DeviceState) => (d.id === id ? { ...withRead(d, settings), ...extra } : d);
     setDevices((list) => list.map(upd));
     latest.current = latest.current.map(upd);
-  }, []);
+  }, [clearHistory]);
 
   const readDevice = useCallback(
     async (id: string) => {
@@ -187,6 +208,7 @@ export function useDeviceManager() {
           if (old && old !== drv) old.close().catch(() => {});
           drivers.current.set(id, drv);
           claimed.current.set(hd, id);
+          histories.current.delete(id);
           fresh.push(id);
         } catch {
           /* not ours / busy - ignore */
@@ -313,6 +335,7 @@ export function useDeviceManager() {
             const settings = await drv.read();
             setDevices((list) => list.map((d) => (d.id === id ? { ...d, read: settings, edit: settings, saving: false, savedAt: Date.now() } : d)));
             latest.current = latest.current.map((d) => (d.id === id ? { ...d, read: settings, edit: settings } : d));
+            clearHistory(id);
             continue;
           }
           for (const c of changes) {
@@ -331,6 +354,7 @@ export function useDeviceManager() {
         try {
           const settings = await drv.read();
           patch(id, { read: settings, edit: settings, saving: false, error: msg });
+          clearHistory(id);
         } catch {
           patch(id, { saving: false, error: msg });
         }
@@ -339,7 +363,7 @@ export function useDeviceManager() {
         if (again.current.delete(id)) void apply(id);
       }
     },
-    [patch, storeRead],
+    [patch, storeRead, clearHistory],
   );
 
   /** Untested drivers stay view-only until the user allows changes for that device (remembered). */
@@ -371,32 +395,82 @@ export function useDeviceManager() {
     (id: string) => {
       clearTimeout(timers.current.get(id));
       setDevices((list) => list.map((d) => (d.id === id ? { ...d, edit: d.read } : d)));
+      clearHistory(id);
       setAllowedFor(id, false);
     },
-    [setAllowedFor],
+    [setAllowedFor, clearHistory],
   );
   /** true when this device is untested and the user allowed changes (so it can be made view-only again) */
   const isAllowed = useCallback((id: string) => drivers.current.get(id)?.verified === false && allowed.includes(id), [allowed]);
 
-  /** Change a setting; it is written to the device by itself shortly after. */
-  const edit = useCallback(
-    (id: string, key: string, value: Setting['value']) => {
+  /** Put new values in `edit` (state and `latest` at once) and write them shortly after. Returns what they replaced. */
+  const setValues = useCallback(
+    (id: string, values: { key: string; value: Setting['value'] }[]): Change[] => {
+      const cur = latest.current.find((d) => d.id === id)?.edit;
+      const changes: Change[] = [];
+      for (const { key, value } of values) {
+        const old = cur?.find((s) => s.key === key);
+        if (old) changes.push({ key, before: old.value, after: value });
+      }
+      const next = new Map(values.map((v) => [v.key, v.value]));
+      const upd = (d: DeviceState) => (d.id === id && d.edit ? { ...d, edit: d.edit.map((s) => (next.has(s.key) ? { ...s, value: next.get(s.key)! } : s)) } : d);
+      setDevices((list) => list.map(upd));
+      latest.current = latest.current.map(upd);
+      clearTimeout(timers.current.get(id));
+      timers.current.set(id, setTimeout(() => void apply(id), LIVE_DELAY_MS));
+      return changes;
+    },
+    [apply],
+  );
+
+  /** Settings that never go on the undo stack: the profile slot (it changes every other value) and ones that restart the device. */
+  const undoable = (id: string, key: string) =>
+    key !== 'profile' && !latest.current.find((d) => d.id === id)?.edit?.find((s) => s.key === key)?.confirm;
+
+  /** Change settings as one user action (one undo step); they are written to the device by themselves shortly after. */
+  const editMany = useCallback(
+    (id: string, values: { key: string; value: Setting['value'] }[]) => {
       if (!canWrite(id)) {
         patch(id, { error: 'This device is view-only until you allow changes.' });
         return;
       }
-      setDevices((list) =>
-        list.map((d) => (d.id === id && d.edit ? { ...d, edit: d.edit.map((s) => (s.key === key ? { ...s, value } : s)) } : d)),
-      );
-      clearTimeout(timers.current.get(id));
-      timers.current.set(id, setTimeout(() => void apply(id), LIVE_DELAY_MS));
+      if (values.some((v) => v.key === 'profile')) clearHistory(id);
+      const keep = values.filter((v) => undoable(id, v.key));
+      const changes = setValues(id, values).filter((c) => keep.some((v) => v.key === c.key));
+      if (changes.length) {
+        historyOf(id).record(changes);
+        setHistTick((n) => n + 1);
+      }
     },
-    [apply, canWrite, patch],
+    [canWrite, patch, setValues, clearHistory, historyOf],
   );
+
+  /** Change a setting; it is written to the device by itself shortly after. */
+  const edit = useCallback((id: string, key: string, value: Setting['value']) => editMany(id, [{ key, value }]), [editMany]);
+
+  /** Step back (or forward again): the old values are written like any edit. */
+  const travel = useCallback(
+    (id: string, back: boolean) => {
+      if (!canWrite(id)) return;
+      const h = histories.current.get(id);
+      const step = back ? h?.undo() : h?.redo();
+      if (!step) return;
+      const known = latest.current.find((d) => d.id === id)?.edit ?? [];
+      setValues(id, step.changes.filter((c) => known.some((s) => s.key === c.key)).map((c) => ({ key: c.key, value: back ? c.before : c.after })));
+      setHistTick((n) => n + 1);
+    },
+    [canWrite, setValues],
+  );
+  const undo = useCallback((id: string) => travel(id, true), [travel]);
+  const redo = useCallback((id: string) => travel(id, false), [travel]);
+  // histTick: the answers change when a stack does
+  const canUndo = useCallback((id: string) => !!histories.current.get(id)?.canUndo, [histTick]);
+  const canRedo = useCallback((id: string) => !!histories.current.get(id)?.canRedo, [histTick]);
 
   const discard = useCallback((id: string) => {
     setDevices((list) => list.map((d) => (d.id === id ? { ...d, edit: d.read } : d)));
-  }, []);
+    clearHistory(id);
+  }, [clearHistory]);
 
-  return { devices, scanning, connect, scan, refresh: readDevice, edit, discard, apply, canWrite, allowChanges, revokeChanges, isAllowed };
+  return { devices, scanning, connect, scan, refresh: readDevice, edit, editMany, undo, redo, canUndo, canRedo, discard, apply, canWrite, allowChanges, revokeChanges, isAllowed };
 }

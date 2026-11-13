@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { Gauge, Keyboard, MousePointerClick, Ruler } from 'lucide-react'
+import { Gamepad2, Gauge, Keyboard, MousePointerClick, Ruler } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Backdrop, Dock, TopBar } from '#/components/shell'
 import { BigValue, Card, Segmented } from '#/components/kit'
@@ -7,8 +7,8 @@ import { useDevices } from '#/lib/device-context'
 import { averageRate, chatterCount, cps, dpiError, dpiOf, fastestRepress, nearestRate, rateOf, type Press } from '#/lib/testers'
 import { cn } from '#/lib/utils'
 
-type Tab = 'polling' | 'clicks' | 'dpi' | 'keys'
-const TABS: Tab[] = ['polling', 'clicks', 'dpi', 'keys']
+type Tab = 'polling' | 'clicks' | 'dpi' | 'keys' | 'gamepad'
+const TABS: Tab[] = ['polling', 'clicks', 'dpi', 'keys', 'gamepad']
 
 export const Route = createFileRoute('/tools')({
   validateSearch: (s: Record<string, unknown>): { tab?: Tab } => (TABS.includes(s.tab as Tab) ? { tab: s.tab as Tab } : {}),
@@ -33,6 +33,7 @@ function ToolsPage() {
           {tab === 'clicks' && <ClickTest />}
           {tab === 'dpi' && <DpiTest />}
           {tab === 'keys' && <KeyTest />}
+          {tab === 'gamepad' && <GamepadTest />}
         </div>
       </main>
       <Dock
@@ -43,6 +44,7 @@ function ToolsPage() {
           { id: 'clicks', label: 'Clicks', icon: <MousePointerClick className="size-4" /> },
           { id: 'dpi', label: 'DPI check', icon: <Ruler className="size-4" /> },
           { id: 'keys', label: 'Keyboard', icon: <Keyboard className="size-4" /> },
+          { id: 'gamepad', label: 'Gamepad', icon: <Gamepad2 className="size-4" /> },
         ]}
       />
     </div>
@@ -463,6 +465,117 @@ function KeyTest() {
           <b className="text-[var(--text-2)]">Fastest re-press</b> is the shortest time between letting a key go and pressing it again. With Rapid Trigger it can be very short, so tap a key quickly to try your RT sensitivity. Chatter is a press that comes back faster than a finger can, which means a faulty switch or a Rapid Trigger setting that's too sensitive.
         </p>
       </Card>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------- gamepad
+
+const STD_BUTTONS = ['A', 'B', 'X', 'Y', 'LB', 'RB', 'LT', 'RT', 'Back', 'Start', 'L3', 'R3', 'Up', 'Down', 'Left', 'Right', 'Home']
+
+interface PadSnap { id: string; mapping: string; axes: number[]; buttons: number[] }
+
+function snap(): PadSnap[] {
+  const pads = typeof navigator !== 'undefined' && navigator.getGamepads ? navigator.getGamepads() : []
+  return [...pads].filter((p): p is Gamepad => !!p).map((p) => ({ id: p.id, mapping: p.mapping, axes: [...p.axes], buttons: p.buttons.map((b) => b.value) }))
+}
+
+function Stick({ x, y, label }: { x: number; y: number; label: string }) {
+  const mag = Math.min(1, Math.hypot(x, y))
+  return (
+    <div className="flex flex-col items-center gap-2">
+      <svg width={120} height={120} viewBox="-60 -60 120 120" aria-label={`${label}: ${x.toFixed(2)}, ${y.toFixed(2)}`}>
+        <circle r={54} fill="none" stroke="#fff" strokeOpacity={0.15} />
+        <rect x={-54} y={-54} width={108} height={108} fill="none" stroke="#fff" strokeOpacity={0.06} />
+        <line x1={-54} x2={54} y1={0} y2={0} stroke="#fff" strokeOpacity={0.08} />
+        <line y1={-54} y2={54} x1={0} x2={0} stroke="#fff" strokeOpacity={0.08} />
+        <line x1={0} y1={0} x2={x * 54} y2={y * 54} stroke="#E6E8EC" strokeOpacity={0.5} />
+        <circle cx={x * 54} cy={y * 54} r={7} fill="#E6E8EC" />
+      </svg>
+      <div className="eyebrow">{label}</div>
+      <div className="text-[11.5px] tabular-nums text-[var(--text-3)]">{x.toFixed(2)}, {y.toFixed(2)} · {(mag * 100).toFixed(0)}%</div>
+    </div>
+  )
+}
+
+function Bar({ v, label }: { v: number; label: string }) {
+  return (
+    <div className="flex items-center gap-3">
+      <span className="w-12 text-[12px] text-[var(--text-2)]">{label}</span>
+      <div className="recess h-2.5 flex-1 overflow-hidden rounded-full">
+        <div className="h-full rounded-full bg-[var(--plat)]" style={{ width: `${Math.round(Math.min(1, Math.abs(v)) * 100)}%` }} />
+      </div>
+      <span className="w-12 text-right text-[11.5px] tabular-nums text-[var(--text-3)]">{(v * 100).toFixed(0)}%</span>
+    </div>
+  )
+}
+
+function GamepadTest() {
+  const [pads, setPads] = useState<PadSnap[]>([])
+  useEffect(() => {
+    let raf = 0
+    const loop = () => {
+      setPads(snap())
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [])
+
+  if (!pads.length) {
+    return (
+      <Card title="Gamepad tester">
+        <p className="m-0 text-[13.5px] leading-relaxed text-[var(--text-2)]">
+          No controller found yet. Plug in a controller, or switch a keyboard that supports it into gamepad mode, then <b className="text-[var(--text)]">press any button</b> (browsers only show a controller after its first button press).
+        </p>
+        <p className="mt-3 mb-0 text-[12px] leading-relaxed text-[var(--text-3)]">
+          Keyboards with a gamepad mode include ATK HE boards (EDGE, RS, ATK68), VGN FLASH68, and some Wraith-family HE boards. Turn it on from the keyboard's Gamepad tab in InputDeck.
+        </p>
+      </Card>
+    )
+  }
+
+  return (
+    <div className="grid gap-4">
+      {pads.map((p, i) => {
+        const std = p.mapping === 'standard'
+        const ax = (n: number) => p.axes[n] ?? 0
+        return (
+          <Card key={i} title={`Controller ${i + 1}`} right={<span className="max-w-[60%] truncate text-[11.5px] text-[var(--text-3)]" title={p.id}>{p.id}</span>}>
+            {std ? (
+              <>
+                <div className="flex flex-wrap justify-around gap-6 py-2">
+                  <Stick x={ax(0)} y={ax(1)} label="Left stick" />
+                  <Stick x={ax(2)} y={ax(3)} label="Right stick" />
+                  <div className="grid min-w-[220px] flex-1 content-center gap-3">
+                    <Bar v={p.buttons[6] ?? 0} label="LT" />
+                    <Bar v={p.buttons[7] ?? 0} label="RT" />
+                  </div>
+                </div>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {STD_BUTTONS.map((b, n) => n < p.buttons.length && (
+                    <span key={b} className={cn('chip tabular-nums', (p.buttons[n] ?? 0) > 0.1 && 'plat !border-transparent')}>{b}</span>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="grid gap-2.5">
+                  {p.axes.map((v, n) => <Bar key={n} v={v} label={`Axis ${n + 1}`} />)}
+                </div>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {p.buttons.map((v, n) => <span key={n} className={cn('chip tabular-nums', v > 0.1 && 'plat !border-transparent')}>{n + 1}</span>)}
+                </div>
+              </>
+            )}
+            <p className="mt-4 mb-0 text-[12px] leading-relaxed text-[var(--text-3)]">
+              {std
+                ? 'Press a key half way: an analog keyboard should move the stick part of the way, not jump straight to the edge. If the stick reaches the corner when you press two directions, square output is on.'
+                : 'This controller uses a classic (DirectInput) layout, so axes and buttons are shown by number.'}
+            </p>
+          </Card>
+        )
+      })}
     </div>
   )
 }

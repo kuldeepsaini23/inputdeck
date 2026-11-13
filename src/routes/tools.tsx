@@ -459,6 +459,7 @@ function KeyTest() {
           <p className="m-0 text-[12.5px] text-[var(--text-3)]">Type in the box above to see each key.</p>
         )}
         <p className="mt-4 mb-0 text-[12px] leading-relaxed text-[var(--text-3)]">
+          <b className="text-[var(--text-2)]">Want to see how far each key is pressed?</b> On a Wraith W75 HE or Lofree Hyzen, open the keyboard, go to Performance and press <b className="text-[var(--text-2)]">Test keys</b>.{' '}
           <b className="text-[var(--text-2)]">Fastest re-press</b> is the shortest time between letting a key go and pressing it again. With Rapid Trigger it can be very short, so tap a key quickly to try your RT sensitivity. Chatter is a press that comes back faster than a finger can, which means a faulty switch or a Rapid Trigger setting that's too sensitive.
         </p>
       </Card>

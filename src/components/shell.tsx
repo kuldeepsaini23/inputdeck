@@ -50,7 +50,10 @@ export function TopBar({ activeId, profile, onProfile }: { activeId?: string; pr
   return (
     <header className="relative z-20 flex h-[76px] items-center justify-between px-10">
       <div className="flex flex-col items-start gap-1.5">
-        <Link to="/" className="display text-[12px] tracking-[0.3em] text-[var(--text)] no-underline">INPUTDECK</Link>
+        <div className="flex items-center gap-4">
+          <Link to="/" className="display text-[12px] tracking-[0.3em] text-[var(--text)] no-underline">INPUTDECK</Link>
+          <Link to="/tools" className="display text-[10.5px] font-semibold text-[var(--text-3)] no-underline hover:text-[var(--text)]" activeProps={{ className: '!text-[var(--text)]' }}>Tools</Link>
+        </div>
         {demo && (
           <button type="button" onClick={exitDemo} title="Leave demo mode and use your real devices"
             className="display flex items-center gap-1.5 text-[10.5px] font-semibold text-[var(--text-3)] hover:text-[var(--text)]">

@@ -10,11 +10,17 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ToolsRouteImport } from './routes/tools'
 import { Route as DIdRouteImport } from './routes/d.$id'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ToolsRoute = ToolsRouteImport.update({
+  id: '/tools',
+  path: '/tools',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DIdRoute = DIdRouteImport.update({
@@ -25,27 +31,31 @@ const DIdRoute = DIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/tools': typeof ToolsRoute
   '/d/$id': typeof DIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/tools': typeof ToolsRoute
   '/d/$id': typeof DIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/tools': typeof ToolsRoute
   '/d/$id': typeof DIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/d/$id'
+  fullPaths: '/' | '/tools' | '/d/$id'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/d/$id'
-  id: '__root__' | '/' | '/d/$id'
+  to: '/' | '/tools' | '/d/$id'
+  id: '__root__' | '/' | '/tools' | '/d/$id'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ToolsRoute: typeof ToolsRoute
   DIdRoute: typeof DIdRoute
 }
 
@@ -56,6 +66,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/tools': {
+      id: '/tools'
+      path: '/tools'
+      fullPath: '/tools'
+      preLoaderRoute: typeof ToolsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/d/$id': {
@@ -70,6 +87,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ToolsRoute: ToolsRoute,
   DIdRoute: DIdRoute,
 }
 export const routeTree = rootRouteImport

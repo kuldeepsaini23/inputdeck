@@ -8,32 +8,47 @@ import {
   removeStep, slotName, stepProblem, stepText, stepsFromRecording, textCharOk, usedBytes, withMacro, type Macros, type RecordedKey,
 } from '#/lib/macros'
 import { cn } from '#/lib/utils'
+import { t, useT } from '#/lib/i18n'
 import { Card, Segmented } from './kit'
 
 /** Keys a macro can press: basic HID usages only (QMK stores 8-bit keycodes in macros). */
 const KEY_CATS = ['basic', 'mods', 'nav', 'fkeys', 'numpad', 'media']
 
+/** Mouse button names from MOUSE_BUTTONS, for display. */
+const buttonName = (b: string | undefined) => {
+  switch (b) {
+    case 'Left': return t('Left')
+    case 'Right': return t('Right')
+    case 'Middle': return t('Middle')
+    case 'Back': return t('Back')
+    case 'Forward': return t('Forward')
+    default: return b
+  }
+}
+
 /** List of macro slots (M0…, or the device's own slot names). */
-export function MacroList({ v, slot, onSelect, hint = 'Put a macro on a key in the Keys tab.' }: { v: Macros; slot: number; onSelect: (n: number) => void; hint?: string }) {
+export function MacroList({ v, slot, onSelect, hint }: { v: Macros; slot: number; onSelect: (n: number) => void; hint?: string }) {
+  const t = useT()
   const named = !!v.slotNames
   return (
-    <Card title={`Macros · ${v.slots} slot${v.slots === 1 ? '' : 's'}`}>
-      <div className="scroll-thin -mr-1 flex max-h-[300px] flex-col gap-1.5 overflow-y-auto pr-1" role="radiogroup" aria-label="Macro slot">
+    <Card title={v.slots === 1 ? t('Macros · 1 slot') : t('Macros · {n} slots', { n: v.slots })}>
+      <div className="scroll-thin -mr-1 flex max-h-[300px] flex-col gap-1.5 overflow-y-auto pr-1" role="radiogroup" aria-label={t('Macro slot')}>
         {v.macros.map((m, i) => (
           <button key={i} type="button" role="radio" aria-checked={i === slot} onClick={() => onSelect(i)}
             className={cn('flex h-11 shrink-0 items-center gap-3 rounded-[12px] px-3 text-left', i === slot ? 'plat' : 'raised text-[var(--text-2)]')}>
             <span className={cn('display shrink-0 truncate text-[12px] font-semibold', named ? 'max-w-[45%]' : 'w-8')}>{slotName(v, i)}</span>
-            <span className={cn('min-w-0 flex-1 truncate text-[11px]', i === slot ? 'opacity-70' : m.length ? '' : 'text-[var(--text-4)]')}>{macroSummary(m)}</span>
+            <span className={cn('min-w-0 flex-1 truncate text-[11px]', i === slot ? 'opacity-70' : m.length ? '' : 'text-[var(--text-4)]')}>{m.length ? macroSummary(m) : t('Empty')}</span>
           </button>
         ))}
       </div>
-      <p className="hint mt-3 mb-0">{hint}</p>
+      <p className="hint mt-3 mb-0">{hint ?? t('Put a macro on a key in the Keys tab.')}</p>
     </Card>
   )
 }
 
 /** Bytes used by all macros vs. the keyboard's macro storage. */
 export function UsageBar({ v }: { v: Macros }) {
+  const t = useT()
   const used = usedBytes(v)
   if (used === undefined || !v.maxBytes) return null
   const pct = Math.min(100, (used / v.maxBytes) * 100)
@@ -41,10 +56,10 @@ export function UsageBar({ v }: { v: Macros }) {
   return (
     <div>
       <div className="flex items-baseline justify-between">
-        <span className="eyebrow">Storage</span>
-        <span className={cn('display text-[11px]', over ? 'text-[var(--warn)]' : 'text-[var(--text-2)]')}>{used} / {v.maxBytes} bytes</span>
+        <span className="eyebrow">{t('Storage')}</span>
+        <span className={cn('display text-[11px]', over ? 'text-[var(--warn)]' : 'text-[var(--text-2)]')}>{t('{used} / {max} bytes', { used, max: v.maxBytes })}</span>
       </div>
-      <div className="recess mt-2 h-2 overflow-hidden rounded-full" role="meter" aria-label="Macro storage used" aria-valuemin={0} aria-valuemax={v.maxBytes} aria-valuenow={used}>
+      <div className="recess mt-2 h-2 overflow-hidden rounded-full" role="meter" aria-label={t('Macro storage used')} aria-valuemin={0} aria-valuemax={v.maxBytes} aria-valuenow={used}>
         <div className="h-full rounded-full" style={{ width: `${pct}%`, background: over ? 'var(--warn)' : 'linear-gradient(90deg, rgb(193 196 203 / 0.35), var(--plat))' }} />
       </div>
     </div>
@@ -58,6 +73,7 @@ export function MacroEditor({ v, slot, onChange, className }: {
   onChange: (v: Macros) => void
   className?: string
 }) {
+  const t = useT()
   const steps = v.macros[slot] ?? []
   const format = v.format ?? 'qmk'
   const delays = v.delays !== false
@@ -86,8 +102,12 @@ export function MacroEditor({ v, slot, onChange, className }: {
     if (!fits(nv)) {
       const per = v.maxPerMacro !== undefined && (macroSize(next, format) ?? 0) > v.maxPerMacro
       return setProblem(per
-        ? `That doesn't fit: one macro can use ${v.maxPerMacro} bytes on this ${mouse ? 'mouse' : 'keyboard'}.`
-        : `That doesn't fit: the ${mouse ? 'mouse' : 'keyboard'} has room for ${v.maxBytes} bytes of macros.`)
+        ? mouse
+          ? t("That doesn't fit: one macro can use {n} bytes on this mouse.", { n: v.maxPerMacro! })
+          : t("That doesn't fit: one macro can use {n} bytes on this keyboard.", { n: v.maxPerMacro! })
+        : mouse
+          ? t("That doesn't fit: the mouse has room for {n} bytes of macros.", { n: v.maxBytes ?? 0 })
+          : t("That doesn't fit: the keyboard has room for {n} bytes of macros.", { n: v.maxBytes ?? 0 }))
     }
     setProblem(undefined)
     onChange(nv)
@@ -134,24 +154,24 @@ export function MacroEditor({ v, slot, onChange, className }: {
   const s = selIdx !== undefined ? steps[selIdx] : undefined
 
   return (
-    <Card className={className} title={`${name} · ${steps.length} step${steps.length === 1 ? '' : 's'}${thisBytes !== undefined ? ` · ${thisBytes} bytes` : ''}`}
+    <Card className={className} title={`${name} · ${steps.length === 1 ? t('1 step') : t('{n} steps', { n: steps.length })}${thisBytes !== undefined ? ` · ${t('{n} bytes', { n: thisBytes })}` : ''}`}
       right={
         <span className="flex items-center gap-1.5">
           {delays && (
             <button type="button" className="chip !text-[11px]" aria-pressed={recDelays} disabled={recording} onClick={() => setRecDelays((x) => !x)}
-              title="Keep the pauses between key presses as delay steps">
-              {recDelays ? 'Timing on' : 'Timing off'}
+              title={t('Keep the pauses between key presses as delay steps')}>
+              {recDelays ? t('Timing on') : t('Timing off')}
             </button>
           )}
-          <button type="button" className={cn('chip display flex items-center gap-1.5 !text-[11px] font-semibold', recording && 'plat !border-transparent')}
+          <button type="button" className={cn('chip display flex items-center gap-1.5 whitespace-nowrap !text-[11px] font-semibold', recording && 'plat !border-transparent')}
             aria-pressed={recording} onClick={() => (recording ? stopRecording() : (setAdding(undefined), setRecording(true)))}>
-            {recording ? <><Square className="size-3" fill="currentColor" /> Stop</> : <><Circle className="size-3 text-[#ff4545]" fill="currentColor" /> Record</>}
+            {recording ? <><Square className="size-3" fill="currentColor" /> {t('Stop')}</> : <><Circle className="size-3 text-[#ff4545]" fill="currentColor" /> {t('Record')}</>}
           </button>
         </span>
       }>
       <div className={cn('recess scroll-thin flex max-h-[148px] min-h-[64px] flex-wrap content-start gap-1.5 overflow-y-auto rounded-[14px] p-3', recording && 'ring-1 ring-[#ff4545]/50')}
-        role="listbox" aria-label={`Steps of macro ${name}`}>
-        {shown.length === 0 && <span className="hint self-center">{recording ? 'Recording… press keys on your keyboard, then Stop.' : 'No steps yet. Record keys or add steps below.'}</span>}
+        role="listbox" aria-label={t('Steps of macro {name}', { name })}>
+        {shown.length === 0 && <span className="hint self-center">{recording ? t('Recording… press keys on your keyboard, then Stop.') : t('No steps yet. Record keys or add steps below.')}</span>}
         {shown.map((x, i) => {
           const live = recording && i >= at && i < at + recSteps.length
           return (
@@ -167,32 +187,32 @@ export function MacroEditor({ v, slot, onChange, className }: {
       {/* selected step: edit / move / remove */}
       {s && !recording && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <span className="eyebrow mr-1">Step {selIdx! + 1}</span>
+          <span className="eyebrow mr-1">{t('Step {n}', { n: selIdx! + 1 })}</span>
           {(s.t === 'tap' || s.t === 'down' || s.t === 'up') && (
-            <Segmented label="Key action" className="[&_button]:!px-3 [&_button]:!py-1 [&_button]:!text-[10.5px]" value={s.t}
-              options={[['Tap', 'tap'], ['Hold', 'down'], ['Release', 'up']] as const}
-              onChange={(t) => commit(steps.map((y, k) => (k === selIdx ? { t, kc: s.kc } : y)), selIdx)} />
+            <Segmented label={t('Key action')} className="[&_button]:!px-3 [&_button]:!py-1 [&_button]:!text-[10.5px]" value={s.t}
+              options={[[t('Tap'), 'tap'], [t('Hold'), 'down'], [t('Release'), 'up']] as const}
+              onChange={(a) => commit(steps.map((y, k) => (k === selIdx ? { t: a, kc: s.kc } : y)), selIdx)} />
           )}
           {s.t === 'mouse' && (
-            <Segmented label="Button action" className="[&_button]:!px-3 [&_button]:!py-1 [&_button]:!text-[10.5px]" value={s.a}
-              options={[['Click', 'tap'], ['Hold', 'down'], ['Release', 'up']] as const}
+            <Segmented label={t('Button action')} className="[&_button]:!px-3 [&_button]:!py-1 [&_button]:!text-[10.5px]" value={s.a}
+              options={[[t('Click'), 'tap'], [t('Hold'), 'down'], [t('Release'), 'up']] as const}
               onChange={(a) => commit(steps.map((y, k) => (k === selIdx ? { t: 'mouse', a, btn: s.btn } : y)), selIdx)} />
           )}
           {s.t === 'wheel' && (
-            <Segmented label="Scroll direction" className="[&_button]:!px-3 [&_button]:!py-1 [&_button]:!text-[10.5px]" value={s.dir}
-              options={[['Up', 1], ['Down', -1]] as const}
+            <Segmented label={t('Scroll direction')} className="[&_button]:!px-3 [&_button]:!py-1 [&_button]:!text-[10.5px]" value={s.dir}
+              options={[[t('Up'), 1], [t('Down'), -1]] as const}
               onChange={(dir) => commit(steps.map((y, k) => (k === selIdx ? { t: 'wheel', dir } : y)), selIdx)} />
           )}
           {s.t === 'delay' && (
-            <NumberField label="Delay (ms)" value={s.ms} max={v.maxDelay ?? MAX_DELAY} onCommit={(ms) => commit(steps.map((y, k) => (k === selIdx ? { t: 'delay', ms } : y)), selIdx)} />
+            <NumberField label={t('Delay (ms)')} value={s.ms} max={v.maxDelay ?? MAX_DELAY} onCommit={(ms) => commit(steps.map((y, k) => (k === selIdx ? { t: 'delay', ms } : y)), selIdx)} />
           )}
           {s.t === 'text' && (
-            <TextField label="Text" value={s.text} onCommit={(text) => commit(normalize(steps.map((y, k) => (k === selIdx ? { t: 'text', text } : y))), text ? selIdx : undefined)} />
+            <TextField label={t('Text')} value={s.text} onCommit={(text) => commit(normalize(steps.map((y, k) => (k === selIdx ? { t: 'text', text } : y))), text ? selIdx : undefined)} />
           )}
           <span className="ml-auto flex gap-1.5">
-            <button type="button" className="chip !px-2" aria-label="Move step earlier" disabled={selIdx === 0} onClick={() => commit(moveStep(steps, selIdx!, -1), selIdx! - 1)}><ChevronLeft className="size-3.5" /></button>
-            <button type="button" className="chip !px-2" aria-label="Move step later" disabled={selIdx === steps.length - 1} onClick={() => commit(moveStep(steps, selIdx!, 1), selIdx! + 1)}><ChevronRight className="size-3.5" /></button>
-            <button type="button" className="chip !px-2" aria-label="Remove step" onClick={() => commit(removeStep(steps, selIdx!), selIdx! > 0 ? selIdx! - 1 : undefined)}><Trash2 className="size-3.5" /></button>
+            <button type="button" className="chip !px-2" aria-label={t('Move step earlier')} disabled={selIdx === 0} onClick={() => commit(moveStep(steps, selIdx!, -1), selIdx! - 1)}><ChevronLeft className="size-3.5" /></button>
+            <button type="button" className="chip !px-2" aria-label={t('Move step later')} disabled={selIdx === steps.length - 1} onClick={() => commit(moveStep(steps, selIdx!, 1), selIdx! + 1)}><ChevronRight className="size-3.5" /></button>
+            <button type="button" className="chip !px-2" aria-label={t('Remove step')} onClick={() => commit(removeStep(steps, selIdx!), selIdx! > 0 ? selIdx! - 1 : undefined)}><Trash2 className="size-3.5" /></button>
           </span>
         </div>
       )}
@@ -200,72 +220,73 @@ export function MacroEditor({ v, slot, onChange, className }: {
       {/* add steps */}
       {!recording && (
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
-          <span className="eyebrow mr-1">{selIdx === undefined ? 'Add' : `Add after step ${selIdx + 1}`}</span>
+          <span className="eyebrow mr-1">{selIdx === undefined ? t('Add') : t('Add after step {n}', { n: selIdx + 1 })}</span>
           {(['key', ...(mouse ? ['mouse', 'wheel'] : []), ...(delays ? ['delay'] : []), ...(texts ? ['text'] : [])] as Adding[]).map((k) => (
             <button key={k} type="button" className={cn('chip flex items-center gap-1 !text-[11px]', adding === k && 'plat !border-transparent')} aria-pressed={adding === k}
               onClick={() => setAdding(adding === k ? undefined : k)}>
-              <Plus className="size-3" />{ADD_LABEL[k]}
+              <Plus className="size-3" />{addLabel(k)}
             </button>
           ))}
           {steps.length > 0 && (
-            <button type="button" className="chip ml-auto flex items-center gap-1 !text-[11px]" onClick={() => commit([], undefined)}><X className="size-3" />Clear</button>
+            <button type="button" className="chip ml-auto flex items-center gap-1 !text-[11px]" onClick={() => commit([], undefined)}><X className="size-3" />{t('Clear')}</button>
           )}
         </div>
       )}
       {!recording && adding === 'key' && <MacroKeyPicker format={format} onPick={(kc) => add([{ t: 'tap', kc }])} />}
       {!recording && adding === 'mouse' && (
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
-          {MOUSE_BUTTONS.map((b, i) => <button key={b} type="button" className="chip !text-[11px]" onClick={() => add([{ t: 'mouse', a: 'tap', btn: i + 1 }])}>{b} click</button>)}
+          {MOUSE_BUTTONS.map((b, i) => <button key={b} type="button" className="chip !text-[11px]" onClick={() => add([{ t: 'mouse', a: 'tap', btn: i + 1 }])}>{t('{button} click', { button: buttonName(b) ?? b })}</button>)}
         </div>
       )}
       {!recording && adding === 'wheel' && (
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
-          <button type="button" className="chip !text-[11px]" onClick={() => add([{ t: 'wheel', dir: 1 }])}>Scroll up</button>
-          <button type="button" className="chip !text-[11px]" onClick={() => add([{ t: 'wheel', dir: -1 }])}>Scroll down</button>
+          <button type="button" className="chip !text-[11px]" onClick={() => add([{ t: 'wheel', dir: 1 }])}>{t('Scroll up')}</button>
+          <button type="button" className="chip !text-[11px]" onClick={() => add([{ t: 'wheel', dir: -1 }])}>{t('Scroll down')}</button>
         </div>
       )}
       {!recording && adding === 'delay' && (
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
           {[50, 100, 250, 500, 1000].map((ms) => <button key={ms} type="button" className="chip !text-[11px]" onClick={() => add([{ t: 'delay', ms }])}>{ms} ms</button>)}
-          <NumberField label="Custom delay (ms)" value={200} max={v.maxDelay ?? MAX_DELAY} button="Add" onCommit={(ms) => add([{ t: 'delay', ms }])} />
+          <NumberField label={t('Custom delay (ms)')} value={200} max={v.maxDelay ?? MAX_DELAY} button={t('Add')} onCommit={(ms) => add([{ t: 'delay', ms }])} />
         </div>
       )}
       {!recording && adding === 'text' && (
-        <div className="mt-3"><TextField label="Text to type" value="" button="Add" onCommit={(text) => text && add([{ t: 'text', text }])} /></div>
+        <div className="mt-3"><TextField label={t('Text to type')} value="" button={t('Add')} onCommit={(text) => text && add([{ t: 'text', text }])} /></div>
       )}
 
-      {problem && <p className="hint mt-3 mb-0 text-[var(--warn)]">{problem}</p>}
+      {problem && <p className="hint mt-3 mb-0 text-[var(--warn)]">{t(problem)}</p>}
       <p className="hint mt-3 mb-0">
         {recording
-          ? 'Every key you press is captured, Esc and Tab too; click Stop when done.'
+          ? t('Every key you press is captured, Esc and Tab too; click Stop when done.')
           : mouse
-            ? 'The device plays the macro itself, with or without InputDeck open.'
-            : `Text is typed as plain ASCII with a US layout.${delays ? '' : " This keyboard's firmware can't store delays."}`}
+            ? t('The device plays the macro itself, with or without InputDeck open.')
+            : `${t('Text is typed as plain ASCII with a US layout.')}${delays ? '' : ' ' + t("This keyboard's firmware can't store delays.")}`}
       </p>
     </Card>
   )
 }
 
 type Adding = 'key' | 'mouse' | 'wheel' | 'delay' | 'text'
-const ADD_LABEL: Record<Adding, string> = { key: 'Tap key', mouse: 'Mouse click', wheel: 'Scroll', delay: 'Delay', text: 'Text' }
+const addLabel = (k: Adding) => ({ key: t('Tap key'), mouse: t('Mouse click'), wheel: t('Scroll'), delay: t('Delay'), text: t('Text') })[k]
 
 function stepTitle(s: MacroStep): string {
   switch (s.t) {
-    case 'tap': return `Tap ${describe(s.kc)}`
-    case 'down': return `Hold ${describe(s.kc)} down`
-    case 'up': return `Release ${describe(s.kc)}`
+    case 'tap': return t('Tap {key}', { key: describe(s.kc) })
+    case 'down': return t('Hold {key} down', { key: describe(s.kc) })
+    case 'up': return t('Release {key}', { key: describe(s.kc) })
     case 'mouse': {
-      const b = `${MOUSE_BUTTONS[s.btn - 1] ?? `button ${s.btn}`} mouse button`
-      return s.a === 'tap' ? `Click the ${b}` : s.a === 'down' ? `Hold the ${b} down` : `Release the ${b}`
+      const b = buttonName(MOUSE_BUTTONS[s.btn - 1]) ?? String(s.btn)
+      return s.a === 'tap' ? t('Click the {button} mouse button', { button: b }) : s.a === 'down' ? t('Hold the {button} mouse button down', { button: b }) : t('Release the {button} mouse button', { button: b })
     }
-    case 'wheel': return s.dir === 1 ? 'Scroll up one notch' : 'Scroll down one notch'
-    case 'delay': return `Wait ${s.ms} ms`
-    case 'text': return `Type “${s.text}”`
+    case 'wheel': return s.dir === 1 ? t('Scroll up one notch') : t('Scroll down one notch')
+    case 'delay': return t('Wait {ms} ms', { ms: s.ms })
+    case 'text': return t('Type “{text}”', { text: s.text })
   }
 }
 
 /** Compact keycode grid for macro steps (basic keys only, those the format can store). */
 function MacroKeyPicker({ format, onPick }: { format: MacroFormat; onPick: (kc: number) => void }) {
+  const t = useT()
   const macroKeyOk = (k: Keycode) => k.code >= 0x04 && keyOk(k.code, format)
   const cats = useMemo(() => categories('qmk-v2').filter((c) => KEY_CATS.includes(c.id)).map((c) => ({ ...c, codes: c.codes.filter(macroKeyOk) })).filter((c) => c.codes.length), [format]) // eslint-disable-line react-hooks/exhaustive-deps
   const [cat, setCat] = useState(cats[0].id)
@@ -274,17 +295,17 @@ function MacroKeyPicker({ format, onPick }: { format: MacroFormat; onPick: (kc: 
   return (
     <div className="mt-3">
       <div className="flex items-center gap-2">
-        <Segmented label="Key category" className="flex-1 [&_button]:!px-1.5 [&_button]:!text-[10px]" options={cats.map((c) => [c.name, c.id] as const)} value={q.trim() ? undefined : cat} onChange={(c) => (setQ(''), setCat(c))} />
-        <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search…" aria-label="Search keys for the macro"
-          className="recess h-8 w-[120px] rounded-full border-0 px-3 text-[12px] text-[var(--text)] outline-none placeholder:text-[var(--text-4)]" />
+        <Segmented label={t('Key category')} className="no-scrollbar min-w-0 flex-1 overflow-x-auto [&_button]:!px-1.5 [&_button]:!text-[10px]" options={cats.map((c) => [c.name, c.id] as const)} value={q.trim() ? undefined : cat} onChange={(c) => (setQ(''), setCat(c))} />
+        <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder={t('Search…')} aria-label={t('Search keys for the macro')}
+          className="recess h-8 w-[120px] shrink-0 rounded-full border-0 px-3 text-[12px] text-[var(--text)] outline-none placeholder:text-[var(--text-4)]" />
       </div>
       <div className="scroll-thin mt-2.5 grid max-h-[150px] grid-cols-8 gap-1.5 overflow-y-auto pr-1">
         {shown.map((k) => (
-          <button key={k.code} type="button" className="raised display h-9 min-w-0 truncate rounded-[10px] px-1.5 text-[11px] font-semibold text-[var(--text-2)]" title={`Tap ${k.name}`} onClick={() => onPick(k.code)}>
+          <button key={k.code} type="button" className="raised display h-9 min-w-0 truncate rounded-[10px] px-1.5 text-[11px] font-semibold text-[var(--text-2)]" title={t('Tap {key}', { key: k.name })} onClick={() => onPick(k.code)}>
             {k.label}
           </button>
         ))}
-        {shown.length === 0 && <p className="hint col-span-8 m-0">No key matches.</p>}
+        {shown.length === 0 && <p className="hint col-span-8 m-0">{t('No key matches.')}</p>}
       </div>
     </div>
   )
@@ -308,17 +329,18 @@ function NumberField({ label, value, max, button, onCommit }: { label: string; v
 }
 
 function TextField({ label, value, button, onCommit }: { label: string; value: string; button?: string; onCommit: (s: string) => void }) {
-  const [t, setT] = useState(value)
+  const t = useT()
+  const [txt, setT] = useState(value)
   useEffect(() => setT(value), [value])
-  const bad = [...t].find((c) => !textCharOk(c.charCodeAt(0)))
-  const go = () => !bad && onCommit(t)
+  const bad = [...txt].find((c) => !textCharOk(c.charCodeAt(0)))
+  const go = () => !bad && onCommit(txt)
   return (
     <span className="flex min-w-0 flex-1 items-center gap-1.5">
-      <input type="text" value={t} aria-label={label} maxLength={500} placeholder="Type the text the macro should type" onChange={(e) => setT(e.target.value)}
-        onKeyDown={(e) => e.key === 'Enter' && go()} onBlur={() => !button && t !== value && go()}
+      <input type="text" value={txt} aria-label={label} maxLength={500} placeholder={t('Type the text the macro should type')} onChange={(e) => setT(e.target.value)}
+        onKeyDown={(e) => e.key === 'Enter' && go()} onBlur={() => !button && txt !== value && go()}
         className={cn('recess h-8 min-w-0 flex-1 rounded-full border-0 px-3 text-[12px] text-[var(--text)] outline-none placeholder:text-[var(--text-4)]', bad && 'ring-1 ring-[var(--warn)]')} />
-      {button && <button type="button" className="chip !text-[11px]" disabled={!!bad || !t} onClick={go}>{button}</button>}
-      {bad && <span className="text-[11px] text-[var(--warn)]">“{bad}” can't be typed</span>}
+      {button && <button type="button" className="chip !text-[11px]" disabled={!!bad || !txt} onClick={go}>{button}</button>}
+      {bad && <span className="text-[11px] text-[var(--warn)]">{t("“{char}” can't be typed", { char: bad })}</span>}
     </span>
   )
 }

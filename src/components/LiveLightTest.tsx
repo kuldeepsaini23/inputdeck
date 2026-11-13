@@ -8,6 +8,7 @@ import { Check, ClipboardCopy, FlaskConical } from 'lucide-react'
 import type { DeviceState } from '#/devices'
 import type { KeyCap, LiveLight } from '#/drivers/types'
 import { cn } from '#/lib/utils'
+import { useT } from '#/lib/i18n'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '#/components/ui/dialog'
 import { useDevices } from '#/lib/device-context'
 import type { LivePaint } from '#/lib/live-paint'
@@ -66,7 +67,6 @@ export function probesFor(l: Grid): Probe[] {
 }
 
 const hex = (v: number) => v.toString(16).padStart(6, '0').toUpperCase()
-const NAMES: Record<number, string> = { 0xff0000: 'red', 0x00ff00: 'green', 0x0000ff: 'blue', 0xffffff: 'white' }
 
 /** layout position of a cell, when the driver knows it */
 const keyOf = (l: Grid, c: ProbeCell) => l.map?.[c.row * l.cols + c.col]
@@ -99,32 +99,33 @@ export function LiveLightCard({ dev, lp }: { dev: DeviceState; lp: LivePaint }) 
   const l = dev.driver.liveLight
   const canWrite = useDevices().canWrite(dev.id)
   const [open, setOpen] = useState(false)
+  const t = useT()
   if (!l) return null
   if (lp.usable) {
     return (
-      <Card title="Per-key lighting (live)" className="col-span-3"
-        right={<Toggle label="Per-key lighting" checked={lp.on} disabled={!canWrite} onChange={lp.setOn} />}>
+      <Card title={t('Per-key lighting (live)')} className="col-span-3"
+        right={<Toggle label={t('Per-key lighting')} checked={lp.on} disabled={!canWrite} onChange={lp.setOn} />}>
         <p className="hint m-0">
           {lp.on
-            ? 'On: select keys on the board and pick a colour (nothing selected = all keys). The keyboard shows these colours while InputDeck is open; your design is remembered in this browser and comes back next time.'
-            : 'Paint every key its own colour. The keyboard can’t store per-key colours, so they show while InputDeck is open (and until the keyboard is unplugged). Your normal lighting comes back when you switch this off.'}
-          {!canWrite && ' Press "Allow changes" first.'}
+            ? t('On: select keys on the board and pick a colour (nothing selected = all keys). The keyboard shows these colours while InputDeck is open; your design is remembered in this browser and comes back next time.')
+            : t('Paint every key its own colour. The keyboard can’t store per-key colours, so they show while InputDeck is open (and until the keyboard is unplugged). Your normal lighting comes back when you switch this off.')}
+          {!canWrite && ' ' + t('Press "Allow changes" first.')}
         </p>
-        {lp.err && <p className="hint mt-2 mb-0 text-[var(--err)]">{lp.err}</p>}
+        {lp.err && <p className="hint mt-2 mb-0 text-[var(--err)]">{t(lp.err)}</p>}
       </Card>
     )
   }
   return (
-    <Card title="Per-key lighting (live)" className="col-span-3"
-      right={<span className="eyebrow rounded-full border border-white/20 px-2 py-0.5 !text-[8px]">{l.experimental ? 'Needs a test' : 'Live'}</span>}>
+    <Card title={t('Per-key lighting (live)')} className="col-span-3"
+      right={<span className="eyebrow whitespace-nowrap rounded-full border border-white/20 px-2 py-0.5 !text-[8px]">{l.experimental ? t('Needs a test') : t('Live')}</span>}>
       <p className="hint m-0">
-        This keyboard can show a different colour on every key while InputDeck is open (it can't store them).
-        {l.experimental ? ' Before that can be built, a 1-minute guided test has to check that the right keys light up in the right colours: InputDeck shows two pictures and you say whether your keyboard matches. Your lighting is put back afterwards.' : ''}
+        {t("This keyboard can show a different colour on every key while InputDeck is open (it can't store them).")}
+        {l.experimental ? ' ' + t('Before that can be built, a 1-minute guided test has to check that the right keys light up in the right colours: InputDeck shows two pictures and you say whether your keyboard matches. Your lighting is put back afterwards.') : ''}
       </p>
       {l.experimental && (
-        <button type="button" disabled={!canWrite} onClick={() => setOpen(true)} title={canWrite ? undefined : 'Press "Allow changes" first'}
+        <button type="button" disabled={!canWrite} onClick={() => setOpen(true)} title={canWrite ? undefined : t('Press "Allow changes" first.')}
           className="plat display mt-4 flex items-center gap-2 rounded-full px-4 py-2.5 text-[12px] font-semibold disabled:opacity-50">
-          <FlaskConical className="size-4" /> Start the guided test
+          <FlaskConical className="size-4" /> {t('Start the guided test')}
         </button>
       )}
       {open && <LiveLightTest dev={dev} l={l} onClose={() => setOpen(false)} />}
@@ -133,6 +134,10 @@ export function LiveLightCard({ dev, lp }: { dev: DeviceState; lp: LivePaint }) 
 }
 
 function LiveLightTest({ dev, l, onClose }: { dev: DeviceState; l: LiveLight; onClose: () => void }) {
+  const t = useT()
+  // colour names for the screen (the report for the developer stays English)
+  const colourName = (v: number) => ({ 0xff0000: t('red'), 0x00ff00: t('green'), 0x0000ff: t('blue'), 0xffffff: t('white') } as Record<number, string>)[v] ?? hex(v)
+  const seenName = (s: Seen) => ({ Red: t('Red'), Green: t('Green'), Blue: t('Blue'), White: t('White'), Other: t('Other') })[s]
   const keys = dev.driver.layout?.() ?? []
   const probes = useRef(probesFor(l)).current
   const [step, setStep] = useState(-1) // -1 intro, probes.length = done
@@ -210,9 +215,9 @@ function LiveLightTest({ dev, l, onClose }: { dev: DeviceState; l: LiveLight; on
   const expected: KeyLook[] = keys.map(() => ({}))
   probe?.cells.forEach((c) => {
     const k = keyOf(l, c)
-    if (k !== undefined && expected[k]) expected[k] = { color: `#${hex(c.value)}`, title: `${keys[k].label}: ${NAMES[c.value] ?? hex(c.value)}` }
+    if (k !== undefined && expected[k]) expected[k] = { color: `#${hex(c.value)}`, title: `${keys[k].label}: ${colourName(c.value)}` }
   })
-  const marked: KeyLook[] = keys.map((_, i) => (seen[i] ? { color: SWATCH[seen[i]], title: `${keys[i].label}: ${seen[i]}` } : {}))
+  const marked: KeyLook[] = keys.map((_, i) => (seen[i] ? { color: SWATCH[seen[i]], title: `${keys[i].label}: ${seenName(seen[i])}` } : {}))
   // clicking a key cycles it Red -> Green -> Blue -> White -> Other -> not lit
   const mark = (s: Set<number>) => {
     const next = { ...seen }
@@ -228,27 +233,27 @@ function LiveLightTest({ dev, l, onClose }: { dev: DeviceState; l: LiveLight; on
   const describe = (p: Probe) => {
     const named = p.cells.map((c) => {
       const k = keyOf(l, c)
-      return `${k === undefined ? `row ${c.row + 1} key ${c.col + 1}` : keys[k]?.label} ${NAMES[c.value] ?? hex(c.value)}`
+      return `${k === undefined ? t('row {row} key {col}', { row: c.row + 1, col: c.col + 1 }) : keys[k]?.label} ${colourName(c.value)}`
     })
-    return p.cells.length > 3 ? `the whole ${p.cells[0].row === 0 ? 'top' : `${p.cells[0].row + 1}.`} row in white` : named.join(', ')
+    return p.cells.length > 3 ? (p.cells[0].row === 0 ? t('the whole top row in white') : t('row {n} in white', { n: p.cells[0].row + 1 })) : named.join(', ')
   }
 
   return (
     <Dialog open onOpenChange={(o) => !o && void close()}>
       <DialogContent className="rounded-3xl border-white/10 bg-[#111113]/95 p-7 backdrop-blur-xl sm:max-w-[760px]">
         <DialogHeader>
-          <div className="eyebrow mb-1">Live lighting test · {dev.driver.model()}</div>
+          <div className="eyebrow mb-1">{t('Live lighting test · {model}', { model: dev.driver.model() })}</div>
           <DialogTitle className="display text-[18px] font-semibold">
-            {step < 0 ? 'Check which keys light up, and in what colour' : probe ? `Picture ${step + 1} of ${probes.length}: ${describe(probe)}` : err ? 'Test stopped' : 'Done — lighting put back'}
+            {step < 0 ? t('Check which keys light up, and in what colour') : probe ? t('Picture {n} of {total}: {what}', { n: step + 1, total: probes.length, what: describe(probe) }) : err ? t('Test stopped') : t('Done — lighting put back')}
           </DialogTitle>
           <DialogDescription className="leading-relaxed">
             {step < 0
-              ? `InputDeck will turn all key lights off and show ${probes.length} pictures on your keyboard. For each, say whether your keyboard looks exactly the same. Your current lighting is restored at the end (or if you close this). Nothing is stored on the keyboard; unplugging it also resets the lights.`
+              ? t('InputDeck will turn all key lights off and show {n} pictures on your keyboard. For each, say whether your keyboard looks exactly the same. Your current lighting is restored at the end (or if you close this). Nothing is stored on the keyboard; unplugging it also resets the lights.', { n: probes.length })
               : probe
                 ? marking
-                  ? 'Click every key that is lit on your keyboard. Click it again to change its colour (red, green, blue, white, other, off).'
-                  : 'Do exactly these keys light up on your keyboard, in these colours, and no others?'
-                : err ? `Something went wrong: ${err}. The lighting was put back. Copy the result and send it to the developer.` : 'Thanks! Copy the result and send it to the developer.'}
+                  ? t('Click every key that is lit on your keyboard. Click it again to change its colour (red, green, blue, white, other, off).')
+                  : t('Do exactly these keys light up on your keyboard, in these colours, and no others?')
+                : err ? t('Something went wrong: {error}. The lighting was put back. Copy the result and send it to the developer.', { error: t(err) }) : t('Thanks! Copy the result and send it to the developer.')}
           </DialogDescription>
         </DialogHeader>
 
@@ -260,12 +265,12 @@ function LiveLightTest({ dev, l, onClose }: { dev: DeviceState; l: LiveLight; on
             <div className="flex flex-wrap items-center gap-2">
               {hasMap && (
                 <>
-                  <button type="button" className={cn('chip !text-[11px]', a.match === true && 'plat !border-transparent')} onClick={() => setA({ match: true, seen: {}, none: false })}>Yes, exactly like this</button>
-                  <button type="button" className={cn('chip !text-[11px]', a.match === false && 'plat !border-transparent')} onClick={() => setA({ match: false })}>No, it looks different</button>
+                  <button type="button" className={cn('chip !text-[11px]', a.match === true && 'plat !border-transparent')} onClick={() => setA({ match: true, seen: {}, none: false })}>{t('Yes, exactly like this')}</button>
+                  <button type="button" className={cn('chip !text-[11px]', a.match === false && 'plat !border-transparent')} onClick={() => setA({ match: false })}>{t('No, it looks different')}</button>
                 </>
               )}
               {marking && (
-                <button type="button" className={cn('chip !text-[11px]', a.none && 'plat !border-transparent')} onClick={() => setA({ none: true, seen: {} })}>Nothing lit</button>
+                <button type="button" className={cn('chip !text-[11px]', a.none && 'plat !border-transparent')} onClick={() => setA({ none: true, seen: {} })}>{t('Nothing lit')}</button>
               )}
             </div>
           </>
@@ -276,18 +281,18 @@ function LiveLightTest({ dev, l, onClose }: { dev: DeviceState; l: LiveLight; on
         )}
 
         <div className="flex justify-end gap-2">
-          {step < probes.length && <button type="button" className="chip" disabled={busy} onClick={() => void close()}>Cancel</button>}
-          {step < 0 && <button type="button" className="plat display rounded-full px-5 py-2.5 text-[12px] font-semibold" disabled={busy} onClick={() => void go(0)}>{busy ? 'Starting…' : 'Start'}</button>}
+          {step < probes.length && <button type="button" className="chip" disabled={busy} onClick={() => void close()}>{t('Cancel')}</button>}
+          {step < 0 && <button type="button" className="plat display rounded-full px-5 py-2.5 text-[12px] font-semibold" disabled={busy} onClick={() => void go(0)}>{busy ? t('Starting…') : t('Start')}</button>}
           {probe && (
             <button type="button" className="plat display rounded-full px-5 py-2.5 text-[12px] font-semibold disabled:opacity-50" disabled={busy || !answered} onClick={() => void go(step + 1)}>
-              {busy ? '…' : step + 1 < probes.length ? 'Next' : 'Finish and restore lighting'}
+              {busy ? '…' : step + 1 < probes.length ? t('Next') : t('Finish and restore lighting')}
             </button>
           )}
           {step >= probes.length && (
             <>
-              <button type="button" className="chip" onClick={() => void close()}>Close</button>
+              <button type="button" className="chip" onClick={() => void close()}>{t('Close')}</button>
               <button type="button" className="plat display flex items-center gap-2 rounded-full px-5 py-2.5 text-[12px] font-semibold" onClick={() => void copy()}>
-                {copied ? <><Check className="size-4" /> Copied</> : <><ClipboardCopy className="size-4" /> Copy result</>}
+                {copied ? <><Check className="size-4" /> {t('Copied')}</> : <><ClipboardCopy className="size-4" /> {t('Copy result')}</>}
               </button>
             </>
           )}

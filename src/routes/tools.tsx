@@ -6,6 +6,12 @@ import { BigValue, Card, Segmented } from '#/components/kit'
 import { useDevices } from '#/lib/device-context'
 import { averageRate, chatterCount, cps, dpiError, dpiOf, fastestRepress, nearestRate, rateOf, type Press } from '#/lib/testers'
 import { cn } from '#/lib/utils'
+import { useT } from '#/lib/i18n'
+
+/** Put React nodes into a translated sentence: fill(t('Press {key} now'), { key: <b>A</b> }). */
+function fill(text: string, parts: Record<string, React.ReactNode>) {
+  return text.split(/\{(\w+)\}/).map((s, i) => (i % 2 ? <span key={i}>{s in parts ? parts[s] : `{${s}}`}</span> : s))
+}
 
 type Tab = 'polling' | 'clicks' | 'dpi' | 'keys' | 'gamepad'
 const TABS: Tab[] = ['polling', 'clicks', 'dpi', 'keys', 'gamepad']
@@ -18,16 +24,17 @@ export const Route = createFileRoute('/tools')({
 function ToolsPage() {
   const { tab = 'polling' } = Route.useSearch()
   const navigate = Route.useNavigate()
+  const t = useT()
   return (
     <div className="app">
       <Backdrop />
       <TopBar />
       <main className="no-scrollbar relative z-10 h-[calc(100%-76px)] overflow-y-auto px-4 pt-2 pb-36 sm:px-10">
         <div className="mx-auto max-w-[920px]">
-          <div className="eyebrow">Tools</div>
-          <h1 className="big-num m-0 mt-2 text-[28px]">Check your gear</h1>
+          <div className="eyebrow">{t('Tools')}</div>
+          <h1 className="big-num m-0 mt-2 text-[28px]">{t('Check your gear')}</h1>
           <p className="mt-2 mb-6 max-w-[640px] text-[13.5px] leading-relaxed text-[var(--text-2)]">
-            These tests only watch what your browser receives. They work with any mouse or keyboard, connected to InputDeck or not, and never change anything.
+            {t('These tests only watch what your browser receives. They work with any mouse or keyboard, connected to InputDeck or not, and never change anything.')}
           </p>
           {tab === 'polling' && <PollingTest />}
           {tab === 'clicks' && <ClickTest />}
@@ -38,13 +45,13 @@ function ToolsPage() {
       </main>
       <Dock
         active={tab}
-        onChange={(t) => void navigate({ search: { tab: t as Tab }, replace: true })}
+        onChange={(id) => void navigate({ search: { tab: id as Tab }, replace: true })}
         tabs={[
-          { id: 'polling', label: 'Polling rate', icon: <Gauge className="size-4" /> },
-          { id: 'clicks', label: 'Clicks', icon: <MousePointerClick className="size-4" /> },
-          { id: 'dpi', label: 'DPI check', icon: <Ruler className="size-4" /> },
-          { id: 'keys', label: 'Keyboard', icon: <Keyboard className="size-4" /> },
-          { id: 'gamepad', label: 'Gamepad', icon: <Gamepad2 className="size-4" /> },
+          { id: 'polling', label: t('Polling rate'), icon: <Gauge className="size-4" /> },
+          { id: 'clicks', label: t('Clicks'), icon: <MousePointerClick className="size-4" /> },
+          { id: 'dpi', label: t('DPI check'), icon: <Ruler className="size-4" /> },
+          { id: 'keys', label: t('Keyboard'), icon: <Keyboard className="size-4" /> },
+          { id: 'gamepad', label: t('Gamepad'), icon: <Gamepad2 className="size-4" /> },
         ]}
       />
     </div>
@@ -56,8 +63,8 @@ function useTick(on: boolean, ms = 150) {
   const [, set] = useState(0)
   useEffect(() => {
     if (!on) return
-    const t = setInterval(() => set((n) => n + 1), ms)
-    return () => clearInterval(t)
+    const timer = setInterval(() => set((n) => n + 1), ms)
+    return () => clearInterval(timer)
   }, [on, ms])
 }
 
@@ -72,6 +79,7 @@ function PollingTest() {
   const peak = useRef<number>(undefined)
   const history = useRef<number[]>([])
   const lastAvg = useRef<number>(undefined)
+  const t = useT()
   useTick(true, 200)
 
   useEffect(() => {
@@ -93,7 +101,7 @@ function PollingTest() {
   // keep only the last half second, sample the rate for the graph
   const now = performance.now()
   const isMoving = now - last.current < 120
-  const recent = times.current.filter((t) => now - t < 500)
+  const recent = times.current.filter((x) => now - x < 500)
   const hz = isMoving ? rateOf(recent) : undefined
   const avg = isMoving ? averageRate(recent) : undefined
   if (avg !== undefined) lastAvg.current = avg
@@ -106,22 +114,22 @@ function PollingTest() {
 
   return (
     <div className="grid gap-4">
-      <Card title="Polling rate" right={<button type="button" className="chip" onClick={() => { peak.current = undefined; lastAvg.current = undefined; history.current = []; times.current = [] }}>Reset</button>}>
+      <Card title={t('Polling rate')} right={<button type="button" className="chip" onClick={() => { peak.current = undefined; lastAvg.current = undefined; history.current = []; times.current = [] }}>{t('Reset')}</button>}>
         <div className="flex flex-wrap items-end gap-10">
           <div>
-            <div className="eyebrow">{isMoving ? 'Now' : 'Last reading'}</div>
+            <div className="eyebrow">{isMoving ? t('Now') : t('Last reading')}</div>
             <BigValue value={fmtHz(shown)} unit="Hz" size={56} />
           </div>
           <div>
-            <div className="eyebrow">Peak</div>
+            <div className="eyebrow">{t('Peak')}</div>
             <BigValue value={fmtHz(peak.current)} unit="Hz" size={28} />
           </div>
           <div>
-            <div className="eyebrow">Average (counts drops)</div>
+            <div className="eyebrow">{t('Average (counts drops)')}</div>
             <BigValue value={fmtHz(lastAvg.current)} unit="Hz" size={28} />
           </div>
           {peak.current !== undefined && (
-            <div className="text-[12.5px] text-[var(--text-2)]">Looks like a <b className="text-[var(--text)]">{fmtHz(nearestRate(peak.current))} Hz</b> mouse</div>
+            <div className="text-[12.5px] text-[var(--text-2)]">{fill(t('Looks like a {rate} mouse'), { rate: <b className="text-[var(--text)]">{fmtHz(nearestRate(peak.current))} Hz</b> })}</div>
           )}
         </div>
         <svg className="mt-4 block h-[70px] w-full" viewBox="0 0 600 70" preserveAspectRatio="none" aria-hidden="true">
@@ -131,12 +139,12 @@ function PollingTest() {
       </Card>
       <div ref={pad} className={cn('glass grid h-[260px] cursor-crosshair select-none place-items-center text-center text-[14px] text-[var(--text-2)] transition-colors', isMoving && 'border-white/30')}>
         <div>
-          <div className="display text-[13px] text-[var(--text)]">Move your mouse fast in circles here</div>
-          <div className="mt-2 text-[12px] text-[var(--text-3)]">Keep moving for a couple of seconds for a steady reading</div>
+          <div className="display text-[13px] text-[var(--text)]">{t('Move your mouse fast in circles here')}</div>
+          <div className="mt-2 text-[12px] text-[var(--text-3)]">{t('Keep moving for a couple of seconds for a steady reading')}</div>
         </div>
       </div>
       <p className="m-0 text-[12px] leading-relaxed text-[var(--text-3)]">
-        Browsers can miss reports at very high rates (4K/8K), and a busy PC or a USB hub can lower the reading. If the peak is far below what you set, try a USB port on the back of the PC and close other apps. Use it as a rough check, not a lab measurement.
+        {t('Browsers can miss reports at very high rates (4K/8K), and a busy PC or a USB hub can lower the reading. If the peak is far below what you set, try a USB port on the back of the PC and close other apps. Use it as a rough check, not a lab measurement.')}
       </p>
     </div>
   )
@@ -145,12 +153,15 @@ function PollingTest() {
 // ---------------------------------------------------------------- clicks
 
 const BUTTONS = ['Left', 'Middle', 'Right', 'Back', 'Forward']
+const buttonNames = (t: (s: string) => string) => [t('Left'), t('Middle'), t('Right'), t('Back'), t('Forward')]
 
 function ClickTest() {
   const presses = useRef<Press[][]>(BUTTONS.map(() => []))
   const downs = useRef<number[]>([])
   const [threshold, setThreshold] = useState(20)
   const [held, setHeld] = useState<number[]>([])
+  const t = useT()
+  const names = buttonNames(t)
   useTick(true, 200)
 
   const onDown = (e: React.PointerEvent | React.MouseEvent) => {
@@ -179,25 +190,25 @@ function ClickTest() {
         onAuxClick={(e) => e.preventDefault()}
       >
         <div>
-          <div className="display text-[13px] text-[var(--text)]">Click here with any button</div>
-          <div className="mt-2 text-[12px] text-[var(--text-3)]">Single clicks only: if one click shows up as two, the switch is chattering (double-clicking)</div>
-          <div className="mt-4 flex justify-center gap-2">
-            {BUTTONS.map((b, i) => <span key={b} className={cn('chip', held.includes(i) && 'plat')}>{b}</span>)}
+          <div className="display text-[13px] text-[var(--text)]">{t('Click here with any button')}</div>
+          <div className="mt-2 text-[12px] text-[var(--text-3)]">{t('Single clicks only: if one click shows up as two, the switch is chattering (double-clicking)')}</div>
+          <div className="mt-4 flex flex-wrap justify-center gap-2">
+            {BUTTONS.map((b, i) => <span key={b} className={cn('chip', held.includes(i) && 'plat')}>{names[i]}</span>)}
           </div>
         </div>
       </div>
-      <Card title="Results" right={
-        <div className="flex items-center gap-3">
-          <span className="text-[11.5px] text-[var(--text-3)]">Count as a double click under</span>
-          <Segmented label="Double-click threshold" value={threshold} onChange={setThreshold} options={[['10 ms', 10], ['20 ms', 20], ['40 ms', 40], ['80 ms', 80]]} />
-          <button type="button" className="chip" onClick={() => { presses.current = BUTTONS.map(() => []); downs.current = [] }}>Reset</button>
+      <Card title={t('Results')} right={
+        <div className="flex flex-wrap items-center justify-end gap-3">
+          <span className="text-[11.5px] text-[var(--text-3)]">{t('Count as a double click under')}</span>
+          <Segmented label={t('Double-click threshold')} value={threshold} onChange={setThreshold} options={[['10 ms', 10], ['20 ms', 20], ['40 ms', 40], ['80 ms', 80]]} />
+          <button type="button" className="chip" onClick={() => { presses.current = BUTTONS.map(() => []); downs.current = [] }}>{t('Reset')}</button>
         </div>
       }>
         <div className="mb-4 flex gap-10">
-          <div><div className="eyebrow">Clicks per second</div><BigValue value={cps(downs.current, now).toFixed(0)} size={34} /></div>
+          <div><div className="eyebrow">{t('Clicks per second')}</div><BigValue value={cps(downs.current, now).toFixed(0)} size={34} /></div>
         </div>
-        <table className="w-full text-left text-[13px]">
-          <thead className="eyebrow"><tr><th className="pb-2 font-normal">Button</th><th className="font-normal">Clicks</th><th className="font-normal">Last hold</th><th className="font-normal">Fastest gap</th><th className="font-normal">Double clicks</th></tr></thead>
+        <div className="no-scrollbar overflow-x-auto"><table className="w-full text-left text-[13px]">
+          <thead className="eyebrow"><tr><th className="pb-2 pr-3 font-normal">{t('Button')}</th><th className="pr-3 font-normal">{t('Clicks')}</th><th className="pr-3 font-normal">{t('Last hold')}</th><th className="pr-3 font-normal">{t('Fastest gap')}</th><th className="font-normal">{t('Double clicks')}</th></tr></thead>
           <tbody>
             {BUTTONS.map((b, i) => {
               const p = presses.current[i]
@@ -206,18 +217,18 @@ function ClickTest() {
               const gap = fastestRepress(p)
               return (
                 <tr key={b} className="border-t border-white/[0.06]">
-                  <td className="py-2 text-[var(--text)]">{b}</td>
+                  <td className="py-2 text-[var(--text)]">{names[i]}</td>
                   <td>{p.length}</td>
                   <td>{last?.up !== undefined ? `${(last.up - last.down).toFixed(1)} ms` : '—'}</td>
                   <td>{gap !== undefined ? `${gap.toFixed(1)} ms` : '—'}</td>
-                  <td className={chat ? 'text-[var(--err)]' : undefined}>{chat ? `${chat} found` : p.length ? 'none' : '—'}</td>
+                  <td className={chat ? 'text-[var(--err)]' : undefined}>{chat ? t('{n} found', { n: chat }) : p.length ? t('none') : '—'}</td>
                 </tr>
               )
             })}
           </tbody>
-        </table>
+        </table></div>
         <p className="mt-4 mb-0 text-[12px] leading-relaxed text-[var(--text-3)]">
-          A human can't click again within about 20 ms of letting go, so a second click that fast is almost always the switch bouncing. If you see double clicks, raise the mouse's click debounce on its Buttons tab and test again.
+          {t("A human can't click again within about 20 ms of letting go, so a second click that fast is almost always the switch bouncing. If you see double clicks, raise the mouse's click debounce on its Buttons tab and test again.")}
         </p>
       </Card>
     </div>
@@ -247,6 +258,7 @@ function DpiTest() {
   const deviceDpi = useMouseDpi()
   const [setDpi, setSetDpi] = useState<number>()
   const expected = setDpi ?? deviceDpi
+  const t = useT()
   useTick(running, 100)
 
   useEffect(() => {
@@ -293,49 +305,49 @@ function DpiTest() {
 
   return (
     <div className="grid gap-4">
-      <Card title="1 · Set up">
+      <Card title={`1 · ${t('Set up')}`}>
         <ol className="m-0 grid gap-2 pl-5 text-[13px] leading-relaxed text-[var(--text-2)]">
-          <li>Put a ruler (or a tape measure) on your mouse pad, and line up the front of your mouse with the 0 mark.</li>
-          <li>Pick the distance you will move:
+          <li>{t('Put a ruler (or a tape measure) on your mouse pad, and line up the front of your mouse with the 0 mark.')}</li>
+          <li>{t('Pick the distance you will move:')}
             <span className="ml-2 inline-flex items-center gap-2 align-middle">
               <input type="number" min={1} max={100} value={distance} onChange={(e) => setDistance(Math.max(1, Number(e.target.value) || 1))}
-                className="recess w-20 rounded-lg px-2 py-1 text-[13px] text-[var(--text)]" aria-label="Distance" />
-              <Segmented label="Unit" value={unit} onChange={setUnit} options={[['cm', 'cm'], ['inch', 'in']]} />
+                className="recess w-20 rounded-lg px-2 py-1 text-[13px] text-[var(--text)]" aria-label={t('Distance')} />
+              <Segmented label={t('Unit')} value={unit} onChange={setUnit} options={[['cm', 'cm'], [t('inch'), 'in']]} />
             </span>
           </li>
-          <li>Press Start, slide the mouse <b className="text-[var(--text)]">straight to the right</b> exactly that far, then click.</li>
+          <li>{fill(t('Press Start, slide the mouse {direction} exactly that far, then click.'), { direction: <b className="text-[var(--text)]">{t('straight to the right')}</b> })}</li>
         </ol>
       </Card>
       <div ref={target} className={cn('glass grid h-[200px] place-items-center text-center', running && 'border-white/40')}>
         {running ? (
           <div>
-            <div className="display text-[13px] text-[var(--text)]">Slide right {distance} {unit}, then click</div>
-            <div className="mt-3 text-[12px] tabular-nums text-[var(--text-3)]">{Math.abs(live?.x ?? 0)} counts across · {live?.y ?? 0} up/down</div>
+            <div className="display text-[13px] text-[var(--text)]">{t('Slide right {distance} {unit}, then click', { distance, unit })}</div>
+            <div className="mt-3 text-[12px] tabular-nums text-[var(--text-3)]">{t('{x} counts across · {y} up/down', { x: Math.abs(live?.x ?? 0), y: live?.y ?? 0 })}</div>
           </div>
         ) : (
-          <button type="button" className="plat display rounded-full px-7 py-3 text-[13px] font-semibold" onClick={() => void start()}>Start</button>
+          <button type="button" className="plat display rounded-full px-7 py-3 text-[13px] font-semibold" onClick={() => void start()}>{t('Start')}</button>
         )}
       </div>
       {result && measured !== undefined && (
-        <Card title="2 · Result">
+        <Card title={`2 · ${t('Result')}`}>
           <div className="flex flex-wrap items-end gap-10">
-            <div><div className="eyebrow">Real DPI</div><BigValue value={Math.round(measured)} unit="DPI" size={56} /></div>
+            <div><div className="eyebrow">{t('Real DPI')}</div><BigValue value={Math.round(measured)} unit="DPI" size={56} /></div>
             <div>
-              <div className="eyebrow">Your mouse is set to</div>
-              <input type="number" min={50} max={50000} value={expected ?? ''} placeholder="e.g. 800" onChange={(e) => setSetDpi(Number(e.target.value) || undefined)}
-                className="recess mt-1 w-28 rounded-lg px-2 py-1.5 text-[15px] text-[var(--text)]" aria-label="DPI the mouse is set to" />
+              <div className="eyebrow">{t('Your mouse is set to')}</div>
+              <input type="number" min={50} max={50000} value={expected ?? ''} placeholder={t('e.g. {value}', { value: 800 })} onChange={(e) => setSetDpi(Number(e.target.value) || undefined)}
+                className="recess mt-1 w-28 rounded-lg px-2 py-1.5 text-[15px] text-[var(--text)]" aria-label={t('DPI the mouse is set to')} />
             </div>
             {expected !== undefined && (
               <div>
-                <div className="eyebrow">Difference</div>
+                <div className="eyebrow">{t('Difference')}</div>
                 <BigValue value={`${dpiError(measured, expected) > 0 ? '+' : ''}${dpiError(measured, expected).toFixed(1)}`} unit="%" size={28} />
               </div>
             )}
           </div>
           <p className="mt-4 mb-0 text-[12px] leading-relaxed text-[var(--text-3)]">
-            Within about ±5% is normal (your hand never moves exactly {distance} {unit}). Repeat it 3 times and look at the middle result.
-            {Math.abs(result.y) > Math.abs(result.x) * 0.15 && ' You moved up or down quite a bit: try to keep the mouse straight.'}
-            {raw === false && ' Your browser could not read raw movement, so turn off "Enhance pointer precision" in Windows for a fair result.'}
+            {t('Within about ±5% is normal (your hand never moves exactly {distance} {unit}). Repeat it 3 times and look at the middle result.', { distance, unit })}
+            {Math.abs(result.y) > Math.abs(result.x) * 0.15 && ' ' + t('You moved up or down quite a bit: try to keep the mouse straight.')}
+            {raw === false && ' ' + t('Your browser could not read raw movement, so turn off "Enhance pointer precision" in Windows for a fair result.')}
           </p>
         </Card>
       )}
@@ -355,6 +367,7 @@ function KeyTest() {
   const [focus, setFocus] = useState(false)
   const [threshold, setThreshold] = useState(5)
   const box = useRef<HTMLDivElement>(null)
+  const t = useT()
   useTick(focus, 120)
 
   useEffect(() => {
@@ -403,43 +416,43 @@ function KeyTest() {
           <div>
             <div className="flex min-h-[38px] flex-wrap justify-center gap-2">
               {[...held.current].map((c) => <span key={c} className="plat display rounded-lg px-3 py-2 text-[13px] font-semibold">{keys.current.get(c)?.name ?? c}</span>)}
-              {!held.current.size && <span className="text-[13px] text-[var(--text-3)]">Press and hold keys…</span>}
+              {!held.current.size && <span className="text-[13px] text-[var(--text-3)]">{t('Press and hold keys…')}</span>}
             </div>
-            <div className="mt-3 text-[12px] text-[var(--text-3)]">Keys held now: {held.current.size} · most at once: <b className="text-[var(--text)]">{maxHeld.current}</b></div>
+            <div className="mt-3 text-[12px] text-[var(--text-3)]">{fill(t('Keys held now: {n} · most at once: {max}', { n: held.current.size }), { max: <b className="text-[var(--text)]">{maxHeld.current}</b> })}</div>
           </div>
         ) : (
-          <div className="display text-[13px] text-[var(--text)]">Click here, then type. Shortcuts are blocked while this box is selected.</div>
+          <div className="display text-[13px] text-[var(--text)]">{t('Click here, then type. Shortcuts are blocked while this box is selected.')}</div>
         )}
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
-        <Card title="SOCD / Snap Tap check">
+        <Card title={t('SOCD / Snap Tap check')}>
           <div className="flex justify-center gap-2 py-2">
             {[['KeyA', 'A'], ['KeyD', 'D']].map(([c, l]) => (
               <span key={c} className={cn('display grid size-14 place-items-center rounded-xl border text-[18px] font-semibold', on(c) ? 'plat border-transparent' : 'border-white/15 text-[var(--text-3)]')}>{l}</span>
             ))}
           </div>
           <p className="m-0 text-[12px] leading-relaxed text-[var(--text-3)]">
-            Hold <b>A</b>, then also press <b>D</b>. With SOCD (last input wins) on, A goes dark while D is held, then lights up again when you let D go. If both stay lit, SOCD is off.
+            {fill(t('Hold {a}, then also press {d}. With SOCD (last input wins) on, A goes dark while D is held, then lights up again when you let D go. If both stay lit, SOCD is off.'), { a: <b>A</b>, d: <b>D</b> })}
           </p>
         </Card>
-        <Card title="Rollover">
+        <Card title={t('Rollover')}>
           <p className="m-0 text-[12px] leading-relaxed text-[var(--text-3)]">
-            Press as many keys at once as you can (for example ASDF + JKL;). <b className="text-[var(--text)]">Most at once</b> above is how many your keyboard sent together. Gaming keyboards should reach 6 or more.
+            {fill(t('Press as many keys at once as you can (for example ASDF + JKL;). {mostAtOnce} above is how many your keyboard sent together. Gaming keyboards should reach 6 or more.'), { mostAtOnce: <b className="text-[var(--text)]">{t('Most at once')}</b> })}
           </p>
         </Card>
       </div>
 
-      <Card title="Per key" right={
-        <div className="flex items-center gap-3">
-          <span className="text-[11.5px] text-[var(--text-3)]">Count as chatter under</span>
-          <Segmented label="Chatter threshold" value={threshold} onChange={setThreshold} options={[['3 ms', 3], ['5 ms', 5], ['10 ms', 10]]} />
-          <button type="button" className="chip" onClick={() => { keys.current.clear(); order.current = []; maxHeld.current = 0 }}>Reset</button>
+      <Card title={t('Per key')} right={
+        <div className="flex flex-wrap items-center justify-end gap-3">
+          <span className="text-[11.5px] text-[var(--text-3)]">{t('Count as chatter under')}</span>
+          <Segmented label={t('Chatter threshold')} value={threshold} onChange={setThreshold} options={[['3 ms', 3], ['5 ms', 5], ['10 ms', 10]]} />
+          <button type="button" className="chip" onClick={() => { keys.current.clear(); order.current = []; maxHeld.current = 0 }}>{t('Reset')}</button>
         </div>
       }>
         {stats.length ? (
-          <table className="w-full text-left text-[13px]">
-            <thead className="eyebrow"><tr><th className="pb-2 font-normal">Key</th><th className="font-normal">Presses</th><th className="font-normal">Last hold</th><th className="font-normal">Fastest re-press</th><th className="font-normal">Chatter</th></tr></thead>
+          <div className="no-scrollbar overflow-x-auto"><table className="w-full text-left text-[13px]">
+            <thead className="eyebrow"><tr><th className="pb-2 pr-3 font-normal">{t('Key')}</th><th className="pr-3 font-normal">{t('Presses')}</th><th className="pr-3 font-normal">{t('Last hold')}</th><th className="pr-3 font-normal">{t('Fastest re-press')}</th><th className="font-normal">{t('Chatter')}</th></tr></thead>
             <tbody>
               {stats.map(([c, k]) => {
                 const last = k.presses.at(-1)
@@ -449,20 +462,21 @@ function KeyTest() {
                   <tr key={c} className="border-t border-white/[0.06]">
                     <td className="py-2 text-[var(--text)]">{k.name}</td>
                     <td>{k.presses.length}</td>
-                    <td>{last?.up !== undefined ? `${(last.up - last.down).toFixed(1)} ms` : 'held'}</td>
+                    <td>{last?.up !== undefined ? `${(last.up - last.down).toFixed(1)} ms` : t('held')}</td>
                     <td>{gap !== undefined ? `${gap.toFixed(1)} ms` : '—'}</td>
-                    <td className={chat ? 'text-[var(--err)]' : undefined}>{chat ? `${chat} found` : 'none'}</td>
+                    <td className={chat ? 'text-[var(--err)]' : undefined}>{chat ? t('{n} found', { n: chat }) : t('none')}</td>
                   </tr>
                 )
               })}
             </tbody>
-          </table>
+          </table></div>
         ) : (
-          <p className="m-0 text-[12.5px] text-[var(--text-3)]">Type in the box above to see each key.</p>
+          <p className="m-0 text-[12.5px] text-[var(--text-3)]">{t('Type in the box above to see each key.')}</p>
         )}
         <p className="mt-4 mb-0 text-[12px] leading-relaxed text-[var(--text-3)]">
-          <b className="text-[var(--text-2)]">Want to see how far each key is pressed?</b> On a Wraith W75 HE or Lofree Hyzen, open the keyboard, go to Performance and press <b className="text-[var(--text-2)]">Test keys</b>.{' '}
-          <b className="text-[var(--text-2)]">Fastest re-press</b> is the shortest time between letting a key go and pressing it again. With Rapid Trigger it can be very short, so tap a key quickly to try your RT sensitivity. Chatter is a press that comes back faster than a finger can, which means a faulty switch or a Rapid Trigger setting that's too sensitive.
+          <b className="text-[var(--text-2)]">{t('Want to see how far each key is pressed?')}</b>{' '}
+          {fill(t('On a Wraith W75 HE or Lofree Hyzen, open the keyboard, go to Performance and press {testKeys}.'), { testKeys: <b className="text-[var(--text-2)]">{t('Test keys')}</b> })}{' '}
+          {fill(t("{fastest} is the shortest time between letting a key go and pressing it again. With Rapid Trigger it can be very short, so tap a key quickly to try your RT sensitivity. Chatter is a press that comes back faster than a finger can, which means a faulty switch or a Rapid Trigger setting that's too sensitive."), { fastest: <b className="text-[var(--text-2)]">{t('Fastest re-press')}</b> })}
         </p>
       </Card>
     </div>
@@ -501,7 +515,7 @@ function Stick({ x, y, label }: { x: number; y: number; label: string }) {
 function Bar({ v, label }: { v: number; label: string }) {
   return (
     <div className="flex items-center gap-3">
-      <span className="w-12 text-[12px] text-[var(--text-2)]">{label}</span>
+      <span className="min-w-12 whitespace-nowrap text-[12px] text-[var(--text-2)]">{label}</span>
       <div className="recess h-2.5 flex-1 overflow-hidden rounded-full">
         <div className="h-full rounded-full bg-[var(--plat)]" style={{ width: `${Math.round(Math.min(1, Math.abs(v)) * 100)}%` }} />
       </div>
@@ -512,6 +526,7 @@ function Bar({ v, label }: { v: number; label: string }) {
 
 function GamepadTest() {
   const [pads, setPads] = useState<PadSnap[]>([])
+  const t = useT()
   useEffect(() => {
     let raf = 0
     const loop = () => {
@@ -524,12 +539,12 @@ function GamepadTest() {
 
   if (!pads.length) {
     return (
-      <Card title="Gamepad tester">
+      <Card title={t('Gamepad tester')}>
         <p className="m-0 text-[13.5px] leading-relaxed text-[var(--text-2)]">
-          No controller found yet. Plug in a controller, or switch a keyboard that supports it into gamepad mode, then <b className="text-[var(--text)]">press any button</b> (browsers only show a controller after its first button press).
+          {fill(t('No controller found yet. Plug in a controller, or switch a keyboard that supports it into gamepad mode, then {press} (browsers only show a controller after its first button press).'), { press: <b className="text-[var(--text)]">{t('press any button')}</b> })}
         </p>
         <p className="mt-3 mb-0 text-[12px] leading-relaxed text-[var(--text-3)]">
-          Keyboards with a gamepad mode include ATK HE boards (EDGE, RS, ATK68), VGN FLASH68, and some Wraith-family HE boards. Turn it on from the keyboard's Gamepad tab in InputDeck.
+          {t("Keyboards with a gamepad mode include ATK HE boards (EDGE, RS, ATK68), VGN FLASH68, and some Wraith-family HE boards. Turn it on from the keyboard's Gamepad tab in InputDeck.")}
         </p>
       </Card>
     )
@@ -541,12 +556,12 @@ function GamepadTest() {
         const std = p.mapping === 'standard'
         const ax = (n: number) => p.axes[n] ?? 0
         return (
-          <Card key={i} title={`Controller ${i + 1}`} right={<span className="max-w-[60%] truncate text-[11.5px] text-[var(--text-3)]" title={p.id}>{p.id}</span>}>
+          <Card key={i} title={t('Controller {n}', { n: i + 1 })} right={<span className="max-w-[60%] truncate text-[11.5px] text-[var(--text-3)]" title={p.id}>{p.id}</span>}>
             {std ? (
               <>
                 <div className="flex flex-wrap justify-around gap-6 py-2">
-                  <Stick x={ax(0)} y={ax(1)} label="Left stick" />
-                  <Stick x={ax(2)} y={ax(3)} label="Right stick" />
+                  <Stick x={ax(0)} y={ax(1)} label={t('Left stick')} />
+                  <Stick x={ax(2)} y={ax(3)} label={t('Right stick')} />
                   <div className="grid min-w-[220px] flex-1 content-center gap-3">
                     <Bar v={p.buttons[6] ?? 0} label="LT" />
                     <Bar v={p.buttons[7] ?? 0} label="RT" />
@@ -561,7 +576,7 @@ function GamepadTest() {
             ) : (
               <>
                 <div className="grid gap-2.5">
-                  {p.axes.map((v, n) => <Bar key={n} v={v} label={`Axis ${n + 1}`} />)}
+                  {p.axes.map((v, n) => <Bar key={n} v={v} label={t('Axis {n}', { n: n + 1 })} />)}
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">
                   {p.buttons.map((v, n) => <span key={n} className={cn('chip tabular-nums', v > 0.1 && 'plat !border-transparent')}>{n + 1}</span>)}
@@ -570,8 +585,8 @@ function GamepadTest() {
             )}
             <p className="mt-4 mb-0 text-[12px] leading-relaxed text-[var(--text-3)]">
               {std
-                ? 'Press a key half way: an analog keyboard should move the stick part of the way, not jump straight to the edge. If the stick reaches the corner when you press two directions, square output is on.'
-                : 'This controller uses a classic (DirectInput) layout, so axes and buttons are shown by number.'}
+                ? t('Press a key half way: an analog keyboard should move the stick part of the way, not jump straight to the edge. If the stick reaches the corner when you press two directions, square output is on.')
+                : t('This controller uses a classic (DirectInput) layout, so axes and buttons are shown by number.')}
             </p>
           </Card>
         )

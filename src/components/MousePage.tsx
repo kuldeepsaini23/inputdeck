@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import type { DeviceState } from '#/devices'
 import type { Setting, Value } from '#/drivers/types'
 import { cn } from '#/lib/utils'
+import { t as tr, useT } from '#/lib/i18n'
 import { BigValue, Card, ColorPicker, Range, Row, Segmented, Stepper, Toggle, hex, type Choice } from './kit'
 import { GenericCard, Hero, MiniStats, Pulse, shortHz, type Edit } from './parts'
 import { Dock, textOf } from './shell'
@@ -27,7 +28,11 @@ const ICON: Record<string, React.ReactNode> = {
   'Dongle screen': <Monitor className="size-4" />,
   Advanced: <SlidersHorizontal className="size-4" />,
 }
-const TAB_LABEL: Record<string, string> = { 'Dongle screen': 'Screen' }
+/** Tab label for a settings group (group names come from the drivers, in English) */
+const tabLabel = (g: string, t: typeof tr) => (g === 'Dongle screen' ? t('Screen') : groupName(g, t))
+const groupName = (g: string, t: typeof tr) => ({
+  Performance: t('Performance'), Buttons: t('Buttons'), Macros: t('Macros'), Power: t('Power'), 'Dongle screen': t('Dongle screen'), Advanced: t('Advanced'),
+} as Record<string, string>)[g] ?? t(g)
 const HIDDEN_GROUPS = new Set(['Info', 'Profile'])
 
 // button marker positions on the product photo (fractions of the photo box)
@@ -45,7 +50,8 @@ const mm1 = (l?: string) => (l === undefined ? undefined : isNaN(parseFloat(l)) 
 const shortTime = (l: string) => l.replace(/\s*sec$/, 's').replace(/\s*min$/, 'm')
 /** Performance settings that Figma's Performance screen doesn't show: they live on Advanced */
 const isExtra = (s: Setting) => s.group === 'Performance' && (s.key === 'angle_tune' || (s.value.kind === 'toggle' && s.key !== 'motion_sync'))
-const BTN_SHORT: Record<string, string> = { btn1: 'Left', btn2: 'Right', btn3: 'Wheel', btn4: 'Side rear', btn5: 'Side front' }
+const btnShort = (k: string, t: typeof tr): string | undefined =>
+  ({ btn1: t('Left'), btn2: t('Right'), btn3: t('Wheel'), btn4: t('Side rear'), btn5: t('Side front') } as Record<string, string>)[k]
 const ACTION_GROUPS: [string, RegExp][] = [
   ['Mouse', /click|^back$|^forward$|scroll/i],
   ['DPI', /dpi|profile|polling|lod/i],
@@ -53,10 +59,15 @@ const ACTION_GROUPS: [string, RegExp][] = [
   ['Macro', /^macro/i],
   ['Off', /disabled/i],
 ]
+const catName = (c: string, t: typeof tr) =>
+  ({ Mouse: t('Mouse'), DPI: 'DPI', Media: t('Media'), Macro: t('Macro'), Off: t('Off'), Other: t('Other') } as Record<string, string>)[c] ?? c
 const actionGroup = (l: string) => ACTION_GROUPS.find(([, r]) => r.test(l))?.[0] ?? 'Other'
 const choiceLabel = (s?: Setting) => (s?.value.kind === 'choice' ? s.value.options.find((o) => o[1] === (s.value as Choice).current)?.[0] : undefined)
 
 export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?: string; setTab: (t: string) => void; onEdit: Edit }) {
+  const t = useT()
+  /** driver option label of a choice setting, translated for display */
+  const choiceText = (s?: Setting) => { const l = choiceLabel(s); return l === undefined ? undefined : t(l) }
   const edit = dev.edit
   const get = (k: string) => edit?.find((s) => s.key === k)
   const groups = useMemo(() => {
@@ -114,25 +125,25 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
     spotKeys = ['btn1', 'btn2', 'btn4']
   }
   if (!edit) {
-    left = <Hero brand={brand} label="Reading settings" value="…" sub="Talking to the mouse." />
+    left = <Hero brand={brand} label={t('Reading settings')} value="…" sub={t('Talking to the mouse.')} />
   } else if (active === 'Performance' || active === 'DPI') {
     const sel = stage ?? dpi?.active ?? 0
     left = (
       <div className={cn('flex h-full flex-col gap-10', active === 'Performance' ? 'justify-start' : 'justify-between')}>
         {dpi ? (
-          <Hero brand={brand} label="Sensitivity" value={String(dpi.stages[dpi.active])} unit="DPI"
-            sub={`Stage ${dpi.active + 1} of ${dpi.stages.length} · press the DPI button to cycle`}>
+          <Hero brand={brand} label={t('Sensitivity')} value={String(dpi.stages[dpi.active])} unit="DPI"
+            sub={t('Stage {n} of {total} · press the DPI button to cycle', { n: dpi.active + 1, total: dpi.stages.length })}>
             <StageBar dpi={dpi} />
           </Hero>
         ) : (
-          <Hero brand={brand} label="Mouse" value={dev.driver.model()} size={56} />
+          <Hero brand={brand} label={t('Mouse')} value={dev.driver.model()} size={56} />
         )}
         {active === 'Performance' ? (
-          <div className="mt-[54px]"><MiniStats items={[['Battery', pct !== undefined ? String(pct) : undefined, '%'], ['Lift-off', mm1(choiceLabel(get('lod'))), 'mm'], ['Firmware', fw]]} /></div>
+          <div className="mt-[54px]"><MiniStats items={[[t('Battery'), pct !== undefined ? String(pct) : undefined, '%'], [t('Lift-off'), mm1(choiceLabel(get('lod'))), 'mm'], [t('Firmware'), fw]]} /></div>
         ) : dpi?.colors ? (
           <div>
-            <div className="eyebrow mb-3">Stage {sel + 1} LED colour</div>
-            <ColorPicker label={`Stage ${sel + 1} LED colour`} value={dpi.colors[sel] ?? null}
+            <div className="eyebrow mb-3">{t('Stage {n} LED colour', { n: sel + 1 })}</div>
+            <ColorPicker label={t('Stage {n} LED colour', { n: sel + 1 })} value={dpi.colors[sel] ?? null}
               onChange={(c) => { const colors = dpi.colors!.slice(); colors[sel] = c; onEdit('dpi', { ...dpi, colors }) }} />
           </div>
         ) : null}
@@ -147,18 +158,18 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
     const cur = get(btn) ?? btns[0]
     left = (
       <div className="flex h-full flex-col gap-[90px]">
-        <Hero brand={brand} label={cur ? `Button ${SPOTS[cur.key].n} · ${BTN_SHORT[cur.key] ?? cur.label}` : 'Buttons'} value={choiceLabel(cur) ?? '—'} size={68}
-          sub="Pick a button on the mouse, then choose what it does." />
+        <Hero brand={brand} label={cur ? t('Button {n} · {name}', { n: SPOTS[cur.key].n, name: btnShort(cur.key, t) ?? t(cur.label) }) : t('Buttons')} value={choiceText(cur) ?? '—'} size={68}
+          sub={t('Pick a button on the mouse, then choose what it does.')} />
         <div>
-        <div className="eyebrow mb-3">All buttons</div>
-        <ul className="m-0 flex list-none flex-col gap-0.5 p-0" aria-label="All buttons">
+        <div className="eyebrow mb-3">{t('All buttons')}</div>
+        <ul className="m-0 flex list-none flex-col gap-0.5 p-0" aria-label={t('All buttons')}>
           {btns.map((s) => (
             <li key={s.key}>
               <button type="button" onClick={() => setBtn(s.key)} aria-pressed={s.key === cur?.key}
                 className={cn('flex w-full items-center gap-3 rounded-xl px-2 py-1.5 text-left', s.key === cur?.key ? 'bg-white/5' : 'hover:bg-white/[0.03]')}>
                 <span className={cn('display grid size-[22px] place-items-center rounded-full text-[9px] font-semibold', s.key === cur?.key ? 'plat' : 'bg-white/5 text-[var(--text-2)]')}>{SPOTS[s.key].n}</span>
-                <span className="w-[100px] truncate text-[12.5px] text-[var(--text-3)]">{BTN_SHORT[s.key] ?? s.label}</span>
-                <span className="display truncate text-[11.5px]">{choiceLabel(s)}</span>
+                <span className="w-[100px] shrink-0 truncate text-[12.5px] text-[var(--text-3)]" title={btnShort(s.key, t) ?? t(s.label)}>{btnShort(s.key, t) ?? t(s.label)}</span>
+                <span className="display truncate text-[11.5px]">{choiceText(s)}</span>
               </button>
             </li>
           ))}
@@ -170,17 +181,17 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
     right = (
       <>
         {cur?.value.kind === 'choice' && (
-          <ActionPicker key={cur.key} title={`Action for button ${SPOTS[cur.key].n}`} label={`Action for ${cur.label}`} v={cur.value} onChange={(c) => onEdit(cur.key, { ...(cur.value as Choice), current: c })} />
+          <ActionPicker key={cur.key} title={t('Action for button {n}', { n: SPOTS[cur.key].n })} label={t('Action for {name}', { name: t(cur.label) })} v={cur.value} onChange={(c) => onEdit(cur.key, { ...(cur.value as Choice), current: c })} />
         )}
         {db?.value.kind === 'number' && (
-          <Card title="Click debounce">
+          <Card title={t('Click debounce')}>
             <BigValue value={db.value.current} unit="ms" size={28} />
-            <Range className="mt-3" label="Click debounce" min={db.value.min} max={db.value.max} value={db.value.current}
+            <Range className="mt-3" label={t('Click debounce')} min={db.value.min} max={db.value.max} value={db.value.current}
               onChange={(n) => onEdit('debounce', { ...(db.value as Extract<Value, { kind: 'number' }>), current: n })} />
-            <p className="hint mt-2 mb-0">Lower is faster. Raise it if a button double-clicks.</p>
+            <p className="hint mt-2 mb-0">{t('Lower is faster. Raise it if a button double-clicks.')}</p>
           </Card>
         )}
-        <GenericCard title="More" settings={inGroup('Buttons').filter((s) => !(s.key in SPOTS) && s.key !== 'debounce')} onEdit={onEdit} />
+        <GenericCard title={t('More')} settings={inGroup('Buttons').filter((s) => !(s.key in SPOTS) && s.key !== 'debounce')} onEdit={onEdit} />
       </>
     )
   } else if (active === 'Power') {
@@ -188,59 +199,59 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
     left = (
       <div className="flex h-full flex-col gap-[150px]">
         {pct !== undefined ? (
-          <Hero brand={brand} label="Battery" value={pct} unit="%" sub={battery?.includes('charg') ? 'Charging' : 'Wireless'}>
+          <Hero brand={brand} label={t('Battery')} value={pct} unit="%" sub={battery?.includes('charg') ? t('Charging') : t('Wireless')}>
             <Cells pct={pct} />
           </Hero>
         ) : (
-          <Hero brand={brand} label="Power" value="—" />
+          <Hero brand={brand} label={t('Power')} value="—" />
         )}
-        <MiniStats items={[['Status', battery?.includes('charg') ? 'Charging' : 'Wireless'], ['Sleep', choiceLabel(sleep)?.split(' ')[0], choiceLabel(sleep)?.split(' ')[1]], ['Firmware', fw]]} />
+        <MiniStats items={[[t('Status'), battery?.includes('charg') ? t('Charging') : t('Wireless')], [t('Sleep'), choiceLabel(sleep)?.split(' ')[0], choiceLabel(sleep)?.split(' ')[1]], [t('Firmware'), fw]]} />
       </div>
     )
     right = (
       <>
         {sleep?.value.kind === 'choice' && (
-          <Card title="Sleep after" className="min-h-[260px]">
+          <Card title={t('Sleep after')} className="min-h-[260px]">
             {(() => { const [n, u] = (choiceLabel(sleep) ?? '—').split(' '); return <BigValue value={n} unit={u} size={34} /> })()}
-            <Timeline label="Sleep after" options={sleep.value.options} value={sleep.value.current} onChange={(c) => onEdit('sleep', { ...(sleep.value as Choice), current: c })} />
-            <p className="hint mt-9 mb-0">The mouse sleeps after this long without movement.</p>
+            <Timeline label={t('Sleep after')} options={sleep.value.options} value={sleep.value.current} onChange={(c) => onEdit('sleep', { ...(sleep.value as Choice), current: c })} />
+            <p className="hint mt-9 mb-0">{t('The mouse sleeps after this long without movement.')}</p>
           </Card>
         )}
         {textOf(dev, 'dongle_fw') && (
-          <Card title="Receiver" className="min-h-[170px]" right={
+          <Card title={t('Receiver')} className="min-h-[170px]" right={
             <svg width="40" height="40" viewBox="0 0 56 56" fill="none" aria-hidden="true"><rect x="10" y="14" width="36" height="36" rx="9" fill="#1A1A1D" stroke="#C1C4CB" strokeOpacity="0.35" /><rect x="16" y="20" width="24" height="24" rx="5" fill="#0A0A0B" /><path d="M22 10a10 10 0 0 1 12 0M18 6a16 16 0 0 1 20 0" stroke="#C1C4CB" strokeOpacity="0.6" strokeWidth="1.6" strokeLinecap="round" /></svg>
           }>
-            <div className="display text-[16px] font-semibold">{dev.driver.model()} receiver</div>
-            <div className="mt-2.5 flex items-center gap-2 text-[12px] text-[var(--text-2)]"><span className="size-1.5 rounded-full bg-[var(--ok)]" />Connected · firmware {textOf(dev, 'dongle_fw')}</div>
-            <p className="hint mt-5 mb-0">Plug the receiver in close to the mouse for the best signal.</p>
+            <div className="display text-[16px] font-semibold">{t('{model} receiver', { model: dev.driver.model() })}</div>
+            <div className="mt-2.5 flex items-center gap-2 text-[12px] text-[var(--text-2)]"><span className="size-1.5 rounded-full bg-[var(--ok)]" />{t('Connected · firmware {fw}', { fw: textOf(dev, 'dongle_fw') ?? '' })}</div>
+            <p className="hint mt-5 mb-0">{t('Plug the receiver in close to the mouse for the best signal.')}</p>
           </Card>
         )}
-        <GenericCard title="More" settings={inGroup('Power').filter((s) => s.key !== 'sleep')} onEdit={onEdit} />
+        <GenericCard title={t('More')} settings={inGroup('Power').filter((s) => s.key !== 'sleep')} onEdit={onEdit} />
       </>
     )
   } else if (active === 'Dongle screen') {
     const imgs = textOf(dev, 'screen_images')
     const count = imgs && /^(\d+) of (\d+)/.exec(imgs)
     left = (
-      <Hero brand={brand} label="Dongle screen" value={String(dev.driver.screen?.width ?? 360)} unit={`× ${dev.driver.screen?.height ?? 360}`}
-        sub={<>The screen on your {dev.driver.model()} receiver.<br />{count ? `${count[1]} of ${count[2]} pictures stored now.` : 'Show your own pictures or GIFs.'}</>} />
+      <Hero brand={brand} label={t('Dongle screen')} value={String(dev.driver.screen?.width ?? 360)} unit={`× ${dev.driver.screen?.height ?? 360}`}
+        sub={<>{t('The screen on your {model} receiver.', { model: dev.driver.model() })}<br />{count ? t('{n} of {total} pictures stored now.', { n: count[1], total: count[2] }) : t('Show your own pictures or GIFs.')}</>} />
     )
     right = (
       <>
         <ScreenCards ed={screenEd} />
-        <GenericCard title="Screen" settings={inGroup('Dongle screen').filter((s) => s.value.kind !== 'text')} onEdit={onEdit} />
+        <GenericCard title={t('Screen')} settings={inGroup('Dongle screen').filter((s) => s.value.kind !== 'text')} onEdit={onEdit} />
       </>
     )
   } else if (active === 'Advanced') {
-    const listOf = (k: string) => { const t = textOf(dev, k); return t ? t.split('|') : [] }
+    const listOf = (k: string) => { const x = textOf(dev, k); return x ? x.split('|') : [] }
     const missing = listOf('fw_missing')
     const present = listOf('fw_present')
     const hidden = get('rgb_effect') ? 1 : 0
     left = (
       <div className="flex h-full flex-col gap-[90px]">
-        <Hero brand={brand} label="Firmware check" value={String(missing.length + present.length + hidden)} unit="features checked"
-          sub={<>Read-only check against firmware {fw ?? '—'}.<br />Nothing is changed on your mouse.</>} />
-        <MiniStats items={[['Hidden', String(hidden)], ['Not on firmware', String(missing.length)], ['Firmware', fw]]} />
+        <Hero brand={brand} label={t('Firmware check')} value={String(missing.length + present.length + hidden)} unit={t('features checked')}
+          sub={<>{t('Read-only check against firmware {fw}.', { fw: fw ?? '—' })}<br />{t('Nothing is changed on your mouse.')}</>} />
+        <MiniStats items={[[t('Hidden'), String(hidden)], [t('Not on firmware'), String(missing.length)], [t('Firmware'), fw]]} />
       </div>
     )
     right = <AdvancedCards get={get} onEdit={onEdit} model={dev.driver.model()} missing={missing} present={present} extras={(edit ?? []).filter(isExtra)} rest={inGroup('Advanced').filter((s) => !s.key.startsWith('rgb_') && s.value.kind !== 'text')} />
@@ -252,24 +263,24 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
     // buttons whose action plays this macro ("Macro M<n>..." labels from the mouse drivers)
     const bound = inGroup('Buttons').filter((s) => s.key in SPOTS && Number(/^Macro M(\d+)/.exec(choiceLabel(s) ?? '')?.[1]) === sl + 1)
     left = (
-      <Hero brand={brand} label={`Macro · ${slotName(v, sl)}`} value={steps.length} unit={steps.length === 1 ? 'step' : 'steps'} size={64}
+      <Hero brand={brand} label={t('Macro · {name}', { name: slotName(v, sl) })} value={steps.length} unit={steps.length === 1 ? t('step') : t('steps')} size={64}
         sub={<>
-          {bound.length ? `On button ${bound.map((s) => SPOTS[s.key].n).join(', ')}.` : 'Not on a button yet. Pick it as a button action in the Buttons tab.'}
-          {used !== undefined && v.maxBytes ? ` ${used} of ${v.maxBytes} bytes used.` : ''}
+          {bound.length ? t('On button {buttons}.', { buttons: bound.map((s) => SPOTS[s.key].n).join(', ') }) : t('Not on a button yet. Pick it as a button action in the Buttons tab.')}
+          {used !== undefined && v.maxBytes ? ' ' + t('{used} of {max} bytes used.', { used, max: v.maxBytes }) : ''}
         </>}>
-        {macS.hint && <p className="hint mt-3 mb-0">{macS.hint}</p>}
+        {macS.hint && <p className="hint mt-3 mb-0">{t(macS.hint)}</p>}
       </Hero>
     )
     center = <MacroEditor v={v} slot={sl} onChange={(nv) => onEdit('macros', nv)} />
     right = (
       <>
-        <MacroList v={v} slot={sl} onSelect={setSlot} hint="Put a macro on a button in the Buttons tab." />
+        <MacroList v={v} slot={sl} onSelect={setSlot} hint={t('Put a macro on a button in the Buttons tab.')} />
         {v.maxBytes !== undefined && <section className="glass fade-in p-[21px] pt-[19px]"><UsageBar v={v} /></section>}
       </>
     )
   } else if (active) {
-    left = <Hero brand={brand} label={active} value={dev.driver.model()} size={56} />
-    right = <GenericCard title={active} settings={inGroup(active)} onEdit={onEdit} />
+    left = <Hero brand={brand} label={groupName(active, t)} value={dev.driver.model()} size={56} />
+    right = <GenericCard title={groupName(active, t)} settings={inGroup(active)} onEdit={onEdit} />
   }
 
   const cur = get(btn)
@@ -317,24 +328,24 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
               return (
                 <div key={k} className="pointer-events-none absolute inset-x-0" style={{ top: `${p.y * 100}%`, ['--gap' as string]: '40px' }}>
                   <span className="absolute h-px" style={{ ...line, background: `linear-gradient(${left ? '90deg' : '270deg'}, transparent, rgb(230 232 236 / ${on ? 0.7 : 0.35}))` }} />
-                  <button type="button" onClick={pick} aria-label={`Button ${p.n}: ${choiceLabel(s)}`}
+                  <button type="button" onClick={pick} aria-label={t('Button {n}: {action}', { n: p.n, action: choiceText(s) ?? '' })}
                     className="pointer-events-auto absolute" style={{ left: `${p.x * 100}%` }}>
                     <span className={cn('hotspot-ring', on && 'on')} />
                     <span className="hotspot-dot" />
                   </button>
                   <button type="button" onClick={pick} tabIndex={-1}
                     className={cn('pointer-events-auto absolute -top-[17px] max-w-[190px] whitespace-nowrap', left ? 'right-[calc(100%+var(--gap)+8px)] text-right' : 'left-[calc(100%+var(--gap)+8px)] text-left')}>
-                    <span className="eyebrow block">Button {p.n}</span>
-                    <span className={cn('display mt-0.5 block truncate text-[13px] font-medium', on ? 'font-semibold' : !pickable ? '' : 'opacity-80')}>{choiceLabel(s)}</span>
+                    <span className="eyebrow block">{t('Button {n}', { n: p.n })}</span>
+                    <span className={cn('display mt-0.5 block truncate text-[13px] font-medium', on ? 'font-semibold' : !pickable ? '' : 'opacity-80')}>{choiceText(s)}</span>
                   </button>
                 </div>
               )
             })}
             {(isWl || isLamzu) && photo.src && (
               <div className="absolute -bottom-12 left-1/2 flex -translate-x-1/2 items-center gap-1 text-[11px] whitespace-nowrap text-[var(--text-3)]">
-                <button type="button" data-press className="grid size-6 place-items-center rounded-full hover:text-[var(--text)]" onClick={() => changeSkin(-1)} aria-label="Previous photo colour"><ChevronLeft className="size-3.5" /></button>
-                Photo colour
-                <button type="button" data-press className="grid size-6 place-items-center rounded-full hover:text-[var(--text)]" onClick={() => changeSkin(1)} aria-label="Next photo colour"><ChevronRight className="size-3.5" /></button>
+                <button type="button" data-press className="grid size-6 place-items-center rounded-full hover:text-[var(--text)]" onClick={() => changeSkin(-1)} aria-label={t('Previous photo colour')}><ChevronLeft className="size-3.5" /></button>
+                {t('Photo colour')}
+                <button type="button" data-press className="grid size-6 place-items-center rounded-full hover:text-[var(--text)]" onClick={() => changeSkin(1)} aria-label={t('Next photo colour')}><ChevronRight className="size-3.5" /></button>
               </div>
             )}
           </div>
@@ -343,7 +354,7 @@ export function MousePage({ dev, tab, setTab, onEdit }: { dev: DeviceState; tab?
         )}
         <div key={`right-${active}`} className="cascade scroll-thin -mr-2 flex min-h-0 flex-col gap-3.5 overflow-y-auto pt-11 pr-2 pb-4">{right}</div>
       </main>
-      <Dock tabs={groups.map((g) => ({ id: g, label: TAB_LABEL[g] ?? g, icon: ICON[g] ?? <SlidersHorizontal className="size-4" /> }))} active={active ?? ''} onChange={setTab} />
+      <Dock tabs={groups.map((g) => ({ id: g, label: tabLabel(g, t), icon: ICON[g] ?? <SlidersHorizontal className="size-4" /> }))} active={active ?? ''} onChange={setTab} />
     </>
   )
 }
@@ -384,35 +395,36 @@ function PerformanceCards({ get, settings, onEdit, pct, charging }: { get: (k: s
   const sync = get('motion_sync')
   const used = new Set(['polling', 'lod', 'lod_mode', 'angle_tune', 'motion_sync'])
   const rest = settings.filter((s) => !used.has(s.key) && s.value.kind !== 'toggle')
+  const t = useT()
   const pollLabel = choiceLabel(poll)
   const syncOn = sync?.value.kind === 'toggle' && sync.value.on
   return (
     <>
       {poll?.value.kind === 'choice' && (
-        <Card title="Polling rate" className="min-h-[172px]">
+        <Card title={t('Polling rate')} className="min-h-[172px]">
           <div className="flex items-end justify-between">
             <BigValue value={pollLabel?.replace(/\s*Hz/i, '') ?? '—'} unit="Hz" size={34} />
             <Pulse rate={parseInt(pollLabel ?? '1000', 10)} width={120} />
           </div>
-          <Segmented className="mt-[22px]" label="Polling rate" options={poll.value.options.map(([l, v]) => [shortHz(l), v] as const)} value={poll.value.current}
+          <Segmented className="mt-[22px]" label={t('Polling rate')} options={poll.value.options.map(([l, v]) => [shortHz(l), v] as const)} value={poll.value.current}
             onChange={(c) => onEdit('polling', { ...(poll.value as Choice), current: c })} />
         </Card>
       )}
       {lod?.value.kind === 'choice' && (
-        <Card title="Lift-off distance" className="min-h-[150px]" right={lodMode?.value.kind === 'choice' ? (
-          <Segmented label="Lift-off mode" className="!p-[2px] [&_button]:!px-2.5 [&_button]:!py-1 [&_button]:!text-[9px]" options={lodMode.value.options} value={lodMode.value.current}
+        <Card title={t('Lift-off distance')} className="min-h-[150px]" right={lodMode?.value.kind === 'choice' ? (
+          <Segmented label={t('Lift-off mode')} className="!p-[2px] [&_button]:!px-2.5 [&_button]:!py-1 [&_button]:!text-[9px]" options={lodMode.value.options} value={lodMode.value.current}
             onChange={(c) => onEdit('lod_mode', { ...(lodMode.value as Choice), current: c })} />
         ) : undefined}>
           <div className="flex items-start justify-between gap-4">
             <div>
               <BigValue value={mm1(choiceLabel(lod)) ?? '—'} unit="mm" size={34} />
-              <p className="hint mt-7 mb-0 max-w-[150px]">Mouse stops tracking above this height</p>
+              <p className="hint mt-7 mb-0 max-w-[150px]">{t('Mouse stops tracking above this height')}</p>
             </div>
-            <div className="flex w-[150px] flex-col gap-[18px] pt-1" role="radiogroup" aria-label="Lift-off distance">
+            <div className="flex w-[150px] flex-col gap-[18px] pt-1" role="radiogroup" aria-label={t('Lift-off distance')}>
               {[...lod.value.options].reverse().map(([l, v]) => {
                 const on = v === (lod.value as Choice).current
                 return (
-                  <button key={v} type="button" role="radio" aria-checked={on} aria-label={l} onClick={() => onEdit('lod', { ...(lod.value as Choice), current: v })} className="group flex items-center gap-3">
+                  <button key={v} type="button" role="radio" aria-checked={on} aria-label={t(l)} onClick={() => onEdit('lod', { ...(lod.value as Choice), current: v })} className="group flex items-center gap-3">
                     <span className={cn('flex-1', on ? 'h-0.5 bg-[var(--plat)] shadow-[0_0_8px_rgb(193_196_203/0.4)]' : 'h-px bg-white/15 group-hover:bg-white/30')} />
                     <span className={cn('display w-6 text-right text-[11px] font-medium', on ? 'text-[var(--plat)]' : 'text-[rgb(242_242_245/0.4)]')}>{mm1(l)}</span>
                   </button>
@@ -424,31 +436,32 @@ function PerformanceCards({ get, settings, onEdit, pct, charging }: { get: (k: s
       )}
       <div className="grid grid-cols-2 gap-3.5">
         {pct !== undefined && (
-          <Card title="Battery" className="min-h-[150px] !px-[19px]">
+          <Card title={t('Battery')} className="min-h-[150px] !px-[19px]">
             <div className="mt-4 flex items-center gap-3">
               <Ring pct={pct} />
-              <span className="display text-[11px] text-[rgb(242_242_245/0.45)]">{charging ? 'Charging' : 'Wireless'}</span>
+              <span className="display text-[11px] text-[rgb(242_242_245/0.45)]">{charging ? t('Charging') : t('Wireless')}</span>
             </div>
           </Card>
         )}
         {sync?.value.kind === 'toggle' && (
           <Card className={cn('min-h-[150px] !px-[19px]', syncOn && '!border-[rgb(193_196_203/0.45)] !bg-[linear-gradient(180deg,rgb(193_196_203/0.14),rgb(193_196_203/0.03))]')}
-            title={<span className="block leading-[1.5]">Motion<br />sync</span>}
-            right={<Toggle label="Motion sync" checked={syncOn} onChange={(on) => onEdit('motion_sync', { kind: 'toggle', on })} />}>
-            <div className={cn('display text-[26px] font-semibold', syncOn ? 'text-[var(--plat)]' : 'text-[var(--text-2)]')}>{syncOn ? 'On' : 'Off'}</div>
-            <p className="mt-2 mb-0 text-[11.5px] leading-snug text-[rgb(242_242_245/0.45)]">Sensor reads line up with every report</p>
+            title={<span className="block max-w-[110px] leading-[1.5]">{t('Motion sync')}</span>}
+            right={<Toggle label={t('Motion sync')} checked={syncOn} onChange={(on) => onEdit('motion_sync', { kind: 'toggle', on })} />}>
+            <div className={cn('display text-[26px] font-semibold', syncOn ? 'text-[var(--plat)]' : 'text-[var(--text-2)]')}>{syncOn ? t('On') : t('Off')}</div>
+            <p className="mt-2 mb-0 text-[11.5px] leading-snug text-[rgb(242_242_245/0.45)]">{t('Sensor reads line up with every report')}</p>
           </Card>
         )}
       </div>
-      <GenericCard title="More" settings={rest} onEdit={onEdit} />
+      <GenericCard title={t('More')} settings={rest} onEdit={onEdit} />
     </>
   )
 }
 
 function Ring({ pct }: { pct: number }) {
+  const t = useT()
   const r = 34, c = 2 * Math.PI * r
   return (
-    <div className="relative size-[76px] shrink-0" role="img" aria-label={`Battery ${pct}%`}>
+    <div className="relative size-[76px] shrink-0" role="img" aria-label={t('Battery {pct}%', { pct })}>
       <svg viewBox="0 0 76 76" className="size-full -rotate-90">
         <circle cx="38" cy="38" r={r} fill="none" stroke="rgb(255 255 255 / 0.08)" strokeWidth="6" />
         <circle cx="38" cy="38" r={r} fill="none" stroke="#c1c4cb" strokeWidth="6" strokeLinecap="round" strokeDasharray={`${(c * pct) / 100} ${c}`} style={{ filter: 'drop-shadow(0 0 5px rgb(193 196 203 / 0.6))', transition: 'stroke-dasharray .4s' }} />
@@ -460,6 +473,7 @@ function Ring({ pct }: { pct: number }) {
 
 /** Steps on a line (Figma "Sleep after"): any number of options, the chosen one is a raised knob. */
 function Timeline({ options, value, onChange, label }: { options: [string, number][]; value: number; onChange: (v: number) => void; label: string }) {
+  const t = useT()
   const at = Math.max(0, options.findIndex(([, v]) => v === value))
   const pctAt = options.length > 1 ? (at / (options.length - 1)) * 100 : 0
   return (
@@ -470,7 +484,7 @@ function Timeline({ options, value, onChange, label }: { options: [string, numbe
         {options.map(([l, v], i) => {
           const on = i === at
           return (
-            <button key={v} type="button" role="radio" aria-checked={on} aria-label={l} onClick={() => onChange(v)} className="group flex w-0 flex-col items-center gap-3">
+            <button key={v} type="button" role="radio" aria-checked={on} aria-label={t(l)} onClick={() => onChange(v)} className="group flex w-0 flex-col items-center gap-3">
               <span className={cn('rounded-full transition-all', on ? 'plat -mt-[3px] size-3.5' : i < at ? 'size-2 bg-[var(--plat)]' : 'size-2 bg-white/20 group-hover:bg-white/40')} />
               <span className={cn('display text-[9px] whitespace-nowrap', on ? 'font-semibold text-[var(--text)]' : 'text-[var(--text-3)]')}>{shortTime(l)}</span>
             </button>
@@ -485,6 +499,7 @@ function DpiCards({ dpi, sel, setSel, get, onEdit, rest }: { dpi?: Dpi; sel: num
   const count = get('dpi_count')
   const xy = get('dpi_xy')
   const dpiY = get('dpi_y')
+  const t = useT()
   if (!dpi) return <GenericCard title="DPI" settings={rest} onEdit={onEdit} />
   const i = Math.min(sel, dpi.stages.length - 1)
   const setStageVal = (key: 'dpi' | 'dpi_y', v: Dpi, n: number) => {
@@ -494,8 +509,8 @@ function DpiCards({ dpi, sel, setSel, get, onEdit, rest }: { dpi?: Dpi; sel: num
   }
   return (
     <>
-      <Card title="DPI stages" right={<span className="text-[10px] text-[var(--text-3)]">{dpi.stages.length} stages · button cycles</span>}>
-        <div className="flex flex-col gap-1" role="radiogroup" aria-label="DPI stage to edit">
+      <Card title={t('DPI stages')} right={<span className="text-[10px] text-[var(--text-3)]">{t('{n} stages · button cycles', { n: dpi.stages.length })}</span>}>
+        <div className="flex flex-col gap-1" role="radiogroup" aria-label={t('DPI stage to edit')}>
           {dpi.stages.map((v, k) => (
             <button key={k} type="button" role="radio" aria-checked={k === i} onClick={() => setSel(k)}
               className={cn('flex h-10 items-center gap-3 rounded-xl border px-3.5 text-left', k === i ? 'border-white/30 bg-white/[0.08]' : 'border-transparent hover:bg-white/[0.03]')}>
@@ -503,78 +518,79 @@ function DpiCards({ dpi, sel, setSel, get, onEdit, rest }: { dpi?: Dpi; sel: num
               {dpi.colors && <span className="size-2 rounded-full" style={{ background: hex(dpi.colors[k] ?? 0xffffff), boxShadow: `0 0 6px ${hex(dpi.colors[k] ?? 0xffffff)}` }} />}
               <span className="display text-[15px] font-semibold">{v}</span>
               <span className="unit text-[10px]">DPI</span>
-              {k === dpi.active && <span className="eyebrow ml-auto !text-[var(--text-2)]">Active</span>}
+              {k === dpi.active && <span className="eyebrow ml-auto !text-[var(--text-2)]">{t('Active')}</span>}
             </button>
           ))}
         </div>
         {i !== dpi.active && (
-          <button type="button" className="chip mt-3" onClick={() => onEdit('dpi', { ...dpi, active: i })}>Make stage {i + 1} active</button>
+          <button type="button" className="chip mt-3" onClick={() => onEdit('dpi', { ...dpi, active: i })}>{t('Make stage {n} active', { n: i + 1 })}</button>
         )}
       </Card>
-      <Card title={`Stage ${i + 1} sensitivity${dpiY ? ' (X)' : ''}`}>
+      <Card title={dpiY ? t('Stage {n} sensitivity (X)', { n: i + 1 }) : t('Stage {n} sensitivity', { n: i + 1 })}>
         <div className="flex items-baseline justify-between">
           <BigValue value={dpi.stages[i].toLocaleString('en-US')} unit="DPI" size={28} />
-          <input type="number" aria-label={`Stage ${i + 1} DPI`} min={dpi.min} max={dpi.max} step={dpi.step} value={dpi.stages[i]}
+          <input type="number" aria-label={t('Stage {n} DPI', { n: i + 1 })} min={dpi.min} max={dpi.max} step={dpi.step} value={dpi.stages[i]}
             onChange={(e) => e.target.value && setStageVal('dpi', dpi, Math.min(dpi.max, Math.max(dpi.min, Number(e.target.value))))}
             className="recess display w-24 rounded-lg border-0 px-2.5 py-1.5 text-right text-[12px] text-[var(--text)]" />
         </div>
-        <Range className="mt-3" label={`Stage ${i + 1} DPI`} min={dpi.min} max={dpi.max} step={dpi.step} value={dpi.stages[i]} onChange={(n) => setStageVal('dpi', dpi, n)} />
+        <Range className="mt-3" label={t('Stage {n} DPI', { n: i + 1 })} min={dpi.min} max={dpi.max} step={dpi.step} value={dpi.stages[i]} onChange={(n) => setStageVal('dpi', dpi, n)} />
         <div className="mt-1 flex justify-between text-[10px] text-[var(--text-4)]"><span>{dpi.min}</span><span>{dpi.max.toLocaleString('en-US')}</span></div>
         {dpiY?.value.kind === 'dpi' && (
           <>
-            <div className="eyebrow mt-4 mb-2">Y axis · {dpiY.value.stages[i]?.toLocaleString('en-US')} DPI</div>
-            <Range label={`Stage ${i + 1} DPI, Y axis`} min={dpiY.value.min} max={dpiY.value.max} step={dpiY.value.step} value={dpiY.value.stages[i] ?? dpiY.value.min}
+            <div className="eyebrow mt-4 mb-2">{t('Y axis · {dpi} DPI', { dpi: dpiY.value.stages[i]?.toLocaleString('en-US') ?? '' })}</div>
+            <Range label={t('Stage {n} DPI, Y axis', { n: i + 1 })} min={dpiY.value.min} max={dpiY.value.max} step={dpiY.value.step} value={dpiY.value.stages[i] ?? dpiY.value.min}
               onChange={(n) => setStageVal('dpi_y', dpiY.value as Dpi, n)} />
           </>
         )}
       </Card>
       <div className="grid grid-cols-2 gap-3.5">
         {count?.value.kind === 'choice' && (
-          <Card title="Stages">
-            <Stepper label="Stages" value={count.value.current} min={Math.min(...count.value.options.map((o) => o[1]))} max={Math.max(...count.value.options.map((o) => o[1]))}
+          <Card title={t('Stages')}>
+            <Stepper label={t('Stages')} value={count.value.current} min={Math.min(...count.value.options.map((o) => o[1]))} max={Math.max(...count.value.options.map((o) => o[1]))}
               onChange={(n) => onEdit('dpi_count', { ...(count.value as Choice), current: n })} />
           </Card>
         )}
         {xy?.value.kind === 'toggle' && (
-          <Card title="Separate X / Y">
+          <Card title={t('Separate X / Y')}>
             <div className="flex items-center justify-between">
-              <span className="display text-[22px] font-semibold">{xy.value.on ? 'On' : 'Off'}</span>
-              <Toggle label="Separate X / Y" checked={xy.value.on} onChange={(on) => onEdit('dpi_xy', { kind: 'toggle', on })} />
+              <span className="display text-[22px] font-semibold">{xy.value.on ? t('On') : t('Off')}</span>
+              <Toggle label={t('Separate X / Y')} checked={xy.value.on} onChange={(on) => onEdit('dpi_xy', { kind: 'toggle', on })} />
             </div>
           </Card>
         )}
       </div>
-      <GenericCard title="More" settings={rest} onEdit={onEdit} />
+      <GenericCard title={t('More')} settings={rest} onEdit={onEdit} />
     </>
   )
 }
 
 /** Figma "Action for button": category tabs + a grid of raised action buttons. */
 function ActionPicker({ title, label, v, onChange }: { title: string; label: string; v: Choice; onChange: (c: number) => void }) {
+  const t = useT()
   const cur = v.options.find((o) => o[1] === v.current)
   const cats = ACTION_GROUPS.map(([n]) => n).filter((n) => v.options.some(([l]) => actionGroup(l) === n))
   const [cat, setCat] = useState(cur ? actionGroup(cur[0]) : cats[0])
   const shown = v.options.filter(([l]) => actionGroup(l) === cat || (cat === 'Mouse' && actionGroup(l) === 'Other'))
   return (
     <Card title={title}>
-      <Segmented label={`${label}: category`} options={cats.map((c) => [c, c] as const)} value={cat} onChange={setCat} />
+      <Segmented label={t('{name}: category', { name: label })} options={cats.map((c) => [catName(c, t), c] as const)} className="no-scrollbar overflow-x-auto" value={cat} onChange={setCat} />
       <div className="mt-4 grid grid-cols-2 gap-2.5" role="radiogroup" aria-label={label}>
         {shown.map(([l, val]) => {
           const on = val === v.current
           return (
             <button key={val} type="button" role="radio" aria-checked={on} onClick={() => onChange(val)}
-              className={cn('display h-11 truncate rounded-[14px] px-3.5 text-left text-[11px] font-medium', on ? 'plat' : 'raised text-[var(--text-2)]')}>
-              {l}
+              className={cn('display h-11 truncate rounded-[14px] px-3.5 text-left text-[11px] font-medium', on ? 'plat' : 'raised text-[var(--text-2)]')} title={t(l)}>
+              {t(l)}
             </button>
           )
         })}
       </div>
-      <p className="hint mt-4 mb-0">Changes save to the mouse straight away.</p>
+      <p className="hint mt-4 mb-0">{t('Changes save to the mouse straight away.')}</p>
     </Card>
   )
 }
 
-const EFFECT_NAME: Record<number, string> = { 0: 'Off', 4: 'Single colour', 5: 'Breathing' }
+const effectName = (n: number, t: typeof tr): string | undefined => ({ 0: t('Off'), 4: t('Single colour'), 5: t('Breathing') } as Record<number, string>)[n]
 
 function AdvancedCards({ get, onEdit, model, missing, present, extras, rest }: {
   get: (k: string) => Setting | undefined
@@ -585,6 +601,7 @@ function AdvancedCards({ get, onEdit, model, missing, present, extras, rest }: {
   extras: Setting[]
   rest: Setting[]
 }) {
+  const t = useT()
   const [confirm, setConfirm] = useState(false)
   const eff = get('rgb_effect')
   const col = get('rgb_color')
@@ -598,79 +615,79 @@ function AdvancedCards({ get, onEdit, model, missing, present, extras, rest }: {
   return (
     <>
       {e && (
-        <Card title="Hidden by maker" right={<Toggle label="Mouse RGB lighting" checked={on} onChange={(v) => (v ? setConfirm(true) : setEffect(0))} />}>
-          <div className="display -mt-1 text-[15px] font-semibold">Mouse RGB lighting</div>
+        <Card title={t('Hidden by maker')} right={<Toggle label={t('Mouse RGB lighting')} checked={on} onChange={(v) => (v ? setConfirm(true) : setEffect(0))} />}>
+          <div className="display -mt-1 text-[15px] font-semibold">{t('Mouse RGB lighting')}</div>
           <div className="mt-2 flex items-center gap-3">
-            <span className="eyebrow rounded-full border border-white/25 bg-white/[0.08] px-2 py-0.5 !text-[7.5px] !text-[var(--text)]">Hidden</span>
+            <span className="eyebrow rounded-full border border-white/25 bg-white/[0.08] px-2 py-0.5 !text-[7.5px] !text-[var(--text)]">{t('Hidden')}</span>
             <span className="size-4 rounded-full border border-white/60" style={{ background: hex(rgb) }} />
-            <span className="display text-[10px] text-[var(--text-2)]">{hex(rgb)} · {EFFECT_NAME[e.current] ?? e.options.find((o) => o[1] === e.current)?.[0]}</span>
+            <span className="display text-[10px] text-[var(--text-2)]">{hex(rgb)} · {effectName(e.current, t) ?? t(e.options.find((o) => o[1] === e.current)?.[0] ?? '')}</span>
           </div>
           {on ? (
             <div className="mt-4 flex flex-col gap-3.5">
-              <Segmented label="Light effect" options={e.options.filter(([, v]) => v !== 0)} value={e.current} onChange={setEffect} />
-              {col?.value.kind === 'color' && <ColorPicker label="Light colour" value={rgb} onChange={(c) => onEdit('rgb_color', { kind: 'color', rgb: c })} />}
+              <Segmented label={t('Light effect')} options={e.options.filter(([, v]) => v !== 0)} value={e.current} onChange={setEffect} />
+              {col?.value.kind === 'color' && <ColorPicker label={t('Light colour')} value={rgb} onChange={(c) => onEdit('rgb_color', { kind: 'color', rgb: c })} />}
               {bri?.value.kind === 'number' && (
                 <div>
-                  <div className="mb-1.5 flex justify-between"><span className="eyebrow">Brightness</span><span className="display text-[11px]">{bri.value.current}%</span></div>
-                  <Range label="Light brightness" min={0} max={100} value={bri.value.current} onChange={(n) => onEdit('rgb_bri', { ...(bri.value as Extract<Value, { kind: 'number' }>), current: n })} />
+                  <div className="mb-1.5 flex justify-between"><span className="eyebrow">{t('Brightness')}</span><span className="display text-[11px]">{bri.value.current}%</span></div>
+                  <Range label={t('Light brightness')} min={0} max={100} value={bri.value.current} onChange={(n) => onEdit('rgb_bri', { ...(bri.value as Extract<Value, { kind: 'number' }>), current: n })} />
                 </div>
               )}
               {e.current === 5 && spd?.value.kind === 'number' && (
                 <div>
-                  <div className="mb-1.5 flex justify-between"><span className="eyebrow">Speed</span><span className="display text-[11px]">{spd.value.current}</span></div>
-                  <Range label="Breathing speed" min={1} max={6} value={spd.value.current} onChange={(n) => onEdit('rgb_speed', { ...(spd.value as Extract<Value, { kind: 'number' }>), current: n })} />
+                  <div className="mb-1.5 flex justify-between"><span className="eyebrow">{t('Speed')}</span><span className="display text-[11px]">{spd.value.current}</span></div>
+                  <Range label={t('Breathing speed')} min={1} max={6} value={spd.value.current} onChange={(n) => onEdit('rgb_speed', { ...(spd.value as Extract<Value, { kind: 'number' }>), current: n })} />
                 </div>
               )}
             </div>
           ) : (
             <>
-              <p className="hint mt-4 mb-0">The firmware accepts it, but {model} may have no LED, so turning it on can do nothing. You can turn it off again.</p>
-              <div className="mt-4 flex items-center gap-2 rounded-xl bg-white/[0.04] px-3 py-2 text-[11px] text-[var(--text-2)]"><Info className="size-3.5 shrink-0" />You will be asked to confirm before it is turned on.</div>
+              <p className="hint mt-4 mb-0">{t('The firmware accepts it, but {model} may have no LED, so turning it on can do nothing. You can turn it off again.', { model })}</p>
+              <div className="mt-4 flex items-center gap-2 rounded-xl bg-white/[0.04] px-3 py-2 text-[11px] text-[var(--text-2)]"><Info className="size-3.5 shrink-0" />{t('You will be asked to confirm before it is turned on.')}</div>
             </>
           )}
         </Card>
       )}
       {missing.length > 0 && (
-        <Card title="Not on this firmware">
+        <Card title={t('Not on this firmware')}>
           <div className="flex flex-wrap gap-2">
-            {missing.map((m) => <span key={m} className="rounded-full border border-dashed border-white/15 px-2.5 py-1.5 text-[11.5px] text-[var(--text-2)]">{m}</span>)}
+            {missing.map((m) => <span key={m} className="rounded-full border border-dashed border-white/15 px-2.5 py-1.5 text-[11.5px] text-[var(--text-2)]">{t(m)}</span>)}
           </div>
-          <p className="hint mt-4 mb-0">Checked every time you connect. If a firmware update adds one, it unlocks automatically.</p>
+          <p className="hint mt-4 mb-0">{t('Checked every time you connect. If a firmware update adds one, it unlocks automatically.')}</p>
         </Card>
       )}
       {present.length > 0 && (
-        <Card title="On this firmware, not yet in InputDeck">
-          <div className="flex flex-wrap gap-2">{present.map((m) => <span key={m} className="rounded-full border border-white/25 px-2.5 py-1.5 text-[11.5px]">{m}</span>)}</div>
+        <Card title={t('On this firmware, not yet in InputDeck')}>
+          <div className="flex flex-wrap gap-2">{present.map((m) => <span key={m} className="rounded-full border border-white/25 px-2.5 py-1.5 text-[11.5px]">{t(m)}</span>)}</div>
         </Card>
       )}
       {extras.length > 0 && (
-        <Card title="More sensor settings">
+        <Card title={t('More sensor settings')}>
           {extras.filter((s) => s.value.kind === 'toggle').map((s) => (
-            <Row key={s.key} label={s.label}>
-              <Toggle label={s.label} checked={(s.value as Extract<Value, { kind: 'toggle' }>).on} onChange={(v) => onEdit(s.key, { kind: 'toggle', on: v })} />
+            <Row key={s.key} label={t(s.label)} hint={s.hint ? t(s.hint) : undefined}>
+              <Toggle label={t(s.label)} checked={(s.value as Extract<Value, { kind: 'toggle' }>).on} onChange={(v) => onEdit(s.key, { kind: 'toggle', on: v })} />
             </Row>
           ))}
           {angle?.value.kind === 'number' && (
             <div className="pt-3">
-              <div className="mb-2 flex items-baseline justify-between"><span className="text-[13px]">Angle tune</span><span className="display text-[13px]">{angle.value.current}°</span></div>
-              <Range label="Angle tune" min={angle.value.min} max={angle.value.max} value={angle.value.current}
+              <div className="mb-2 flex items-baseline justify-between"><span className="text-[13px]">{t('Angle tune')}</span><span className="display text-[13px]">{angle.value.current}°</span></div>
+              <Range label={t('Angle tune')} min={angle.value.min} max={angle.value.max} value={angle.value.current}
                 onChange={(n) => onEdit('angle_tune', { ...(angle.value as Extract<Value, { kind: 'number' }>), current: n })} />
             </div>
           )}
         </Card>
       )}
-      <GenericCard title="More" settings={rest} onEdit={onEdit} />
+      <GenericCard title={t('More')} settings={rest} onEdit={onEdit} />
       <Dialog open={confirm} onOpenChange={setConfirm}>
         <DialogContent className="rounded-3xl border-white/10 bg-[#111113]/95 backdrop-blur-xl sm:max-w-md">
           <DialogHeader>
-            <DialogTitle className="display text-[16px]">Turn on a hidden feature?</DialogTitle>
+            <DialogTitle className="display text-[16px]">{t('Turn on a hidden feature?')}</DialogTitle>
             <DialogDescription className="leading-relaxed">
-              WLMouse hides RGB lighting for {model}. Your firmware accepts it, but the mouse may have no LED, so it might do nothing. You can turn it off again.
+              {t('WLMouse hides RGB lighting for {model}. Your firmware accepts it, but the mouse may have no LED, so it might do nothing. You can turn it off again.', { model })}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2">
-            <button type="button" className="rounded-full px-4 py-2 text-[13px] text-[var(--text-2)] hover:text-[var(--text)]" onClick={() => setConfirm(false)}>Cancel</button>
-            <button type="button" className="plat display rounded-full px-5 py-2 text-[12px] font-semibold" onClick={() => { setConfirm(false); setEffect(4) }}>Turn on</button>
+            <button type="button" className="rounded-full px-4 py-2 text-[13px] text-[var(--text-2)] hover:text-[var(--text)]" onClick={() => setConfirm(false)}>{t('Cancel')}</button>
+            <button type="button" className="plat display rounded-full px-5 py-2 text-[12px] font-semibold" onClick={() => { setConfirm(false); setEffect(4) }}>{t('Turn on')}</button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

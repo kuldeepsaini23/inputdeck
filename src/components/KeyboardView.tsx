@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import type { KeyCap } from '#/drivers/types'
+import { useT } from '#/lib/i18n'
 
 const U = 44 // px per key unit before scaling
 const PAD = 22
@@ -36,6 +37,7 @@ export function KeyboardView({ keys, looks, selected, onSelect, interactive, kno
   knob?: { x: number; y: number }
   maxWidth: number
 }) {
+  const t = useT()
   const wrap = useRef<HTMLDivElement>(null)
   const board = useRef<HTMLDivElement>(null)
   const [fit, setFit] = useState(maxWidth)
@@ -112,7 +114,7 @@ export function KeyboardView({ keys, looks, selected, onSelect, interactive, kno
         onPointerMove={onMove}
         onPointerUp={onUp}
         role={interactive ? 'group' : undefined}
-        aria-label={interactive ? 'Keyboard keys, select keys to edit' : 'Keyboard'}
+        aria-label={interactive ? t('Keyboard keys, select keys to edit') : t('Keyboard')}
       >
         <div className="plate" style={{ left: PAD - 6, top: PAD - 6, width: cols * U - GAP + 12, height: rows * U - GAP + 12 }} />
         {keys.map((k, i) => {

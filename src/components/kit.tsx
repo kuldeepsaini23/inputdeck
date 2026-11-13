@@ -4,6 +4,7 @@ import { Slider as SliderPrimitive, Switch as SwitchPrimitive } from 'radix-ui'
 import { ChevronDown } from 'lucide-react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '#/components/ui/select'
 import { cn } from '#/lib/utils'
+import { useT } from '#/lib/i18n'
 import type { Value } from '#/drivers/types'
 
 export type Choice = Extract<Value, { kind: 'choice' }>
@@ -48,11 +49,12 @@ export function Segmented<T extends string | number>({ options, value, onChange,
   className?: string
   disabled?: boolean
 }) {
+  const t = useT()
   return (
     <div role="group" aria-label={label} className={cn('seg recess', className)}>
       {options.map(([l, v]) => (
-        <button key={String(v)} type="button" aria-pressed={v === value} disabled={disabled} onClick={() => onChange(v)}>
-          {l}
+        <button key={String(v)} type="button" aria-pressed={v === value} disabled={disabled} onClick={() => onChange(v)} className="whitespace-nowrap">
+          {t(l)}
         </button>
       ))}
     </div>
@@ -85,6 +87,7 @@ export function Range({ min, max, step = 1, value, onChange, label, className }:
 
 /** Dropdown for a driver "choice" value. Works for any number of options. */
 export function ChoiceSelect({ v, onChange, label, className }: { v: Choice; onChange: (c: number) => void; label: string; className?: string }) {
+  const t = useT()
   return (
     <Select value={String(v.current)} onValueChange={(s) => onChange(Number(s))}>
       <SelectTrigger aria-label={label} className={cn('select-trigger raised !h-11 !w-full !rounded-[14px] [&>svg:last-child]:hidden', className)}>
@@ -94,7 +97,7 @@ export function ChoiceSelect({ v, onChange, label, className }: { v: Choice; onC
       <SelectContent position="popper" sideOffset={6} className="scroll-thin max-h-80 rounded-2xl border-white/10 bg-[#121214]/95 backdrop-blur-xl">
         {v.options.map(([l, val]) => (
           <SelectItem key={val} value={String(val)} className="rounded-lg py-2 text-[13px]">
-            {l}
+            {t(l)}
           </SelectItem>
         ))}
       </SelectContent>
@@ -103,12 +106,13 @@ export function ChoiceSelect({ v, onChange, label, className }: { v: Choice; onC
 }
 
 export function Stepper({ value, min, max, onChange, label }: { value: number; min: number; max: number; onChange: (v: number) => void; label: string }) {
+  const t = useT()
   const btn = 'raised grid size-8 place-items-center rounded-full text-sm disabled:opacity-30'
   return (
     <div className="flex items-center gap-4" role="group" aria-label={label}>
-      <button type="button" className={btn} aria-label={`Fewer ${label.toLowerCase()}`} disabled={value <= min} onClick={() => onChange(value - 1)}>−</button>
+      <button type="button" className={btn} aria-label={t('Fewer {thing}', { thing: label.toLowerCase() })} disabled={value <= min} onClick={() => onChange(value - 1)}>−</button>
       <span className="big-num w-7 text-center" style={{ fontSize: 26 }}>{value}</span>
-      <button type="button" className={btn} aria-label={`More ${label.toLowerCase()}`} disabled={value >= max} onClick={() => onChange(value + 1)}>+</button>
+      <button type="button" className={btn} aria-label={t('More {thing}', { thing: label.toLowerCase() })} disabled={value >= max} onClick={() => onChange(value + 1)}>+</button>
     </div>
   )
 }
@@ -116,6 +120,7 @@ export function Stepper({ value, min, max, onChange, label }: { value: number; m
 export const SWATCHES = [0xff4545, 0xff8c26, 0xffd140, 0x4dd980, 0x40d9e6, 0x4587ff, 0xb373ff, 0xff66bf, 0xffffff]
 
 export function ColorPicker({ value, onChange, label }: { value: number | null; onChange: (c: number) => void; label: string }) {
+  const t = useT()
   return (
     <div className="flex flex-wrap items-center gap-2.5">
       {SWATCHES.map((c) => (
@@ -124,9 +129,9 @@ export function ColorPicker({ value, onChange, label }: { value: number | null; 
       ))}
       <label className="relative ml-1 flex cursor-pointer items-center gap-2 text-[11px] text-[var(--text-3)]">
         <span className="swatch inline-block" style={{ background: 'conic-gradient(red, yellow, lime, cyan, blue, magenta, red)' }} />
-        <input type="color" className="absolute inset-0 cursor-pointer opacity-0" aria-label={`Custom ${label.toLowerCase()}`}
+        <input type="color" className="absolute inset-0 cursor-pointer opacity-0" aria-label={t('Custom {thing}', { thing: label.toLowerCase() })}
           value={value === null ? '#ffffff' : hex(value).toLowerCase()} onChange={(e) => onChange(fromHex(e.target.value))} />
-        {value === null ? 'Mixed' : hex(value)}
+        {value === null ? t('Mixed') : hex(value)}
       </label>
     </div>
   )

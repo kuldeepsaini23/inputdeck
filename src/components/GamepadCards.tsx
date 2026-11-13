@@ -3,6 +3,7 @@
 import { useRef, useState } from 'react'
 import type { GamepadCurve, PerKeyChoice, Setting } from '#/drivers/types'
 import { cn } from '#/lib/utils'
+import { useT } from '#/lib/i18n'
 import { Card, Segmented } from './kit'
 import type { Edit } from './parts'
 
@@ -29,22 +30,23 @@ export function GamepadMapCard({ v, sel, onChange, className }: { v: PerKeyChoic
     values[sel] = value
     onChange({ ...v, values })
   }
+  const t = useT()
   const used = v.values.filter((x) => x !== v.none).length
   const cur = sel === undefined ? undefined : v.values[sel]
   return (
-    <Card title={sel === undefined ? 'Gamepad mapping' : `Key ${v.keys[sel]?.label || ''} drives`} className={className}
+    <Card title={sel === undefined ? t('Gamepad mapping') : t('Key {key} drives', { key: v.keys[sel]?.label || '' })} className={className}
       right={used > 0 && (
-        <button type="button" className="chip !text-[11px]" onClick={() => onChange({ ...v, values: v.values.map(() => v.none) })}>Clear all ({used})</button>
+        <button type="button" className="chip !text-[11px]" onClick={() => onChange({ ...v, values: v.values.map(() => v.none) })}>{t('Clear all ({n})', { n: used })}</button>
       )}>
       {sel === undefined ? (
-        <p className="hint m-0">Click a key on the board, then pick the controller button or stick direction it drives. {used ? `${used} key${used === 1 ? '' : 's'} mapped.` : 'No keys mapped yet.'}</p>
+        <p className="hint m-0">{t('Click a key on the board, then pick the controller button or stick direction it drives.')} {used === 1 ? t('1 key mapped.') : used ? t('{n} keys mapped.', { n: used }) : t('No keys mapped yet.')}</p>
       ) : (
         <div className="flex flex-wrap gap-1.5">
           {v.options.map(([l, val]) => (
             <button key={val} type="button" aria-pressed={cur === val} onClick={() => set(val)}
               className={cn('chip !px-2.5 !py-1 !text-[11px]', cur === val && 'plat !border-transparent')}
               style={val !== v.none && cur !== val ? { boxShadow: `inset 3px 0 0 ${targetColor(l)}` } : undefined}>
-              {l}
+              {t(l)}
             </button>
           ))}
         </div>
@@ -58,6 +60,7 @@ export function GamepadMapCard({ v, sel, onChange, className }: { v: PerKeyChoic
 const W = 320, H = 170, L = 34, R = 10, T = 10, Bm = 26
 
 function CurveChart({ v, onChange }: { v: GamepadCurve; onChange: (pts: GamepadCurve['points']) => void }) {
+  const t = useT()
   const svg = useRef<SVGSVGElement>(null)
   const [drag, setDrag] = useState<number | undefined>(undefined)
   const px = (x: number) => L + (x / v.maxX) * (W - L - R)
@@ -80,13 +83,13 @@ function CurveChart({ v, onChange }: { v: GamepadCurve; onChange: (pts: GamepadC
   const ticks = Array.from({ length: Math.floor(v.maxX) + 1 }, (_, i) => i)
   return (
     <svg ref={svg} viewBox={`0 0 ${W} ${H}`} className="w-full touch-none select-none" onPointerMove={move} onPointerUp={() => setDrag(undefined)} onPointerLeave={() => setDrag(undefined)}
-      role="img" aria-label="Response curve: key travel to output">
+      role="img" aria-label={t('Response curve: key travel to output')}>
       <rect x={L} y={T} width={W - L - R} height={H - T - Bm} rx={6} fill="rgb(255 255 255 / 0.03)" stroke="rgb(255 255 255 / 0.08)" />
       {pts[0] && pts[0].x > 0 && <rect x={L} y={T} width={px(pts[0].x) - L} height={H - T - Bm} fill="rgb(255 255 255 / 0.05)" />}
-      {ticks.map((t) => (
-        <g key={t}>
-          <line x1={px(t)} x2={px(t)} y1={T} y2={H - Bm} stroke="rgb(255 255 255 / 0.06)" />
-          <text x={px(t)} y={H - Bm + 13} fontSize={9} textAnchor="middle" fill="rgb(255 255 255 / 0.4)">{t} mm</text>
+      {ticks.map((tk) => (
+        <g key={tk}>
+          <line x1={px(tk)} x2={px(tk)} y1={T} y2={H - Bm} stroke="rgb(255 255 255 / 0.06)" />
+          <text x={px(tk)} y={H - Bm + 13} fontSize={9} textAnchor="middle" fill="rgb(255 255 255 / 0.4)">{tk} mm</text>
         </g>
       ))}
       {[0, 0.5, 1].map((f) => (
@@ -97,7 +100,7 @@ function CurveChart({ v, onChange }: { v: GamepadCurve; onChange: (pts: GamepadC
       {pts.map((p, i) => (
         <circle key={i} cx={px(p.x)} cy={py(p.y)} r={drag === i ? 7 : 6} fill={drag === i ? '#E6E8EC' : '#141416'} stroke="#E6E8EC" strokeWidth={2} className="cursor-grab"
           onPointerDown={(e) => { (e.target as Element).setPointerCapture?.(e.pointerId); setDrag(i) }}>
-          <title>{`Point ${i + 1}: ${p.x.toFixed(2)} mm → ${p.y}`}</title>
+          <title>{t('Point {n}: {x} mm → {y}', { n: i + 1, x: p.x.toFixed(2), y: p.y })}</title>
         </circle>
       ))}
     </svg>
@@ -108,6 +111,7 @@ const samePts = (a: GamepadCurve['points'], b: GamepadCurve['points']) => a.leng
 
 /** One card for every 'gamepadCurve' setting: pick a curve, drag its points or apply a preset. */
 export function CurveCard({ curves, onEdit, className }: { curves: Setting[]; onEdit: Edit; className?: string }) {
+  const t = useT()
   const [pick, setPick] = useState(0)
   const i = Math.min(pick, curves.length - 1)
   const s = curves[i]
@@ -116,16 +120,16 @@ export function CurveCard({ curves, onEdit, className }: { curves: Setting[]; on
   const set = (points: GamepadCurve['points']) => onEdit(s.key, { ...v, points })
   const preset = v.presets?.find((p) => samePts(p.points, v.points))?.name
   return (
-    <Card title="Response curve" className={className}
+    <Card title={t('Response curve')} className={className}
       right={curves.length > 1 && (
-        <Segmented label="Curve" className="[&_button]:!px-2.5 [&_button]:!py-1 [&_button]:!text-[11px]" value={i}
+        <Segmented label={t('Curve')} className="[&_button]:!px-2.5 [&_button]:!py-1 [&_button]:!text-[11px]" value={i}
           options={curves.map((c, n) => [c.label.replace(/ curve$/, ''), n] as const)} onChange={setPick} />
       )}>
       <CurveChart v={v} onChange={set} />
       <div className="mt-2 grid grid-cols-4 gap-2 text-center">
         {v.points.map((p, n) => (
           <div key={n} className="recess rounded-xl px-1 py-1.5">
-            <div className="eyebrow !text-[9px]">{n === 0 ? 'Start' : `P${n + 1}`}</div>
+            <div className="eyebrow truncate !text-[9px]">{n === 0 ? t('Start') : `P${n + 1}`}</div>
             <div className="display text-[11px]">{p.x.toFixed(2)} mm · {p.y}</div>
           </div>
         ))}
@@ -134,11 +138,11 @@ export function CurveCard({ curves, onEdit, className }: { curves: Setting[]; on
         <div className="mt-3 flex flex-wrap gap-1.5">
           {v.presets.map((p) => (
             <button key={p.name} type="button" aria-pressed={preset === p.name} onClick={() => set(p.points)}
-              className={cn('chip !px-2.5 !py-1 !text-[11px]', preset === p.name && 'plat !border-transparent')}>{p.name}</button>
+              className={cn('chip !px-2.5 !py-1 !text-[11px]', preset === p.name && 'plat !border-transparent')}>{t(p.name)}</button>
           ))}
         </div>
       )}
-      <p className="hint mt-3 mb-0">Key press depth (mm) → output (0–{v.maxY}). Before the first point the key does nothing (start dead zone).</p>
+      <p className="hint mt-3 mb-0">{t('Key press depth (mm) → output (0–{max}). Before the first point the key does nothing (start dead zone).', { max: v.maxY })}</p>
     </Card>
   )
 }

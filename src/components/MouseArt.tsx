@@ -2,9 +2,12 @@
  * Drawn top-down gaming mouse, shown when a driver has no product photo.
  * Same 300×580 box as the photos so the button markers line up.
  */
+import { useT } from '#/lib/i18n'
+
 export function MouseArt({ label }: { label?: string }) {
+  const t = useT()
   return (
-    <svg viewBox="0 0 300 580" className="size-full drop-shadow-[0_40px_40px_rgb(0_0_0/0.8)]" role="img" aria-label={label ?? 'Mouse'}>
+    <svg viewBox="0 0 300 580" className="size-full drop-shadow-[0_40px_40px_rgb(0_0_0/0.8)]" role="img" aria-label={label ?? t('Mouse')}>
       <defs>
         <linearGradient id="ma-body" x1="0" y1="0" x2="1" y2="1">
           <stop offset="0" stopColor="#3a3b40" />

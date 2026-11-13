@@ -3,6 +3,7 @@ import { Check, ClipboardCopy, MessageSquareWarning, Stethoscope, ThumbsUp } fro
 import type { DeviceState } from '#/devices'
 import type { Setting, Value } from '#/drivers/types'
 import { cn } from '#/lib/utils'
+import { useT } from '#/lib/i18n'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '#/components/ui/dialog'
 
 type Verdict = 'works' | 'wrong'
@@ -71,6 +72,9 @@ export function buildReport(dev: DeviceState, verdict: Verdict | null, note: str
 
 /** "Feedback" on each device page: say whether it works and copy a report for the developer. */
 export function FeedbackButton({ dev }: { dev: DeviceState }) {
+  // the copied report itself stays in English: it is read by the developer
+  const t = useT()
+  const mouse = dev.driver.kind === 'mouse'
   const [open, setOpen] = useState(false)
   const [verdict, setVerdict] = useState<Verdict | null>(null)
   const [note, setNote] = useState('')
@@ -81,7 +85,7 @@ export function FeedbackButton({ dev }: { dev: DeviceState }) {
     if (!dev.driver.diagnose || diagPct !== null) return
     setDiagPct(0)
     try {
-      setDiag(await dev.driver.diagnose((d, t) => setDiagPct(t ? d / t : 0)))
+      setDiag(await dev.driver.diagnose((d, total) => setDiagPct(total ? d / total : 0)))
     } catch (e) {
       setDiag(`diagnostics stopped: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -95,7 +99,7 @@ export function FeedbackButton({ dev }: { dev: DeviceState }) {
     if (dev.driver.diagnose && !d && diagPct === null) {
       setDiagPct(0)
       try {
-        d = await dev.driver.diagnose((x, t) => setDiagPct(t ? x / t : 0))
+        d = await dev.driver.diagnose((x, total) => setDiagPct(total ? x / total : 0))
       } catch (e) {
         d = `diagnostics stopped: ${e instanceof Error ? e.message : String(e)}`
       } finally {
@@ -109,12 +113,12 @@ export function FeedbackButton({ dev }: { dev: DeviceState }) {
       await navigator.clipboard.writeText(text)
     } catch {
       // clipboard blocked (or the click is too long ago after the diagnostics): try a hidden textarea
-      const t = document.createElement('textarea')
-      t.value = text
-      document.body.appendChild(t)
-      t.select()
+      const ta = document.createElement('textarea')
+      ta.value = text
+      document.body.appendChild(ta)
+      ta.select()
       ok = document.execCommand('copy')
-      t.remove()
+      ta.remove()
     }
     setCopyAgain(!ok)
     if (!ok) return
@@ -125,53 +129,53 @@ export function FeedbackButton({ dev }: { dev: DeviceState }) {
     <>
       <button type="button" onClick={() => setOpen(true)}
         className="pill-glass display absolute right-6 bottom-[34px] z-30 flex items-center gap-2 rounded-full px-4 py-2.5 text-[11px] font-semibold text-[var(--text-2)] hover:text-[var(--text)]">
-        <MessageSquareWarning className="size-3.5" /> Feedback
+        <MessageSquareWarning className="size-3.5" /> {t('Feedback')}
       </button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="rounded-3xl border-white/10 bg-[#111113]/95 p-7 backdrop-blur-xl sm:max-w-[480px]">
           <DialogHeader>
-            <div className="eyebrow mb-1">Feedback · {dev.driver.brand()} {dev.driver.model()}</div>
-            <DialogTitle className="display text-[18px] font-semibold">Does this {dev.driver.kind} work?</DialogTitle>
+            <div className="eyebrow mb-1">{t('Feedback')} · {dev.driver.brand()} {dev.driver.model()}</div>
+            <DialogTitle className="display text-[18px] font-semibold">{mouse ? t('Does this mouse work?') : t('Does this keyboard work?')}</DialogTitle>
             <DialogDescription className="leading-relaxed">
-              Compare the values here with the brand's own app. Then copy the report and send it to the developer — it holds what InputDeck read, so problems can be fixed without the device.
+              {t("Compare the values here with the brand's own app. Then copy the report and send it to the developer — it holds what InputDeck read, so problems can be fixed without the device.")}
             </DialogDescription>
           </DialogHeader>
           <div className="grid grid-cols-2 gap-2.5">
-            {([['works', 'It works', ThumbsUp], ['wrong', "Something's wrong", MessageSquareWarning]] as const).map(([v, l, Icon]) => (
+            {([['works', t('It works'), ThumbsUp], ['wrong', t("Something's wrong"), MessageSquareWarning]] as const).map(([v, l, Icon]) => (
               <button key={v} type="button" aria-pressed={verdict === v} onClick={() => setVerdict(v)}
-                className={cn('display flex h-12 items-center justify-center gap-2 rounded-[14px] text-[12px] font-semibold', verdict === v ? 'plat' : 'raised text-[var(--text-2)]')}>
+                className={cn('display flex min-h-12 items-center justify-center gap-2 rounded-[14px] px-2 py-1.5 text-center text-[12px] font-semibold', verdict === v ? 'plat' : 'raised text-[var(--text-2)]')}>
                 <Icon className="size-4" /> {l}
               </button>
             ))}
           </div>
           <label className="block">
-            <span className="eyebrow mb-2 block">What did you notice? (optional)</span>
+            <span className="eyebrow mb-2 block">{t('What did you notice? (optional)')}</span>
             <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3}
-              placeholder={verdict === 'wrong' ? 'e.g. lift-off shows "Code 3", the brand app says 0.7 mm' : 'e.g. changed DPI and polling, all saved fine'}
+              placeholder={verdict === 'wrong' ? t('e.g. lift-off shows "Code 3", the brand app says 0.7 mm') : t('e.g. changed DPI and polling, all saved fine')}
               className="recess w-full resize-none rounded-2xl border-0 bg-transparent px-4 py-3 text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--text-4)]" />
           </label>
           {dev.driver.diagnose && (
             <div className="raised rounded-2xl p-4">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <div className="display text-[12px] font-semibold">Diagnostics</div>
-                  <p className="hint m-0 mt-1">Asks the {dev.driver.kind} about features we can't confirm yet. Only reads, so nothing on the device changes. Takes a few seconds.</p>
+                  <div className="display text-[12px] font-semibold">{t('Diagnostics')}</div>
+                  <p className="hint m-0 mt-1">{mouse ? t("Asks the mouse about features we can't confirm yet. Only reads, so nothing on the device changes. Takes a few seconds.") : t("Asks the keyboard about features we can't confirm yet. Only reads, so nothing on the device changes. Takes a few seconds.")}</p>
                 </div>
                 <button type="button" disabled={diagPct !== null || dev.saving} onClick={() => void runDiag()}
                   className="chip display flex shrink-0 items-center gap-1.5 !text-[11px] font-semibold disabled:opacity-50">
                   <Stethoscope className="size-3.5" />
-                  {diagPct !== null ? `${Math.round(diagPct * 100)}%` : diag ? 'Run again' : 'Run'}
+                  {diagPct !== null ? `${Math.round(diagPct * 100)}%` : diag ? t('Run again') : t('Run')}
                 </button>
               </div>
-              {diag && <p className="hint m-0 mt-2 text-[var(--ok)]">Done, and included in the report below.</p>}
+              {diag && <p className="hint m-0 mt-2 text-[var(--ok)]">{t('Done, and included in the report below.')}</p>}
             </div>
           )}
           <button type="button" disabled={diagPct !== null} onClick={() => void copy()} className="plat display flex items-center justify-center gap-2 rounded-full py-3 text-[13px] font-semibold disabled:opacity-70">
             {diagPct !== null
-              ? <><Stethoscope className="size-4" /> Running diagnostics… {Math.round(diagPct * 100)}%</>
-              : copied ? <><Check className="size-4" /> Copied — paste it to the developer</>
-              : copyAgain ? <><ClipboardCopy className="size-4" /> Ready — click again to copy</>
-              : <><ClipboardCopy className="size-4" /> {dev.driver.diagnose && !diag ? 'Run diagnostics & copy report' : 'Copy report'}</>}
+              ? <><Stethoscope className="size-4" /> {t('Running diagnostics… {pct}%', { pct: Math.round(diagPct * 100) })}</>
+              : copied ? <><Check className="size-4" /> {t('Copied — paste it to the developer')}</>
+              : copyAgain ? <><ClipboardCopy className="size-4" /> {t('Ready — click again to copy')}</>
+              : <><ClipboardCopy className="size-4" /> {dev.driver.diagnose && !diag ? t('Run diagnostics & copy report') : t('Copy report')}</>}
           </button>
         </DialogContent>
       </Dialog>

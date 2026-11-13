@@ -1,6 +1,7 @@
 import { HeadContent, Outlet, Scripts, createRootRoute } from '@tanstack/react-router'
 import { TooltipProvider } from '#/components/ui/tooltip'
 import { DeviceProvider } from '#/lib/device-context'
+import { LanguageProvider } from '#/lib/i18n'
 import appCss from '../styles.css?url'
 
 export const Route = createRootRoute({
@@ -24,11 +25,13 @@ export const Route = createRootRoute({
   }),
   shellComponent: RootDocument,
   component: () => (
-    <DeviceProvider>
-      <TooltipProvider delayDuration={300}>
-        <Outlet />
-      </TooltipProvider>
-    </DeviceProvider>
+    <LanguageProvider>
+      <DeviceProvider>
+        <TooltipProvider delayDuration={300}>
+          <Outlet />
+        </TooltipProvider>
+      </DeviceProvider>
+    </LanguageProvider>
   ),
 })
 

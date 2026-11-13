@@ -1,4 +1,5 @@
 import type { Setting, Value } from '#/drivers/types'
+import { useT } from '#/lib/i18n'
 import { BigValue, Card, ChoiceSelect, ColorPicker, Range, Row, Segmented, Toggle } from './kit'
 
 export type Edit = (key: string, v: Value) => void
@@ -31,13 +32,14 @@ export function Hero({ brand, label, value, unit, sub, size = 112, children, liv
 }
 
 export function MiniStats({ items }: { items: [string, string | undefined, string?][] }) {
+  const t = useT()
   const shown = items.filter(([, v]) => v)
   if (!shown.length) return null
   return (
     <dl className="m-0 flex flex-wrap gap-9">
       {shown.map(([k, v, u]) => (
         <div key={k}>
-          <dt className="eyebrow">{k}</dt>
+          <dt className="eyebrow">{t(k)}</dt>
           <dd className="m-0 mt-1.5 flex items-baseline gap-1">
             <span key={v} className="display num-anim text-[24px] font-medium">{v}</span>
             {u && <span className="unit text-[12px]">{u}</span>}
@@ -62,31 +64,36 @@ export function Pulse({ rate, width = 150 }: { rate: number; width?: number }) {
   )
 }
 
+// decided on the English labels so the control type doesn't change with the language
 const short = (opts: [string, number][]) => opts.length <= 7 && opts.every(([l]) => l.length <= 8)
 
 /** Renders any driver setting with a fitting control. Used where a screen has no custom card. */
 export function SettingControl({ s, onEdit: edit }: { s: Setting; onEdit: Edit }) {
+  const t = useT()
   const v = s.value
+  // driver text is English; translate it for display (unknown text stays English)
+  const label = t(s.label)
+  const hint = s.hint ? t(s.hint) : undefined
   // settings that restart the device etc. ask first
   const onEdit: Edit = (k, nv) => {
-    if (s.confirm && !window.confirm(s.confirm)) return
+    if (s.confirm && !window.confirm(t(s.confirm))) return
     edit(k, nv)
   }
   switch (v.kind) {
     case 'toggle':
-      return <Row label={s.label} hint={s.hint}><Toggle label={s.label} checked={v.on} onChange={(on) => onEdit(s.key, { ...v, on })} /></Row>
+      return <Row label={label} hint={hint}><Toggle label={label} checked={v.on} onChange={(on) => onEdit(s.key, { ...v, on })} /></Row>
     case 'text':
-      return <Row label={s.label}><span className="text-right text-[12.5px] text-[var(--text-2)]">{v.text}</span></Row>
+      return <Row label={label}><span className="text-right text-[12.5px] text-[var(--text-2)]">{v.text}</span></Row>
     case 'choice':
       return (
         <div className="border-b border-white/5 py-3 last:border-0">
-          <div className="mb-2 text-[13px]">{s.label}</div>
+          <div className="mb-2 text-[13px]">{label}</div>
           {short(v.options) ? (
-            <Segmented label={s.label} options={v.options} value={v.current} onChange={(c) => onEdit(s.key, { ...v, current: c })} />
+            <Segmented label={label} options={v.options} value={v.current} onChange={(c) => onEdit(s.key, { ...v, current: c })} className="no-scrollbar max-w-full overflow-x-auto" />
           ) : (
-            <ChoiceSelect label={s.label} v={v} onChange={(c) => onEdit(s.key, { ...v, current: c })} />
+            <ChoiceSelect label={label} v={v} onChange={(c) => onEdit(s.key, { ...v, current: c })} />
           )}
-          {s.hint && <p className="hint mt-2 mb-0">{s.hint}</p>}
+          {hint && <p className="hint mt-2 mb-0">{hint}</p>}
         </div>
       )
     case 'number':
@@ -95,16 +102,16 @@ export function SettingControl({ s, onEdit: edit }: { s: Setting; onEdit: Edit }
       const fmt = (n: number) => (v.kind === 'float' ? n.toFixed(2) : String(n))
       return (
         <div className="border-b border-white/5 py-3 last:border-0">
-          <div className="mb-2 flex items-baseline justify-between"><span className="text-[13px]">{s.label}</span><BigValue value={fmt(v.current)} unit={v.unit.trim()} size={16} /></div>
-          <Range label={s.label} min={v.min} max={v.max} step={step} value={v.current} onChange={(n) => onEdit(s.key, { ...v, current: n })} />
+          <div className="mb-2 flex items-baseline justify-between"><span className="text-[13px]">{label}</span><BigValue value={fmt(v.current)} unit={v.unit.trim()} size={16} /></div>
+          <Range label={label} min={v.min} max={v.max} step={step} value={v.current} onChange={(n) => onEdit(s.key, { ...v, current: n })} />
         </div>
       )
     }
     case 'color':
       return (
         <div className="border-b border-white/5 py-3 last:border-0">
-          <div className="mb-2 text-[13px]">{s.label}</div>
-          <ColorPicker label={s.label} value={v.rgb} onChange={(rgb) => onEdit(s.key, { ...v, rgb })} />
+          <div className="mb-2 text-[13px]">{label}</div>
+          <ColorPicker label={label} value={v.rgb} onChange={(rgb) => onEdit(s.key, { ...v, rgb })} />
         </div>
       )
     default:
@@ -113,9 +120,10 @@ export function SettingControl({ s, onEdit: edit }: { s: Setting; onEdit: Edit }
 }
 
 export function GenericCard({ title, settings, onEdit, className }: { title: string; settings: Setting[]; onEdit: Edit; className?: string }) {
+  const t = useT()
   if (!settings.length) return null
   return (
-    <Card title={title} className={className}>
+    <Card title={t(title)} className={className}>
       {settings.map((s) => <SettingControl key={s.key} s={s} onEdit={onEdit} />)}
     </Card>
   )

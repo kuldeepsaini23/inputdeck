@@ -1,0 +1,25 @@
+name: Device support request
+description: Ask for a mouse or keyboard that isn't supported yet
+labels: [device-request]
+body:
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Brand and exact model
+    validations:
+      required: true
+  - type: input
+    id: ids
+    attributes:
+      label: USB IDs (if you know them)
+      description: Vendor and product ID, e.g. 2E3C:C365 (Windows Device Manager → Details → Hardware Ids)
+  - type: input
+    id: software
+    attributes:
+      label: Official software / web driver link
+      description: The vendor's own configurator, if it has one (a web driver makes support much easier)
+  - type: textarea
+    id: features
+    attributes:
+      label: Which settings matter most to you?

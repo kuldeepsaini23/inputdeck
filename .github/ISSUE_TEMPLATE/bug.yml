@@ -1,0 +1,29 @@
+name: Bug report
+description: Something doesn't work or shows wrong values
+labels: [bug]
+body:
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Brand and model (e.g. Wraith W75 V2 HE, DAREU A68)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Feedback report
+      description: On the device page press Feedback → Copy, then paste it here. It includes a read-only diagnostics dump that helps a lot.
+      render: text
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and OS
+      placeholder: Chrome 131 on Windows 11

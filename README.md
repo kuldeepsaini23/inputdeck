@@ -34,3 +34,13 @@ npm run build      # static site in dist/client
 Built with TanStack Start (single-page mode), React, Tailwind and shadcn/ui.
 
 The app is fully static: deploy the contents of `dist/client` to any static host. It must be served over HTTPS (or localhost) for WebHID to work.
+
+## Feedback and issues
+
+Found a bug, wrong values, or want your device supported? [Open an issue](../../issues/new/choose). For bugs, paste the report from the **Feedback** button on the device page — it includes read-only diagnostics.
+
+Untested drivers stay view-only until you press **Allow changes**; if you try one on real hardware, please tell us whether it worked.
+
+## License
+
+[MIT](LICENSE)

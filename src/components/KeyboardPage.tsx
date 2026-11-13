@@ -451,24 +451,25 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     const sensRange = pkT ? { min: pkT.sensMin, max: pkT.sensMax, step: pkT.step } : sens
 
     const setTravel = (n: number) => {
-      if (perKey) {
-        const t = pkT!.travel.slice()
-        for (const i of selIdx) t[i] = snap(n, pkT!.step)
-        onEdit('per_key_trigger', { ...pkT!, travel: t })
+      // with per-key data, "all keys" edits every key's own value too: the display is built from it
+      if (pkT) {
+        const t = pkT.travel.slice()
+        for (const i of perKey ? selIdx : t.map((_, i) => i)) t[i] = snap(n, pkT.step)
+        onEdit('per_key_trigger', { ...pkT, travel: t })
       } else if (act) onEdit('actuation', { ...act, current: snap(n, act.step) })
     }
     const setRt = (on: boolean) => {
-      if (perKey || (!rt && pkT)) {
-        const r = pkT!.rapid.slice()
+      if (pkT) {
+        const r = pkT.rapid.slice()
         for (const i of perKey ? selIdx : r.map((_, i) => i)) r[i] = on
-        onEdit('per_key_trigger', { ...pkT!, rapid: r })
+        onEdit('per_key_trigger', { ...pkT, rapid: r })
       } else if (rt) onEdit('rapid_trigger', { kind: 'toggle', on })
     }
     const setSens = (n: number) => {
-      if (perKey || (!sens && pkT)) {
-        const s = pkT!.sens.slice()
-        for (const i of perKey ? selIdx : s.map((_, i) => i)) s[i] = snap(n, pkT!.step)
-        onEdit('per_key_trigger', { ...pkT!, sens: s })
+      if (pkT) {
+        const s = pkT.sens.slice()
+        for (const i of perKey ? selIdx : s.map((_, i) => i)) s[i] = snap(n, pkT.step)
+        onEdit('per_key_trigger', { ...pkT, sens: s })
       } else if (sens) onEdit('rt_sens', { ...sens, current: snap(n, sens.step) })
     }
     const scope = perKey ? (selIdx.length === 1 ? t('{n} key', { n: selIdx.length }) : t('{n} keys', { n: selIdx.length })) : t('all keys')

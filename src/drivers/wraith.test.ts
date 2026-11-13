@@ -605,6 +605,31 @@ describe('driver', () => {
     expect(f.keys.get(0)?.mode).toBe(TRIG_RT);
   });
 
+  it('switching Rapid Trigger for all keys keeps each key its own actuation point', async () => {
+    const [f, d] = await connect();
+    let ss = await d.read();
+    const pk = find(ss, 'per_key_trigger').value as Extract<Value, { kind: 'perKeyTrigger' }>;
+    const travel = pk.travel.map((t, i) => (i === 0 ? 0.5 : t));
+    await d.write(withValue(find(ss, 'per_key_trigger'), { ...pk, travel }));
+    ss = await d.read();
+    await d.write(withValue(find(ss, 'rapid_trigger'), { kind: 'toggle', on: true }));
+    expect(f.keys.get(0)).toMatchObject({ mode: TRIG_RT, travel: 25 });
+    expect(f.keys.get(46)).toMatchObject({ mode: TRIG_RT, travel: 85 });
+    await d.write(withValue(find(ss, 'rapid_trigger'), { kind: 'toggle', on: false }));
+    expect(f.keys.get(0)?.travel).toBe(25);
+  });
+
+  it("a key that never answers is not asked again on every write", async () => {
+    const [f, d] = await connect({ silentKeys: [125] });
+    const ss = await d.read();
+    const asks = () => f.sent.filter((q) => q[0] === 0x21 && q[4] === 0x18 && q[5] === 0x05 && q[6] === 5 && q[7] === 15).length;
+    const before = asks();
+    await d.write(withValue(find(ss, 'rapid_trigger'), { kind: 'toggle', on: true }));
+    await d.write(withValue(find(ss, 'rapid_trigger'), { kind: 'toggle', on: false }));
+    expect(asks()).toBe(before);
+    expect(f.keys.get(125)?.mode).toBe(0);
+  });
+
   it('writes lighting with read-back', async () => {
     const [f, d] = await connect();
     const ss = await d.read();

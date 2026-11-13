@@ -994,6 +994,8 @@ class Wraith implements Driver {
   private trig: Trig | undefined;
   /** last read per-key triggers, parallel to the layout */
   private keyTrigs: KeyTrig[] | undefined;
+  /** layout positions whose trigger read never answers (e.g. the W75's Right arrow): not asked again, not verified */
+  private silent = new Set<number>();
   /** last read custom colour slot (0|1) and its raw table */
   private colors: { slot: number; table: Uint8Array } | undefined;
   /** last read SOCD state (pairs we can't show are kept as `foreign`) */
@@ -1117,8 +1119,12 @@ class Wraith implements Driver {
   private async readKeyTrigs(g: Trig): Promise<KeyTrig[]> {
     const fallback: KeyTrig = { mode: g.mode, travel: g.travel, press: g.press, release: g.release };
     const out: KeyTrig[] = [];
-    for (const [key] of W75_LAYOUT) {
+    for (const [i, [key]] of W75_LAYOUT.entries()) {
       let k: KeyTrig;
+      if (this.silent.has(i)) {
+        out.push(this.keyTrigs?.[i] ?? { ...fallback });
+        continue;
+      }
       try {
         k = await this.readKeyTrig(key);
       } catch {
@@ -1126,6 +1132,7 @@ class Wraith implements Driver {
           k = await this.readKeyTrig(key);
         } catch {
           k = { ...fallback };
+          this.silent.add(i);
         }
       }
       out.push(k);
@@ -1310,6 +1317,11 @@ class Wraith implements Driver {
     let answered = 0;
     for (const [i, want] of sent) {
       const [key, label] = W75_LAYOUT[i];
+      if (this.silent.has(i)) {
+        // never answers a read: trust the write (Re-read shows the same)
+        if (cache) cache[i] = { ...want };
+        continue;
+      }
       let got: KeyTrig | undefined;
       for (let tries = 0; tries < 2 && !got; tries++) {
         try {
@@ -1319,6 +1331,8 @@ class Wraith implements Driver {
         }
       }
       if (!got) {
+        this.silent.add(i);
+        if (cache) cache[i] = { ...want };
         if (skipSilent) continue;
         bad.push(label);
         first ??= `${label}: sent ${describeTrig(want, unit)}, no answer when read back`;
@@ -1335,6 +1349,16 @@ class Wraith implements Driver {
     if (cache) this.keyTrigs = cache;
     if (bad.length) throw new Error(`keyboard didn't take the trigger change for: ${bad.join(', ')} (${first})`);
     if (sent.length && !answered) throw new Error("keyboard didn't answer when reading the triggers back");
+  }
+
+  /**
+   * An "all keys" change that touches one field: `fn` gives each key's new trigger from its current one, so
+   * per-key values the change isn't about (e.g. each key's own actuation when Rapid Trigger is switched) stay.
+   */
+  private async writeAllKeys(t: Trig, fn: (k: KeyTrig) => KeyTrig): Promise<void> {
+    const changes = this.keyTrigs!.map((k, i) => [i, fn(k)] as [number, KeyTrig]);
+    await this.writeKeyTrigs(changes);
+    this.trig = { ...t, ...(this.keyTrigs?.[W75_LAYOUT.findIndex(([key]) => key === REF_KEY)] ?? {}) };
   }
 
   /** One trigger for every key ("all keys" settings), then read every key back. */
@@ -1562,19 +1586,27 @@ class Wraith implements Driver {
       }
       case 'actuation:float': {
         const t = trig();
-        const travel = toUnits((v as Extract<Value, { kind: 'float' }>).current, t.unit);
-        return this.writeTrig({ ...t, travel });
+        const travel = clamp(toUnits((v as Extract<Value, { kind: 'float' }>).current, t.unit), t.min, t.max);
+        if (!this.keyTrigs) return this.writeTrig({ ...t, travel });
+        return this.writeAllKeys({ ...t, travel }, (k) => ({ ...k, travel }));
       }
       case 'rapid_trigger:toggle': {
         const t = trig();
-        const mode = (v as Extract<Value, { kind: 'toggle' }>).on ? TRIG_RT : TRIG_FIXED;
-        return this.writeTrig({ ...t, mode, release: t.press });
+        const on = (v as Extract<Value, { kind: 'toggle' }>).on;
+        const mode = on ? TRIG_RT : TRIG_FIXED;
+        if (!this.keyTrigs) return this.writeTrig({ ...t, mode, release: t.press });
+        // only the mode changes: every key keeps its own actuation point and sensitivity
+        return this.writeAllKeys({ ...t, mode, release: t.press }, (k) => {
+          const press = Math.max(k.press, 1);
+          return { ...k, mode, press, release: on ? press : Math.max(k.release, 1) };
+        });
       }
       case 'rt_sens:float': {
         const t = trig();
-        const mode = t.mode === TRIG_RT_SPLIT ? TRIG_RT : t.mode;
         const u = clamp(toUnits((v as Extract<Value, { kind: 'float' }>).current, t.unit), 1, Math.max(sensMaxUnits(t), t.press));
-        return this.writeTrig({ ...t, mode, press: u, release: u });
+        const mode = t.mode === TRIG_RT_SPLIT ? TRIG_RT : t.mode;
+        if (!this.keyTrigs) return this.writeTrig({ ...t, mode, press: u, release: u });
+        return this.writeAllKeys({ ...t, mode, press: u, release: u }, (k) => ({ ...k, mode: k.mode === TRIG_RT_SPLIT ? TRIG_RT : k.mode, press: u, release: u }));
       }
       case 'light_mode:choice':
         return this.writeLight({ ...light(), mode: (v as Extract<Value, { kind: 'choice' }>).current & 0xff });

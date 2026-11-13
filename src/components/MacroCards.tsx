@@ -8,6 +8,7 @@ import {
   removeStep, slotName, stepProblem, stepText, stepsFromRecording, textCharOk, usedBytes, withMacro, type Macros, type RecordedKey,
 } from '#/lib/macros'
 import { cn } from '#/lib/utils'
+import { launchSteps, untypable } from '#/lib/launch-macro'
 import { t, useT } from '#/lib/i18n'
 import { Card, Segmented } from './kit'
 
@@ -221,7 +222,7 @@ export function MacroEditor({ v, slot, onChange, className }: {
       {!recording && (
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
           <span className="eyebrow mr-1">{selIdx === undefined ? t('Add') : t('Add after step {n}', { n: selIdx + 1 })}</span>
-          {(['key', ...(mouse ? ['mouse', 'wheel'] : []), ...(delays ? ['delay'] : []), ...(texts ? ['text'] : [])] as Adding[]).map((k) => (
+          {(['key', ...(mouse ? ['mouse', 'wheel'] : []), ...(delays ? ['delay'] : []), ...(texts ? ['text'] : []), 'app'] as Adding[]).map((k) => (
             <button key={k} type="button" className={cn('chip flex items-center gap-1 !text-[11px]', adding === k && 'plat !border-transparent')} aria-pressed={adding === k}
               onClick={() => setAdding(adding === k ? undefined : k)}>
               <Plus className="size-3" />{addLabel(k)}
@@ -250,6 +251,12 @@ export function MacroEditor({ v, slot, onChange, className }: {
           <NumberField label={t('Custom delay (ms)')} value={200} max={v.maxDelay ?? MAX_DELAY} button={t('Add')} onCommit={(ms) => add([{ t: 'delay', ms }])} />
         </div>
       )}
+      {!recording && adding === 'app' && (
+        <div className="mt-3">
+          <AppField onCommit={(target) => add(launchSteps(target, delays))} />
+          <p className="hint mt-2 mb-0">{t("Opens it through Windows' Run box (Win+R): an app name like notepad, calc, spotify or discord, a full path to a program or file, or a link (https://, steam://, ms-settings:). Then pick this macro for a button.")}</p>
+        </div>
+      )}
       {!recording && adding === 'text' && (
         <div className="mt-3"><TextField label={t('Text to type')} value="" button={t('Add')} onCommit={(text) => text && add([{ t: 'text', text }])} /></div>
       )}
@@ -266,8 +273,8 @@ export function MacroEditor({ v, slot, onChange, className }: {
   )
 }
 
-type Adding = 'key' | 'mouse' | 'wheel' | 'delay' | 'text'
-const addLabel = (k: Adding) => ({ key: t('Tap key'), mouse: t('Mouse click'), wheel: t('Scroll'), delay: t('Delay'), text: t('Text') })[k]
+type Adding = 'key' | 'mouse' | 'wheel' | 'delay' | 'text' | 'app'
+const addLabel = (k: Adding) => ({ key: t('Tap key'), mouse: t('Mouse click'), wheel: t('Scroll'), delay: t('Delay'), text: t('Text'), app: t('Open an app') })[k]
 
 function stepTitle(s: MacroStep): string {
   switch (s.t) {
@@ -340,6 +347,23 @@ function TextField({ label, value, button, onCommit }: { label: string; value: s
         onKeyDown={(e) => e.key === 'Enter' && go()} onBlur={() => !button && txt !== value && go()}
         className={cn('recess h-8 min-w-0 flex-1 rounded-full border-0 px-3 text-[12px] text-[var(--text)] outline-none placeholder:text-[var(--text-4)]', bad && 'ring-1 ring-[var(--warn)]')} />
       {button && <button type="button" className="chip !text-[11px]" disabled={!!bad || !txt} onClick={go}>{button}</button>}
+      {bad && <span className="text-[11px] text-[var(--warn)]">{t("“{char}” can't be typed", { char: bad })}</span>}
+    </span>
+  )
+}
+
+/** Target for the "Open an app" macro: anything Windows' Run box accepts, typed with a US layout. */
+function AppField({ onCommit }: { onCommit: (target: string) => void }) {
+  const t = useT()
+  const [txt, setT] = useState('')
+  const bad = untypable(txt)
+  const go = () => !bad && txt.trim() && onCommit(txt)
+  return (
+    <span className="flex min-w-0 flex-1 items-center gap-1.5">
+      <input type="text" value={txt} aria-label={t('App, file or link to open')} maxLength={200} placeholder={t('e.g. spotify, discord, https://…')}
+        onChange={(e) => setT(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && go()}
+        className={cn('recess h-8 min-w-0 flex-1 rounded-full border-0 px-3 text-[12px] text-[var(--text)] outline-none placeholder:text-[var(--text-4)]', bad && 'ring-1 ring-[var(--warn)]')} />
+      <button type="button" className="chip !text-[11px]" disabled={!!bad || !txt.trim()} onClick={go}>{t('Add')}</button>
       {bad && <span className="text-[11px] text-[var(--warn)]">{t("“{char}” can't be typed", { char: bad })}</span>}
     </span>
   )

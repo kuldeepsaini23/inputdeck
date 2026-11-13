@@ -73,6 +73,12 @@ export const ACTIONS: [string, number, number[]][] = [
   ['Next track', 5, [0x00, 0xb5]],
   ['Previous track', 5, [0x00, 0xb6]],
   ['Stop', 5, [0x00, 0xb7]],
+  // app-launch keys (HID consumer page): Windows opens these itself
+  ['Open Calculator', 5, [0x01, 0x92]],
+  ['Open File Explorer', 5, [0x01, 0x94]],
+  ['Open web browser', 5, [0x02, 0x23]],
+  ['Open mail', 5, [0x01, 0x8a]],
+  ['Open search', 5, [0x02, 0x21]],
   ['Disabled', 0, []],
 ];
 /** Choice value for "whatever is on the button now" (keyboard key, macro...) - never written. */

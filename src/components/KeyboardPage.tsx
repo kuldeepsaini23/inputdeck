@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Gauge, Keyboard as KeyboardIcon, Lightbulb, Settings2, SlidersHorizontal, Swords, Timer, Zap } from 'lucide-react'
+import { Gamepad2, Gauge, Keyboard as KeyboardIcon, Lightbulb, Settings2, SlidersHorizontal, Swords, Timer, Zap } from 'lucide-react'
 import type { DeviceState } from '#/devices'
 import type { KeyCap, Setting, Value } from '#/drivers/types'
 import { cn } from '#/lib/utils'
@@ -15,6 +15,7 @@ import { AdvancedCards, MODE_COLOR, MODE_NAME, advancedSummary, entryAt } from '
 import { SocdCard, socdColor, socdEntryLabel, socdEntryOf, socdPickKey, type SocdPick } from './SocdCards'
 import { BigValue, Card, ChoiceSelect, Range, Segmented, SWATCHES, Toggle, hex, type Choice } from './kit'
 import { GenericCard, Hero, Pulse, shortHz, type Edit } from './parts'
+import { CurveCard, GamepadMapCard, mappedKeys, targetColor } from './GamepadCards'
 import { Dock, textOf } from './shell'
 
 type PerKeyTrigger = Extract<Value, { kind: 'perKeyTrigger' }>
@@ -23,18 +24,19 @@ type Float = Extract<Value, { kind: 'float' }>
 type Num = Extract<Value, { kind: 'number' }>
 
 // Tabs: each big feature gets its own. Settings from the drivers are sorted into them by key or group.
-const ORDER = ['Performance', 'Rapid Trigger', 'SOCD', 'Keys', 'Lighting', 'Macros', 'Settings']
+const ORDER = ['Performance', 'Rapid Trigger', 'SOCD', 'Gamepad', 'Keys', 'Lighting', 'Macros', 'Settings']
 const ICON: Record<string, React.ReactNode> = {
   Performance: <Gauge className="size-4" />,
   'Rapid Trigger': <Timer className="size-4" />,
   SOCD: <Swords className="size-4" />,
+  Gamepad: <Gamepad2 className="size-4" />,
   Keys: <KeyboardIcon className="size-4" />,
   Lighting: <Lightbulb className="size-4" />,
   Macros: <Zap className="size-4" />,
   Settings: <Settings2 className="size-4" />,
 }
 /** settings with their own place in a tab (everything else in their group shows as a generic card) */
-const OWN = new Set(['rt_adaptive', 'advanced_keys', 'actuation', 'rapid_trigger', 'rt_sens', 'per_key_trigger', 'per_key_color', 'socd', 'keymap', 'macros', 'polling', 'profile', 'fw', 'model'])
+const OWN = new Set(['rt_adaptive', 'advanced_keys', 'actuation', 'rapid_trigger', 'rt_sens', 'per_key_trigger', 'per_key_color', 'socd', 'keymap', 'macros', 'polling', 'profile', 'fw', 'model', 'gp_map', 'gp_curve_ls', 'gp_curve_rs', 'gp_curve_lt', 'gp_curve_rt'])
 /** driver groups that feed a tab of another name */
 const GROUP_TAB: Record<string, string> = { Switches: 'Performance', Info: 'Settings', Profile: 'Settings', Profiles: 'Settings' }
 /** old ?tab= values */
@@ -61,6 +63,7 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     if (has('actuation') || has('per_key_trigger') || has('polling')) t.add('Performance')
     if (has('rapid_trigger') || has('rt_sens') || has('per_key_trigger') || has('rt_adaptive')) t.add('Rapid Trigger')
     if (has('socd')) t.add('SOCD')
+    if (has('gp_map')) t.add('Gamepad')
     for (const s of edit ?? []) {
       if (OWN.has(s.key) || s.group === 'Per-key') continue
       t.add(GROUP_TAB[s.group] ?? s.group)
@@ -208,6 +211,13 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     if (!pick && socd.mode === 'pairs') setSocdSel(socdPicking.entry < 0 ? v.entries.length - 1 : socdPicking.entry)
   }
 
+  // ---- gamepad (drivers with a gp_map setting): click a key, pick what it drives
+  const gpS = get('gp_map')
+  const gpMap = gpS?.value.kind === 'perKeyChoice' ? gpS.value : undefined
+  const [gpPick, setGpPick] = useState<number | undefined>(undefined)
+  const gpSel = gpMap && gpPick !== undefined && gpPick < gpMap.keys.length ? gpPick : undefined
+  const onGamepad = active === 'Gamepad' && !!gpMap
+
   // ---- keyboard looks for the current tab
   let looks: KeyLook[] = []
   let interactive = false
@@ -246,6 +256,14 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
       if (socd!.unavailable?.includes(p)) return { dim: true, title: `${k.label}: can't be used for SOCD` }
       return {}
     })
+  } else if (onGamepad) {
+    interactive = true
+    boardKeys = mappedKeys(gpMap!)
+    looks = gpMap!.values.map((t, i) => {
+      if (t === gpMap!.none) return { title: `${gpMap!.keys[i].label}: not mapped` }
+      const l = boardKeys![i].label
+      return { color: targetColor(l), title: `${gpMap!.keys[i].label}: ${l}` }
+    })
   } else if (keys && active === 'Performance' && pkT && testing) {
     looks = keys.map((_, i) => {
       const mm = live.depth.get(i) ?? 0
@@ -282,6 +300,8 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     ;[hero, cards] = triggers('rt')
   } else if (active === 'SOCD' && socd) {
     ;[hero, cards] = socdTab()
+  } else if (active === 'Gamepad') {
+    ;[hero, cards] = gamepadTab()
   } else if (active === 'Lighting') {
     ;[hero, cards] = lighting()
   } else if (onAdv) {
@@ -469,6 +489,29 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
         onSelect={(i) => { setSocdMsg(undefined); setSocdSel(i) }}
         onPick={(p) => { setSocdMsg(undefined); setSocdPick(p) }}
         onChange={(nv) => onEdit('socd', nv)} />
+    )]
+  }
+
+  function gamepadTab(): [React.ReactNode, React.ReactNode] {
+    const more = extras('Gamepad')
+    const stick = (s: Setting) => /^gp_(angle|square|extreme)_/.test(s.key)
+    const enabled = get('gp_enabled')?.value
+    const on = enabled?.kind === 'toggle' ? enabled.on : true
+    const type = choiceLabel(get('gp_mode'))
+    const status = textOf(dev, 'gp_status')
+    const used = gpMap ? gpMap.values.filter((t) => t !== gpMap.none).length : 0
+    const curves = (edit ?? []).filter((s) => s.value.kind === 'gamepadCurve')
+    const h = (
+      <Hero brand={brand} label={on ? 'Gamepad' : 'Gamepad · off'} value={type ?? (on ? 'On' : 'Off')} size={type && type.length > 6 ? Math.max(30, Math.round(400 / type.length)) : 64}
+        sub={status ?? (gpMap ? `${used} key${used === 1 ? '' : 's'} mapped to the controller. Keys keep working as keys unless you change Key output.` : undefined)} />
+    )
+    return [h, (
+      <>
+        <GenericCard title="Controller" settings={more.filter((s) => !stick(s))} onEdit={onEdit} />
+        {gpMap && <GamepadMapCard v={gpMap} sel={gpSel} onChange={(nv) => onEdit('gp_map', nv)} className="col-span-2" />}
+        {curves.length > 0 && <CurveCard curves={curves} onEdit={onEdit} className="col-span-2" />}
+        <GenericCard title="Sticks" settings={more.filter(stick)} onEdit={onEdit} />
+      </>
     )]
   }
 
@@ -680,6 +723,7 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     setKSel(k !== undefined && locked(k) ? undefined : k)
   }
   const pickAdv = (next: Set<number>) => setAdvPick([...next].find((i) => i !== advSel))
+  const pickGp = (next: Set<number>) => setGpPick([...next].find((i) => i !== gpSel))
   const viewSwitch = km && adv && (
     <Segmented label="Keys view" className="[&_button]:!px-3.5 [&_button]:!py-1.5 [&_button]:!text-[11px]" value={keysView}
       options={[['Remap', 'remap'], ['Mod-Tap · Toggle · DKS', 'advanced']] as const} onChange={setKeysView} />
@@ -690,8 +734,8 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
         <div className="relative w-full" style={{ maxWidth: kbMax }}>
           <div className="pointer-events-none absolute -inset-x-20 -top-10 h-[120%] rounded-full bg-[radial-gradient(ellipse_at_center,rgb(230_232_236/0.08),transparent_65%)]" />
           {boardKeys ? (
-            <KeyboardView keys={boardKeys} looks={looks} selected={onKeys ? new Set(keySel === undefined ? [] : [keySel]) : onAdv ? new Set(advSel === undefined ? [] : [advSel]) : onSocd ? socdBoardSel : interactive ? sel : new Set()}
-              onSelect={onKeys ? pickKey : onAdv ? pickAdv : onSocd ? socdClick : setSel} interactive={interactive} knob={dev.driver.knob} maxWidth={kbMax} />
+            <KeyboardView keys={boardKeys} looks={looks} selected={onKeys ? new Set(keySel === undefined ? [] : [keySel]) : onAdv ? new Set(advSel === undefined ? [] : [advSel]) : onGamepad ? new Set(gpSel === undefined ? [] : [gpSel]) : onSocd ? socdBoardSel : interactive ? sel : new Set()}
+              onSelect={onKeys ? pickKey : onAdv ? pickAdv : onGamepad ? pickGp : onSocd ? socdClick : setSel} interactive={interactive} knob={dev.driver.knob} maxWidth={kbMax} />
           ) : (
             <div className="grid h-64 place-items-center"><KeyboardIcon className="size-40 text-white/10" strokeWidth={0.6} /></div>
           )}
@@ -723,6 +767,15 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
                   : 'click a key to give it an advanced function · colour = Mod-Tap / Toggle / DKS'}
               </span>
               {viewSwitch}
+            </div>
+          ) : onGamepad ? (
+            <div className="mt-3 flex h-9 items-center justify-between gap-4">
+              <span className="text-[12px] text-[var(--text-3)]">
+                {gpSel !== undefined
+                  ? <><span className="display mr-1.5 text-[13px] font-semibold text-[var(--text)]">{gpMap!.keys[gpSel]?.label || 'Key'}</span>selected · pick what it drives below</>
+                  : 'click a key to map it to the controller · coloured = mapped (sticks blue / purple, triggers orange, D-pad cyan, buttons green)'}
+              </span>
+              {gpSel !== undefined && <button type="button" className="chip display !text-[11px] font-semibold" onClick={() => setGpPick(undefined)}>Done</button>}
             </div>
           ) : onSocd ? (
             <div className="mt-3 flex h-9 items-center justify-between gap-4">

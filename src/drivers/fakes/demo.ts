@@ -7,6 +7,7 @@ import { FakeLogitech } from './fake-logitech'
 import { FakeRazer } from './fake-razer'
 import { FakeLofree } from './fake-lofree'
 import { FakeDareu } from './fake-dareu'
+import { FakeAtkKb } from './fake-atk-kb'
 
 let devices: HIDDevice[] | undefined
 
@@ -20,6 +21,7 @@ export function demoDevices(): HIDDevice[] {
     new FakeRazer().asHid(),
     new FakeLofree().asDevice(),
     new FakeDareu({ stream: true }).asDevice(),
+    new FakeAtkKb().asDevice(),
   ]
   return devices
 }

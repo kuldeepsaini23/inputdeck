@@ -91,7 +91,41 @@ export type Value =
       macros: MacroStep[][];
     }
   | Socd
-  | AdvancedKeys;
+  | AdvancedKeys
+  | PerKeyChoice
+  | GamepadCurve;
+
+/**
+ * Every key picks one value from a fixed list (e.g. which gamepad button or stick direction a key
+ * drives). write() gets the whole value; drivers write only the keys that changed and read them back.
+ */
+export interface PerKeyChoice {
+  kind: 'perKeyChoice';
+  keys: KeyCap[];
+  /** [label, value]; `none` is the "nothing" entry */
+  options: [label: string, value: number][];
+  /** the value meaning "not mapped" (shown plain on the board) */
+  none: number;
+  /** per key (same order as keys) */
+  values: number[];
+}
+
+/**
+ * An analog response curve of a Hall-effect key used as a gamepad stick / trigger: how far the key
+ * is pressed (x, mm) -> output (y, 0..255). Exactly `points.length` control points, x never decreasing.
+ * The first point's x works as the start dead zone.
+ */
+export interface GamepadCurve {
+  kind: 'gamepadCurve';
+  points: { x: number; y: number }[];
+  /** full key travel the x axis covers (mm) */
+  maxX: number;
+  /** x resolution (mm) */
+  stepX: number;
+  maxY: number;
+  /** named presets with the same number of points */
+  presets?: { name: string; points: { x: number; y: number }[] }[];
+}
 
 /**
  * Advanced key functions of analog (magnetic / Hall-effect) keyboards. Generic: any brand with

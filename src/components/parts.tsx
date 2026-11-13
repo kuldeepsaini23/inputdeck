@@ -65,8 +65,13 @@ export function Pulse({ rate, width = 150 }: { rate: number; width?: number }) {
 const short = (opts: [string, number][]) => opts.length <= 7 && opts.every(([l]) => l.length <= 8)
 
 /** Renders any driver setting with a fitting control. Used where a screen has no custom card. */
-export function SettingControl({ s, onEdit }: { s: Setting; onEdit: Edit }) {
+export function SettingControl({ s, onEdit: edit }: { s: Setting; onEdit: Edit }) {
   const v = s.value
+  // settings that restart the device etc. ask first
+  const onEdit: Edit = (k, nv) => {
+    if (s.confirm && !window.confirm(s.confirm)) return
+    edit(k, nv)
+  }
   switch (v.kind) {
     case 'toggle':
       return <Row label={s.label} hint={s.hint}><Toggle label={s.label} checked={v.on} onChange={(on) => onEdit(s.key, { ...v, on })} /></Row>

@@ -260,6 +260,8 @@ export interface Setting {
   value: Value;
   /** optional one-line help shown next to the control */
   hint?: string;
+  /** ask the user before writing (e.g. the device restarts) */
+  confirm?: string;
 }
 
 export type DeviceKind = 'mouse' | 'keyboard';

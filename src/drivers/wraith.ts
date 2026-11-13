@@ -1419,7 +1419,8 @@ class Wraith implements Driver {
 
     // --- switches (skip if the board uses the high-precision travel table)
     const status = await this.readStatus();
-    const precise = (status?.[5 + 13] ?? 0) !== 0;
+    // official isHighPrecision / isTravelPrecision are bits 0x01 / 0x80; other bits (e.g. 0x04 gamepad) don't change the travel table
+    const precise = ((status?.[5 + 13] ?? 0) & 0x81) !== 0;
     this.trig = undefined;
     this.keyTrigs = undefined;
     if (!precise) {
@@ -1532,6 +1533,7 @@ class Wraith implements Driver {
         group: 'Settings',
         value: { kind: 'choice', options, current },
         hint: 'The keyboard restarts and reconnects',
+        confirm: 'The keyboard will restart and reconnect (you may need to press Connect and pick it again). Continue?',
       });
     }
     return out;

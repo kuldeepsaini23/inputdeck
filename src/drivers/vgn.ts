@@ -343,6 +343,7 @@ export class VgnDriver implements Driver {
       group: G,
       value: { kind: 'choice', options: modes, current: mode },
       hint: 'Changing it restarts the keyboard; reconnect it afterwards',
+      confirm: 'The keyboard will restart. You may need to unplug it, plug it back in and press Connect again. Continue?',
     });
     const flag = (key: keyof typeof GP_FLAG, label: string, hint?: string): Setting => ({
       key: `gp.${key}`,
@@ -354,7 +355,7 @@ export class VgnDriver implements Driver {
     out.push(flag('keyboard', 'Keyboard keys still type', 'Keys without a gamepad mapping keep working as a keyboard'));
     out.push(flag('override', 'Gamepad keys only', 'Keys mapped to the gamepad stop sending their keyboard key'));
     out.push(flag('angleAdj', 'Angle adjust'));
-    out.push({ key: 'gp.angle', label: 'Diagonal angle', group: G, value: { kind: 'number', min: 0, max: ANGLE_MAX, current: Math.min(gp[GP.angle], ANGLE_MAX), unit: 'Â°' } });
+    out.push({ key: 'gp.angle', label: 'Diagonal angle', group: G, value: { kind: 'number', min: 0, max: ANGLE_MAX, current: Math.min(gp[GP.angle], ANGLE_MAX), unit: '°' } });
     out.push(flag('square', 'Square gate'));
     out.push(flag('extreme', 'Extreme priority', 'The stronger of two opposite directions wins'));
 

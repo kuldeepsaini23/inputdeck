@@ -1,4 +1,5 @@
-// Wraith W75 V2 HE (magnetic / Hall-effect keyboard), VID 2E3C PID C365.
+// Wraith W75 V2 HE (magnetic / Hall-effect keyboard), VID 2E3C PID C365 (C366 / C367 / C368 in
+// gamepad mode: the PID is the only way to tell the mode, there's no read command for it).
 // Port of the desktop app's hardware-verified drivers/wraith.rs to WebHID.
 //
 // White-label "Online Keyboard Driver" protocol (wraith.software, also AULA, Machenike, ...).
@@ -9,16 +10,24 @@
 // ~280 boards share this VID/PID; the product field of command 0x0D tells them apart, so
 // writable settings are only exposed for known product strings.
 //
-// NEVER send: 14 00 00 00 01 01 (factory reset), 21 ..18 06 (reset triggers),
-// 21 ..18 07 / other 18 ops (calibration), 26 xx (deadband - read is also reset), 25/19/22
-// writes, 24 writes other than the exact SOCD frames below, or anything firmware-related.
+// NEVER send: 14 00 00 00 01 01 (factory reset) or any 14 frame except the exact gamepad-mode
+// frame 14 03 00 00 01 <0|1|2>, 21 ..18 06 (reset triggers), 21 ..18 07 / other 21 ..18 ops
+// (calibration), 26 xx (deadband - read is also reset), 25/19/22 writes, 24 writes other than the
+// exact SOCD frames below, 18 frames other than the keymap reads (18 80|82) and exact-length keymap
+// table pages (18 00|02 00 pg len), or anything firmware-related.
 // `allowed()` enforces an allowlist on every packet.
 
-import type { Driver, DriverFactory, KeyCap, Setting, Socd, Value } from './types';
+import type { Driver, DriverFactory, ExtraCategory, ExtraKeycode, KeyCap, Setting, Socd, Value } from './types';
 import { sleep } from './types';
 
 const VID = 0x2e3c;
 const PID = 0xc365;
+/** PIDs the board enumerates with after a gamepad-mode switch (14 03): Xbox (C366), Classic / DirectInput (C367). */
+export const PID_XBOX = 0xc366;
+export const PID_CLASSIC = 0xc367;
+/** listed by the vendor next to C366/C367 for every gamepad-capable board; its meaning isn't known */
+export const PID_GAMEPAD_OTHER = 0xc368;
+const PIDS = [PID, PID_XBOX, PID_CLASSIC, PID_GAMEPAD_OTHER];
 const USAGE_PAGE = 0xff1b;
 const USAGE = 0x91;
 const REPORT_ID = 1;
@@ -126,6 +135,13 @@ export const COLOR_TABLE = 132 * 3;
 /** Colour table page size (bytes) and page count (7 x 54 + 18 = 396). */
 export const COLOR_PAGE = 54;
 export const COLOR_PAGES = Math.ceil(COLOR_TABLE / COLOR_PAGE);
+/** Keymap table: 132 key slots x [code1, hid, code3, code4], sent in 10 pages of 56 bytes (last 24). */
+export const KEYMAP_SLOTS = 132;
+export const KEYMAP_TABLE = KEYMAP_SLOTS * 4;
+export const KEYMAP_PAGE = 56;
+export const KEYMAP_PAGES = Math.ceil(KEYMAP_TABLE / KEYMAP_PAGE);
+/** The Fn key's slot (its entry is [01 00 00 00]; never remapped) */
+export const FN_KEY = 121;
 /** Light mode that shows the per-key table. */
 const MODE_CUSTOM = 10;
 
@@ -147,6 +163,10 @@ export const wraithTiming = {
   settle: 50,
   /** settle before reading back the polling rate */
   poll: 100,
+  /** wait for all pages of a keymap layer */
+  keymap: 800,
+  /** after a gamepad-mode switch the board restarts; reads fail with a clear message this long */
+  restart: 15000,
 };
 
 export interface Light {
@@ -246,6 +266,25 @@ export function allowed(p: ArrayLike<number>): boolean {
       }
       return false;
     }
+    // keymap: read a layer (18 80 base | 18 82 Fn); write one exact-length page of the 132 x 4 table
+    // (18 00|02 00 pg len <entries>), every entry's code1 one the vendor uses (0x00..0x19)
+    case 0x18: {
+      const sub = at(1);
+      if (sub === 0x80 || sub === 0x82) return tailZero(2);
+      if (sub === 0x00 || sub === 0x02) {
+        const pg = at(3) ?? 0xff;
+        if (at(2) !== 0 || pg >= KEYMAP_PAGES) return false;
+        const want = pg + 1 === KEYMAP_PAGES ? KEYMAP_TABLE - pg * KEYMAP_PAGE : KEYMAP_PAGE;
+        if (at(4) !== want || p.length < 5 + want) return false;
+        for (let b = 5; b < 5 + want; b += 4) if (p[b] > 0x19) return false;
+        return tailZero(5 + want);
+      }
+      return false;
+    }
+    // gamepad mode (restarts the board): exactly 14 03 00 00 01 <0 off | 1 Xbox | 2 Classic>.
+    // Every other 14 frame (factory reset 14 00 .., sleep timer, performance flags) is refused.
+    case 0x14:
+      return at(1) === 0x03 && at(2) === 0 && at(3) === 0 && at(4) === 1 && (at(5) === 0 || at(5) === 1 || at(5) === 2) && tailZero(6);
     default:
       return false;
   }
@@ -606,6 +645,252 @@ export function planSocdPairs(v: Socd, foreign: SocdPair[]): SocdPair[] {
 
 const pairsKey = (ps: SocdPair[]) => ps.map((s) => `${s.mode}:${s.hid1}:${s.hid2}`).join(',');
 
+// --- keymap
+//
+// Entry encodings (official fixedkeys.json, hex strings; setKeyValue / the 18 80 reply parser):
+//   00 00 00 00   the key's default (base layer: its own key; Fn layer: the built-in Fn function)
+//   00 hid 00 00  plain HID keyboard usage (modifiers E0..E7 included)
+//   07 id 00 00   media / consumer key (ids below)
+//   13 mod key 00 shortcut (modifier + key), e.g. Copy = 13 E0 06 00
+//   18 n 00 00    gamepad, Classic / DirectInput mode (C367); 19 n 00 00 Xbox mode (C366)
+// Everything else (01 Fn, 02..06 lighting, 0B/11 lock keys, 10 macro, 12 mouse, 17 DKS/MT/TGL, ...)
+// is shown by name and written back byte for byte - never re-encoded.
+
+/** The UI codes this driver uses beyond the QMK numbering. */
+export const WR_GP_CLASSIC = 0x7e00;
+export const WR_GP_XBOX = 0x7e80;
+/** an all-zero entry ("default"), mainly for the Fn layer */
+export const WR_DEFAULT = 0x7eff;
+/** entries we can't re-encode: WR_OPAQUE + layer * 132 + slot (only valid at that very slot) */
+export const WR_OPAQUE = 0x7c00;
+
+/** Gamepad keys, from the official gamePadKey.js: [n, id, legend, description]. */
+export const GAMEPAD_CLASSIC: [number, string, string, string][] = [
+  [0x00, 'X_LEFT', 'X-', 'X axis left'], [0x01, 'X_RIGHT', 'X+', 'X axis right'],
+  [0x02, 'Y_UP', 'Y-', 'Y axis up'], [0x03, 'Y_DOWN', 'Y+', 'Y axis down'],
+  [0x04, 'Z_FWD', 'Z+', 'Z axis forward'], [0x05, 'Z_BACK', 'Z-', 'Z axis backward'],
+  [0x06, 'RZ_FWD', 'Rz+', 'Z rotation forward'], [0x07, 'RZ_BACK', 'Rz-', 'Z rotation backward'],
+  [0x08, 'RX_LEFT', 'Rx-', 'X rotation left'], [0x09, 'RX_RIGHT', 'Rx+', 'X rotation right'],
+  [0x0a, 'RY_UP', 'Ry-', 'Y rotation up'], [0x0b, 'RY_DOWN', 'Ry+', 'Y rotation down'],
+  [0x0c, 'THROTTLE', 'Thr', 'Throttle'], [0x0d, 'ELEVATOR', 'Elev', 'Elevator'],
+  [0x0e, 'ACCEL', 'Accel', 'Accelerator'], [0x0f, 'RUDDER', 'Rudd', 'Rudder'],
+  [0x10, 'TRIGGER', 'Trig', 'Trigger button'],
+  ...Array.from({ length: 12 }, (_, i): [number, string, string, string] => [0x11 + i, `BTN${i + 1}`, `B${i + 1}`, `Button ${i + 1}`]),
+  [0x1d, 'HAT_UP', 'Hat ↑', 'Hat (POV) up'], [0x1e, 'HAT_DOWN', 'Hat ↓', 'Hat (POV) down'],
+  [0x1f, 'HAT_LEFT', 'Hat ←', 'Hat (POV) left'], [0x20, 'HAT_RIGHT', 'Hat →', 'Hat (POV) right'],
+];
+export const GAMEPAD_XBOX: [number, string, string, string][] = [
+  [0x00, 'LS_UP', 'LS ↑', 'Left stick up'], [0x01, 'LS_DOWN', 'LS ↓', 'Left stick down'],
+  [0x02, 'LS_LEFT', 'LS ←', 'Left stick left'], [0x03, 'LS_RIGHT', 'LS →', 'Left stick right'],
+  [0x04, 'RS_UP', 'RS ↑', 'Right stick up'], [0x05, 'RS_DOWN', 'RS ↓', 'Right stick down'],
+  [0x06, 'RS_LEFT', 'RS ←', 'Right stick left'], [0x07, 'RS_RIGHT', 'RS →', 'Right stick right'],
+  [0x08, 'LT', 'LT', 'Left trigger'], [0x09, 'RT', 'RT', 'Right trigger'],
+  [0x0a, 'A', 'A', 'A button'], [0x0b, 'B', 'B', 'B button'], [0x0c, 'X', 'X', 'X button'], [0x0d, 'Y', 'Y', 'Y button'],
+  [0x0e, 'START', 'Start', 'Start'], [0x0f, 'SELECT', 'Back', 'Back / Select'],
+  [0x10, 'MENU', 'Menu', 'Menu button (vendor name; probably Guide)'],
+  [0x11, 'DPAD_UP', 'D ↑', 'D-pad up'], [0x12, 'DPAD_DOWN', 'D ↓', 'D-pad down'],
+  [0x13, 'DPAD_LEFT', 'D ←', 'D-pad left'], [0x14, 'DPAD_RIGHT', 'D →', 'D-pad right'],
+  [0x15, 'L3', 'L3', 'Left stick press'], [0x16, 'R3', 'R3', 'Right stick press'],
+  [0x17, 'LB', 'LB', 'Left bumper'], [0x18, 'RB', 'RB', 'Right bumper'],
+];
+const GP_CLASSIC_IDS = new Set(GAMEPAD_CLASSIC.map(([n]) => n));
+const GP_XBOX_IDS = new Set(GAMEPAD_XBOX.map(([n]) => n));
+
+/**
+ * Media keys (code1 07): vendor id -> QMK keycode. Browser back / forward (24 / 25) are left out:
+ * the vendor's own names and labels for them disagree, so they're kept as they are instead.
+ */
+const MEDIA: [id: number, qmk: number][] = [
+  [0x10, 0xa9], [0x11, 0xaa], [0x12, 0xa8], [0x13, 0xae], [0x14, 0xab], [0x15, 0xac], [0x16, 0xad],
+  [0x20, 0xb1], [0x21, 0xb4], [0x22, 0xba], [0x23, 0xb5], [0x26, 0xb8], [0x27, 0xb9],
+  [0x30, 0xaf], [0x32, 0xb2], [0x34, 0xb3],
+];
+const QMK_OF_MEDIA = new Map(MEDIA);
+const MEDIA_OF_QMK = new Map(MEDIA.map(([id, q]) => [q, id]));
+/** QMK picker categories this board can send */
+export const WRAITH_KEY_CATS = ['basic', 'symbols', 'mods', 'nav', 'fkeys', 'numpad', 'media'];
+
+/** Plain HID keyboard usages we write as 00 hid 00 00 (QMK's media range A5..DF is something else). */
+const isPlainHid = (h: number) => (h >= 0x04 && h <= 0xa4) || (h >= 0xe0 && h <= 0xe7);
+/** QMK mod bits (Ctrl 1, Shift 2, Alt 4, Gui 8, right hand 0x10) of one modifier key E0..E7 */
+const modBits = (hid: number) => (1 << (hid & 3)) | (hid >= 0xe4 ? 0x10 : 0);
+const MOD_OF_BITS = new Map(Array.from({ length: 8 }, (_, i) => [modBits(0xe0 + i), 0xe0 + i] as const));
+
+export type Entry = [number, number, number, number];
+export const entryAt = (t: Uint8Array, slot: number): Entry => [t[slot * 4], t[slot * 4 + 1], t[slot * 4 + 2], t[slot * 4 + 3]];
+
+/** UI code of one stored entry on `layer` (0 base, 1 Fn) at device slot `slot`. */
+export function codeOfEntry(e: Entry, layer: number, slot: number): number {
+  const [c1, h, c3, c4] = e;
+  if (c1 === 0 && h === 0 && c3 === 0 && c4 === 0) return layer === 0 ? HID_OF_INDEX.get(slot) ?? WR_DEFAULT : WR_DEFAULT;
+  if (c3 === 0 && c4 === 0) {
+    if (c1 === 0 && isPlainHid(h)) return h;
+    if (c1 === 0x07 && QMK_OF_MEDIA.has(h)) return QMK_OF_MEDIA.get(h)!;
+    if (c1 === 0x18 && GP_CLASSIC_IDS.has(h)) return WR_GP_CLASSIC + h;
+    if (c1 === 0x19 && GP_XBOX_IDS.has(h)) return WR_GP_XBOX + h;
+  }
+  if (c1 === 0x13 && h >= 0xe0 && h <= 0xe7 && isPlainHid(c3) && c3 < 0xe0 && c4 === 0) return (modBits(h) << 8) | c3;
+  return WR_OPAQUE + layer * KEYMAP_SLOTS + slot;
+}
+
+/** Entry for UI code `code` on `layer` at slot `slot`; undefined when the board can't store it. */
+export function entryOfCode(code: number, layer: number, slot: number): Entry | undefined {
+  if (code === WR_DEFAULT) return [0, 0, 0, 0];
+  // the base layer's default is the key itself: store it the way the vendor does (all zero)
+  if (layer === 0 && code === HID_OF_INDEX.get(slot)) return [0, 0, 0, 0];
+  if (isPlainHid(code)) return [0, code, 0, 0];
+  const media = MEDIA_OF_QMK.get(code);
+  if (media !== undefined) return [0x07, media, 0, 0];
+  if (code >= WR_GP_CLASSIC && code < WR_GP_XBOX && GP_CLASSIC_IDS.has(code - WR_GP_CLASSIC)) return [0x18, code - WR_GP_CLASSIC, 0, 0];
+  if (code >= WR_GP_XBOX && code < WR_DEFAULT && GP_XBOX_IDS.has(code - WR_GP_XBOX)) return [0x19, code - WR_GP_XBOX, 0, 0];
+  if (code >= 0x0100 && code <= 0x1fff) {
+    const mod = MOD_OF_BITS.get((code >> 8) & 0x1f);
+    const key = code & 0xff;
+    if (mod !== undefined && isPlainHid(key) && key < 0xe0) return [0x13, mod, key, 0];
+  }
+  return undefined;
+}
+
+/** Name of an entry we keep as it is. */
+function opaqueName(e: Entry): [label: string, name: string] {
+  const [c1, h, c3] = e;
+  const kept = `(${e.map(hex2).join(' ')}; kept as it is - change it in the official driver)`;
+  switch (c1) {
+    case 0x01:
+      return ['Fn', 'Fn key'];
+    case 0x10:
+      return [`M${(c3 & 0x1f) + 1}`, `Macro ${(c3 & 0x1f) + 1} ${kept}`];
+    case 0x17:
+      return ['Adv', `Advanced key: DKS / Mod-Tap / Toggle #${h} ${kept}`];
+    case 0x12:
+      return ['Mouse', `Mouse button / wheel ${kept}`];
+    case 0x13:
+      return ['Combo', `Shortcut ${kept}`];
+    case 0x02:
+    case 0x03:
+    case 0x04:
+    case 0x05:
+    case 0x06:
+      return ['Light', `Lighting control ${kept}`];
+    case 0x0b:
+    case 0x11:
+      return ['Lock', `Lock key ${kept}`];
+    case 0x07:
+      return ['Media', `Media key ${kept}`];
+    default:
+      return [`${hex2(c1)}:${hex2(h)}`, `Special key ${kept}`];
+  }
+}
+
+export type GamepadMode = 'off' | 'xbox' | 'classic' | 'unknown';
+/** The gamepad mode a board is in, from the USB PID it enumerated with (there's no read command). */
+export function gamepadModeOfPid(pid: number): GamepadMode {
+  return pid === PID_XBOX ? 'xbox' : pid === PID_CLASSIC ? 'classic' : pid === PID_GAMEPAD_OTHER ? 'unknown' : 'off';
+}
+/** `14 03 00 00 01 <mode>`: 0 off, 1 Xbox, 2 Classic. The keyboard restarts with a new PID. */
+export function setGamepadModePkt(mode: number): number[] {
+  if (mode !== 0 && mode !== 1 && mode !== 2) throw new Error(`unknown gamepad mode ${mode}`);
+  return [0x14, 0x03, 0, 0, 0x01, mode];
+}
+export const GAMEPAD_MODES: [string, number][] = [['Off', 0], ['Xbox', 1], ['Classic', 2]];
+const MODE_OF_GAMEPAD: Record<GamepadMode, number> = { off: 0, xbox: 1, classic: 2, unknown: -1 };
+
+export const readKeymapPkt = (layer: number) => [0x18, layer ? 0x82 : 0x80];
+
+/** The pages that write a whole keymap layer (0 base, 1 Fn), exactly as the official setKeyValue / setFnKeyValue. */
+export function setKeymapPkts(layer: number, table: Uint8Array): number[][] {
+  if (table.length !== KEYMAP_TABLE) throw new Error(`keymap table must be ${KEYMAP_TABLE} bytes`);
+  const out: number[][] = [];
+  for (let pg = 0; pg < KEYMAP_PAGES; pg++) {
+    const chunk = table.subarray(pg * KEYMAP_PAGE, Math.min(KEYMAP_TABLE, (pg + 1) * KEYMAP_PAGE));
+    out.push([0x18, layer ? 0x02 : 0x00, (pg >> 8) & 0xff, pg & 0xff, chunk.length, ...chunk]);
+  }
+  return out;
+}
+
+/** One `18 80|82 pgHi pgLo len <entries>` reply page into `table`. Returns the page number. */
+export function parseKeymapPage(d: ArrayLike<number>, table: Uint8Array): number | undefined {
+  if (d.length < 5) return undefined;
+  const pg = (d[2] << 8) | d[3];
+  const len = d[4];
+  if (pg >= KEYMAP_PAGES || d.length < 5 + len) return undefined;
+  const start = pg * KEYMAP_PAGE;
+  const end = Math.min(start + len, KEYMAP_TABLE);
+  for (let i = start; i < end; i++) table[i] = d[5 + i - start];
+  return pg;
+}
+
+type Keymap = Extract<Value, { kind: 'keymap' }>;
+const gpCode = ([n, id, label, name]: [number, string, string, string], base: number, pre: string, what: string): ExtraKeycode => ({
+  code: base + n,
+  id: `${pre}_${id}`,
+  label,
+  name: `${what}: ${name}`,
+});
+
+/** Layout positions that can't be remapped on each layer: Fn, and any slot holding the Fn function. */
+function lockedPositions(tables: Uint8Array[]): number[][] {
+  return tables.map((t) => W75_CAPS.map((c, i) => (c.index === FN_KEY || t[c.index * 4] === 0x01 ? i : -1)).filter((i) => i >= 0));
+}
+
+/** The generic keymap value for both raw layer tables. Gamepad keys of the board's current mode are offered. */
+export function keymapValue(tables: Uint8Array[], mode: GamepadMode): Keymap {
+  const opaque: ExtraKeycode[] = [];
+  const layers = tables.map((t, layer) =>
+    W75_CAPS.map(({ index: slot }) => {
+      const e = entryAt(t, slot);
+      const code = codeOfEntry(e, layer, slot);
+      if (code >= WR_OPAQUE && code < WR_OPAQUE + 2 * KEYMAP_SLOTS) {
+        const [label, name] = opaqueName(e);
+        opaque.push({ code, id: `WR_RAW_${layer}_${slot}`, label, name });
+      }
+      return code;
+    }),
+  );
+  const classic = GAMEPAD_CLASSIC.map((g) => gpCode(g, WR_GP_CLASSIC, 'GP_CLASSIC', 'Gamepad (Classic)'));
+  const xbox = GAMEPAD_XBOX.map((g) => gpCode(g, WR_GP_XBOX, 'GP_XBOX', 'Gamepad (Xbox)'));
+  const extra: ExtraCategory[] = [
+    { id: 'default', name: 'Default', codes: [{ code: WR_DEFAULT, id: 'WR_DEFAULT', label: 'Default', name: "The keyboard's default (on the Fn layer: its built-in Fn function)" }] },
+  ];
+  // only the keys of the mode the board is in are offered; the others are still named when stored
+  if (mode === 'xbox') extra.push({ id: 'gamepad', name: 'Gamepad', codes: xbox }, { id: 'gamepad-other', name: 'Gamepad (Classic)', codes: classic, hidden: true });
+  else if (mode === 'classic') extra.push({ id: 'gamepad', name: 'Gamepad', codes: classic }, { id: 'gamepad-other', name: 'Gamepad (Xbox)', codes: xbox, hidden: true });
+  else extra.push({ id: 'gamepad-names', name: 'Gamepad', codes: [...xbox, ...classic], hidden: true });
+  if (opaque.length) extra.push({ id: 'kept', name: 'Kept as is', codes: opaque, hidden: true });
+  return { kind: 'keymap', keys: W75_CAPS, layers, codes: 'qmk-v2', locked: lockedPositions(tables), extra, cats: WRAITH_KEY_CATS };
+}
+
+/**
+ * The new raw tables for a UI keymap: only keys whose code changed are re-encoded, every other
+ * entry (macros, advanced keys, knob slots, ...) is kept byte for byte. Throws on anything the
+ * board can't store, on locked keys, and on a layout mismatch. `changed`: [layer, layout position].
+ */
+export function planKeymap(tables: Uint8Array[], v: Keymap): { tables: Uint8Array[]; changed: [number, number][] } {
+  if (v.layers.length !== tables.length || v.layers.some((l) => l.length !== W75_CAPS.length)) {
+    throw new Error("key map doesn't match the keyboard - press Re-read");
+  }
+  const locked = lockedPositions(tables);
+  const out = tables.map((t) => new Uint8Array(t));
+  const changed: [number, number][] = [];
+  v.layers.forEach((l, layer) =>
+    l.forEach((code, i) => {
+      const slot = W75_CAPS[i].index;
+      if (code === codeOfEntry(entryAt(tables[layer], slot), layer, slot)) return;
+      const name = `${W75_CAPS[i].label}${layer ? ' (Fn layer)' : ''}`;
+      if (locked[layer].includes(i)) throw new Error(`${name} can't be changed on this keyboard`);
+      const e = entryOfCode(code, layer, slot);
+      if (!e) {
+        if (code === 0) throw new Error(`${name}: keys can't be disabled on this keyboard`);
+        if (code === 1) throw new Error(`${name}: keys can't be transparent on this keyboard - pick Default`);
+        throw new Error(`${name}: this keyboard can't send keycode 0x${code.toString(16).padStart(4, '0')}`);
+      }
+      out[layer].set(e, slot * 4);
+      changed.push([layer, i]);
+    }),
+  );
+  return { tables: out, changed };
+}
+
 // ---------------------------------------------------------------------------------------------
 // transport
 
@@ -635,7 +920,8 @@ class Link {
     return r;
   }
 
-  private frame(p: number[]): Uint8Array<ArrayBuffer> {
+  /** Check `p` against the allowlist and pad it to a full report. */
+  frame(p: number[]): Uint8Array<ArrayBuffer> {
     if (!allowed(p)) throw new Error(`refusing to send ${hexs(p.slice(0, 8))}`);
     const buf = new Uint8Array(PAYLOAD_LEN);
     buf.set(p);
@@ -712,11 +998,20 @@ class Wraith implements Driver {
   private colors: { slot: number; table: Uint8Array } | undefined;
   /** last read SOCD state (pairs we can't show are kept as `foreign`) */
   private socd: { on: boolean; pairs: SocdPair[]; foreign: SocdPair[] } | undefined;
+  /** last read raw keymap tables [base, Fn] (528 bytes each) */
+  private keymap: Uint8Array[] | undefined;
+  /** gamepad mode, from the PID the board enumerated with */
+  readonly gamepad: GamepadMode;
+  /** status flag F[13] bit 0x04 (official isGamePad): the firmware has a gamepad mode */
+  private gamepadCapable = false;
+  /** set after a gamepad-mode switch: the board restarts and comes back as a new device */
+  private restartingUntil: number | undefined;
 
   constructor(private readonly link: Link) {
     const d = link.dev;
     this.id = `${d.vendorId.toString(16).padStart(4, '0')}:${d.productId.toString(16).padStart(4, '0')}`;
     this.product = d.productName || 'Wraith keyboard';
+    this.gamepad = gamepadModeOfPid(d.productId);
   }
 
   /** the W75's rotary knob (index 15, not a switch) */
@@ -742,11 +1037,29 @@ class Wraith implements Driver {
   }
 
   read(): Promise<Setting[]> {
-    return this.link.lock(() => this.readInner());
+    return this.link.lock(() => {
+      this.checkRestarting();
+      return this.readInner();
+    });
   }
 
   write(s: Setting): Promise<void> {
-    return this.link.lock(() => this.writeInner(s));
+    return this.link.lock(() => {
+      this.checkRestarting();
+      return this.writeInner(s);
+    });
+  }
+
+  /** true while the board restarts after a gamepad-mode switch (it comes back as a new device) */
+  get restarting(): boolean {
+    if (this.restartingUntil !== undefined && Date.now() >= this.restartingUntil) this.restartingUntil = undefined;
+    return this.restartingUntil !== undefined;
+  }
+
+  private checkRestarting() {
+    if (this.restarting) {
+      throw new Error("The keyboard is restarting in its new gamepad mode and reconnects by itself. If it doesn't show up again, press Connect and pick it.");
+    }
   }
 
   /**
@@ -882,7 +1195,74 @@ class Wraith implements Driver {
     return [...pages.get(0)!, ...pages.get(1)!];
   }
 
+  /** One raw keymap layer (0 base, 1 Fn): the board streams 10 pages for one request. */
+  private async readKeymapLayer(layer: number): Promise<Uint8Array> {
+    const p = readKeymapPkt(layer);
+    const table = new Uint8Array(KEYMAP_TABLE);
+    const seen = new Set<number>();
+    await this.link.listen(p, wraithTiming.keymap, (d) => {
+      if (d.length >= 5 && d[0] === 0x18 && d[1] === p[1]) {
+        const pg = parseKeymapPage(d, table);
+        if (pg !== undefined) seen.add(pg);
+      }
+      return seen.size >= KEYMAP_PAGES;
+    });
+    if (seen.size < KEYMAP_PAGES) throw new Error(`keymap ${layer ? 'Fn layer' : 'base layer'} incomplete (${seen.size} of ${KEYMAP_PAGES} pages)`);
+    return table;
+  }
+
   // --- low-level writes
+
+  /**
+   * Rewrite the layers whose keys changed (the whole 528-byte table, as the vendor does), then read
+   * them back. Entries we didn't change go back byte for byte.
+   */
+  private async writeKeymap(v: Keymap): Promise<void> {
+    const cur = this.keymap;
+    if (!cur) throw new Error('press Re-read first');
+    const { tables, changed } = planKeymap(cur, v);
+    if (!changed.length) return;
+    const layers = [...new Set(changed.map(([l]) => l))];
+    for (const layer of layers) {
+      for (const p of setKeymapPkts(layer, tables[layer])) {
+        await this.link.send(p);
+        await sleep(wraithTiming.page);
+      }
+    }
+    await sleep(wraithTiming.settle);
+    const got = cur.slice();
+    const bad: string[] = [];
+    for (const layer of layers) {
+      got[layer] = await this.readKeymapLayer(layer);
+      // every key on the board must read back as sent: changed ones took, the others weren't touched
+      W75_CAPS.forEach((c, i) => {
+        const want = entryAt(tables[layer], c.index);
+        const back = entryAt(got[layer], c.index);
+        if (want.some((b, j) => b !== back[j])) {
+          bad.push(`${c.label}${layer ? ' (Fn)' : ''} sent ${want.map(hex2).join(' ')}, reads back ${back.map(hex2).join(' ')}${changed.some(([l, p]) => l === layer && p === i) ? '' : ' (not changed)'}`);
+        }
+      });
+    }
+    this.keymap = got;
+    if (bad.length) throw new Error(`keyboard didn't take the key map change: ${bad.slice(0, 4).join('; ')}${bad.length > 4 ? ` (+${bad.length - 4} more)` : ''}`);
+  }
+
+  /**
+   * Gamepad mode: the board restarts at once and comes back with a new PID (C365 off, C366 Xbox,
+   * C367 Classic), so nothing is awaited or read back. Reads fail with a clear message meanwhile.
+   */
+  private async writeGamepadMode(mode: number): Promise<void> {
+    if (!this.gamepadCapable) throw new Error("this keyboard doesn't have a gamepad mode");
+    const pkt = setGamepadModePkt(mode);
+    if (mode === MODE_OF_GAMEPAD[this.gamepad]) return;
+    this.restartingUntil = Date.now() + wraithTiming.restart;
+    try {
+      await this.link.dev.sendReport(REPORT_ID, this.link.frame(pkt));
+    } catch (e) {
+      this.restartingUntil = undefined;
+      throw e;
+    }
+  }
 
   private async writeSocd(v: Socd): Promise<void> {
     const cur = this.socd;
@@ -1129,6 +1509,31 @@ class Wraith implements Driver {
       }
       out.push({ key: 'per_key_color', label: 'Per-key colours', group: 'Per-key', value: { kind: 'perKeyColor', keys: W75_CAPS, colors } });
     }
+
+    // --- key map (base + Fn layer)
+    this.keymap = undefined;
+    try {
+      const tables = [await this.readKeymapLayer(0), await this.readKeymapLayer(1)];
+      this.keymap = tables;
+      out.push({ key: 'keymap', label: 'Key map', group: 'Keys', value: keymapValue(tables, this.gamepad), hint: 'Layer 1 is what keys do while Fn is held.' });
+    } catch {
+      // no answer: leave the key map out
+    }
+
+    // --- gamepad mode (status F[13] bit 0x04, official isGamePad); the mode itself is the PID
+    this.gamepadCapable = ((status?.[5 + 13] ?? 0) & 0x04) !== 0;
+    if (this.gamepadCapable) {
+      const current = MODE_OF_GAMEPAD[this.gamepad];
+      const options: [string, number][] = GAMEPAD_MODES.map(([l, m]) => [l, m]);
+      if (current < 0) options.push([`Unknown (PID ${hex2(this.link.dev.productId >> 8)}${hex2(this.link.dev.productId & 0xff)})`, current]);
+      out.push({
+        key: 'gamepad_mode',
+        label: 'Gamepad mode',
+        group: 'Settings',
+        value: { kind: 'choice', options, current },
+        hint: 'The keyboard restarts and reconnects',
+      });
+    }
     return out;
   }
 
@@ -1197,6 +1602,10 @@ class Wraith implements Driver {
         return this.writeColors((v as Extract<Value, { kind: 'perKeyColor' }>).colors);
       case 'socd:socd':
         return this.writeSocd(v as Socd);
+      case 'keymap:keymap':
+        return this.writeKeymap(v as Keymap);
+      case 'gamepad_mode:choice':
+        return this.writeGamepadMode((v as Extract<Value, { kind: 'choice' }>).current);
       default:
         throw new Error(`${s.key} can't be changed`);
     }
@@ -1205,11 +1614,12 @@ class Wraith implements Driver {
 
 export const wraithFactory: DriverFactory = {
   name: 'Wraith',
-  filters: [{ vendorId: VID, productId: PID, usagePage: USAGE_PAGE }],
+  // C365 normal; C366 / C367 / C368 the same boards in gamepad mode (offered so they can be picked after a switch)
+  filters: PIDS.map((productId) => ({ vendorId: VID, productId, usagePage: USAGE_PAGE })),
   match(d: HIDDevice): boolean {
     return (
       d.vendorId === VID &&
-      d.productId === PID &&
+      PIDS.includes(d.productId) &&
       (d.collections ?? []).some((c) => c.usagePage === USAGE_PAGE && c.usage === USAGE)
     );
   },

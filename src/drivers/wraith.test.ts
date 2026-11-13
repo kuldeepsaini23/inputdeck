@@ -42,6 +42,25 @@ import {
 } from './wraith';
 import { SOCD_MAX, SOCD_UNAVAILABLE, W75_HID, parseSocdPage, parseSocdPower, planSocdPairs, readSocdPairsPkt, readSocdPowerPkt, setSocdPairsPkts, setSocdPowerPkt, socdValue } from './wraith';
 import type { Socd } from './types';
+import {
+  KEYMAP_PAGES,
+  KEYMAP_SLOTS,
+  KEYMAP_TABLE,
+  WRAITH_KEY_CATS,
+  WR_DEFAULT,
+  WR_GP_CLASSIC,
+  WR_GP_XBOX,
+  WR_OPAQUE,
+  codeOfEntry,
+  entryOfCode,
+  gamepadModeOfPid,
+  parseKeymapPage,
+  readKeymapPkt,
+  setGamepadModePkt,
+  setKeymapPkts,
+  type Entry,
+} from './wraith';
+import { categories, describe as describeKc, label, search } from '../lib/keycodes';
 
 const hex = (s: string) => s.split(/\s+/).filter(Boolean).map((b) => parseInt(b, 16));
 const pos = (key: number) => W75_CAPS.findIndex((k) => k.index === key);
@@ -52,7 +71,7 @@ afterAll(() => {
   Object.assign(wraithTiming, realTiming);
 });
 beforeAll(() => {
-  Object.assign(wraithTiming, { reply: 40, colors: 60, send: 0, page: 0, settle: 0, poll: 0 });
+  Object.assign(wraithTiming, { reply: 40, colors: 60, keymap: 60, send: 0, page: 0, settle: 0, poll: 0 });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -330,7 +349,7 @@ describe('per-key planning', () => {
 describe('driver', () => {
   it('match / filters', () => {
     const f = new FakeKeyboard();
-    expect(wraithFactory.filters).toEqual([{ vendorId: 0x2e3c, productId: 0xc365, usagePage: 0xff1b }]);
+    expect(wraithFactory.filters).toEqual([0xc365, 0xc366, 0xc367, 0xc368].map((productId) => ({ vendorId: 0x2e3c, productId, usagePage: 0xff1b })));
     expect(wraithFactory.match(f.asDevice())).toBe(true);
     f.collections = [{ usagePage: 0xff1b, usage: 0x92 }] as unknown as HIDCollectionInfo[];
     expect(wraithFactory.match(f.asDevice())).toBe(false);
@@ -373,7 +392,7 @@ describe('driver', () => {
       'Info/model', 'Info/product_id', 'Info/fw', 'Performance/polling',
       'Switches/actuation', 'Switches/rapid_trigger', 'Switches/rt_sens', 'Per-key/per_key_trigger',
       'Lighting/light_power', 'Lighting/light_mode', 'Lighting/light_bri', 'Lighting/light_speed',
-      'Lighting/light_color', 'Lighting/light_rainbow', 'Per-key/per_key_color',
+      'Lighting/light_color', 'Lighting/light_rainbow', 'Per-key/per_key_color', 'Keys/keymap',
     ]);
     expect(find(ss, 'model').value).toEqual({ kind: 'text', text: 'W75 V2 HE' });
     expect(find(ss, 'fw').value).toEqual({ kind: 'text', text: 'V3.13.03' });
@@ -400,7 +419,7 @@ describe('driver', () => {
     expect(pc.colors[pos(46)]).toBe(keyRgb(f.table, 46));
     expect(f.wrote([0x09, 0x81]).length).toBe(1); // slot 1 reported by 09 20
     // reads never write
-    expect(f.sent.every((p) => [0x0d, 0x01, 0x0a, 0x07, 0x09, 0x21].includes(p[0]))).toBe(true);
+    expect(f.sent.every((p) => [0x0d, 0x01, 0x0a, 0x07, 0x09, 0x21].includes(p[0]) || (p[0] === 0x18 && (p[1] === 0x80 || p[1] === 0x82)))).toBe(true);
     expect(f.wrote([0x07, 0, 0, 0, 0x0e]).length + f.wrote([0x21, 0, 0, 0, 0x00]).length).toBe(0);
   });
 
@@ -841,5 +860,333 @@ describe('SOCD', () => {
     f.sent = [];
     await expect(d.write(withValue(s, { ...(s.value as Socd), entries: [{ keys: [A, at('Fn')], mode: 0 }] }))).rejects.toThrow(/Fn/);
     expect(f.sent).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// key map + gamepad mode
+
+describe('keymap packets', () => {
+  it('read / write frames match the official setKeyValue / setFnKeyValue', () => {
+    expect(readKeymapPkt(0)).toEqual(hex('18 80'));
+    expect(readKeymapPkt(1)).toEqual(hex('18 82'));
+    expect(KEYMAP_PAGES).toBe(10);
+    const table = new Uint8Array(KEYMAP_TABLE).map((_, i) => (i % 4 === 0 ? i % 0x1a : i & 0xff));
+    for (const layer of [0, 1]) {
+      const pk = setKeymapPkts(layer, table);
+      expect(pk.length).toBe(10);
+      pk.forEach((p, pg) => {
+        const len = pg === 9 ? 0x18 : 0x38;
+        expect(p.slice(0, 5)).toEqual([0x18, layer ? 0x02 : 0x00, 0, pg, len]);
+        expect(p.slice(5)).toEqual(Array.from(table.subarray(pg * 56, pg * 56 + len)));
+        expect(allowed(p)).toBe(true);
+        expect(allowed([...p, ...new Array(63 - p.length).fill(0)])).toBe(true);
+      });
+      const back = new Uint8Array(KEYMAP_TABLE);
+      for (const p of pk) parseKeymapPage([0x18, layer ? 0x82 : 0x80, ...p.slice(2)], back);
+      expect(back).toEqual(table);
+    }
+    expect(() => setKeymapPkts(0, new Uint8Array(10))).toThrow();
+  });
+
+  it('allowlist takes only exact keymap frames', () => {
+    for (const ok of ['18 80', '18 82']) expect(allowed(hex(ok)), ok).toBe(true);
+    for (const bad of ['18 80 01', '18 81', '18 83', '18 01', '18 03', '18 04', '18 00', '18 02 00 00 38']) expect(allowed(hex(bad)), bad).toBe(false);
+    const pk = setKeymapPkts(0, new Uint8Array(KEYMAP_TABLE));
+    const mut = (p: number[], i: number, v: number) => p.map((b, j) => (j === i ? v : b));
+    expect(allowed(mut(pk[0], 1, 1))).toBe(false); // layer
+    expect(allowed(mut(pk[0], 2, 1))).toBe(false); // page hi
+    expect(allowed([...pk[9].slice(0, 3), 10, ...pk[9].slice(4)])).toBe(false); // page 10
+    expect(allowed(mut(pk[0], 4, 0x18))).toBe(false); // short length on a middle page
+    expect(allowed(mut(pk[9], 4, 0x38))).toBe(false); // long last page
+    expect(allowed([...pk[9], 1])).toBe(false); // trailing junk
+    expect(allowed(mut(pk[0], 5, 0x1a))).toBe(false); // code1 the vendor never uses
+    expect(allowed(mut(pk[0], 5, 0x19))).toBe(true);
+    expect(allowed(mut(pk[0], 6, 0xff))).toBe(true); // other bytes are data
+  });
+
+  it('gamepad mode frame is the only 14 frame', () => {
+    expect(setGamepadModePkt(0)).toEqual(hex('14 03 00 00 01 00'));
+    expect(setGamepadModePkt(1)).toEqual(hex('14 03 00 00 01 01'));
+    expect(setGamepadModePkt(2)).toEqual(hex('14 03 00 00 01 02'));
+    expect(() => setGamepadModePkt(3)).toThrow();
+    expect(() => setGamepadModePkt(-1)).toThrow();
+    for (const m of [0, 1, 2]) expect(allowed(setGamepadModePkt(m))).toBe(true);
+    for (const bad of [
+      '14 03 00 00 01 03', '14 03 00 00 01 FF', '14 00 00 00 01 01', '14 00 00 00 01 00', '14 01 00 00 01 01', '14 02',
+      '14 03 00 00 02 01', '14 03 01 00 01 01', '14 03 00 01 01 01', '14 03 00 00 01 01 01', '14 03 00 00 01', '14 03 00 00 00 01',
+    ]) {
+      expect(allowed(hex(bad)), bad).toBe(false);
+    }
+  });
+
+  it('PID -> gamepad mode', () => {
+    expect([0xc365, 0xc366, 0xc367, 0xc368].map(gamepadModeOfPid)).toEqual(['off', 'xbox', 'classic', 'unknown']);
+  });
+});
+
+describe('keymap codes', () => {
+  const A = 68; // device slot of A
+  it('decodes what we can encode, everything else is opaque', () => {
+    expect(codeOfEntry([0, 0, 0, 0], 0, A)).toBe(0x04); // default = the key itself
+    expect(codeOfEntry([0, 0, 0, 0], 1, A)).toBe(WR_DEFAULT);
+    expect(codeOfEntry([0, 0x05, 0, 0], 0, A)).toBe(0x05);
+    expect(codeOfEntry([0, 0xe1, 0, 0], 1, A)).toBe(0xe1);
+    expect(codeOfEntry([0x07, 0x10, 0, 0], 1, A)).toBe(0xa9); // Vol+
+    expect(codeOfEntry([0x07, 0x32, 0, 0], 1, A)).toBe(0xb2); // Calculator
+    expect(codeOfEntry([0x13, 0xe0, 0x06, 0], 0, A)).toBe(0x0106); // Copy = Ctrl+C
+    expect(codeOfEntry([0x13, 0xe5, 0x1e, 0], 0, A)).toBe(0x121e); // RShift+1
+    expect(codeOfEntry([0x18, 0x11, 0, 0], 0, A)).toBe(WR_GP_CLASSIC + 0x11);
+    expect(codeOfEntry([0x19, 0x0a, 0, 0], 0, A)).toBe(WR_GP_XBOX + 0x0a);
+    const opaque: Entry[] = [
+      [0x10, 0x04, 0x02, 0], [0x17, 0x03, 0, 0], [0x12, 0, 1, 0], [0x01, 0, 0, 0], [0x07, 0x24, 0, 0],
+      [0x19, 0x30, 0, 0], [0x18, 0x21, 0, 0], [0, 0x01, 0, 0], [0, 0x04, 1, 0], [0x13, 0xe0, 0x06, 0x07],
+    ];
+    for (const raw of opaque) expect(codeOfEntry(raw, 1, A), raw.join(' ')).toBe(WR_OPAQUE + KEYMAP_SLOTS + A);
+  });
+
+  it('encodes like the vendor', () => {
+    expect(entryOfCode(0x04, 0, A)).toEqual([0, 0, 0, 0]); // back to default
+    expect(entryOfCode(0x04, 1, A)).toEqual([0, 0x04, 0, 0]);
+    expect(entryOfCode(0x05, 0, A)).toEqual([0, 0x05, 0, 0]);
+    expect(entryOfCode(WR_DEFAULT, 1, A)).toEqual([0, 0, 0, 0]);
+    expect(entryOfCode(0xa8, 0, A)).toEqual([0x07, 0x12, 0, 0]); // Mute
+    expect(entryOfCode(0x0106, 0, A)).toEqual([0x13, 0xe0, 0x06, 0]);
+    expect(entryOfCode(0x021e, 0, A)).toEqual([0x13, 0xe1, 0x1e, 0]); // ! = Shift+1
+    expect(entryOfCode(WR_GP_XBOX + 0x18, 0, A)).toEqual([0x19, 0x18, 0, 0]);
+    expect(entryOfCode(WR_GP_CLASSIC + 0x20, 0, A)).toEqual([0x18, 0x20, 0, 0]);
+    // can't: none, transparent, mouse, layers, multi-mod combos, unknown gamepad ids, opaque codes, eject
+    for (const c of [0x00, 0x01, 0xd1, 0x5221, 0x0306, WR_GP_XBOX + 0x19, WR_GP_CLASSIC + 0x21, WR_OPAQUE + A, 0xb0]) {
+      expect(entryOfCode(c, 0, A), c.toString(16)).toBeUndefined();
+    }
+  });
+});
+
+describe('keymap driver', () => {
+  const slotOf = (label: string) => W75_CAPS.find((c) => c.label === label)!.index;
+  const posOf = (label: string) => W75_CAPS.findIndex((c) => c.label === label);
+  const km = (ss: Setting[]) => {
+    const s = find(ss, 'keymap');
+    if (s.value.kind !== 'keymap') throw new Error();
+    return [s, s.value] as const;
+  };
+  const setEntry = (t: Uint8Array, slot: number, e: number[]) => t.set(e, slot * 4);
+  const entry = (t: Uint8Array, slot: number) => Array.from(t.subarray(slot * 4, slot * 4 + 4));
+
+  it('reads both layers; Fn is locked; unknown entries are named and kept', async () => {
+    const [f, d] = await connect();
+    setEntry(f.keymaps[0], slotOf('Q'), [0x10, 0x14, 0x02, 0]); // macro 3
+    setEntry(f.keymaps[1], slotOf('F2'), [0x07, 0x11, 0, 0]); // Vol-
+    setEntry(f.keymaps[1], slotOf('E'), [0x17, 0x05, 0, 0]); // advanced key
+    const [s, v] = km(await d.read());
+    expect(s.group).toBe('Keys');
+    expect(v.keys).toBe(W75_CAPS);
+    expect(v.layers.length).toBe(2);
+    expect(v.layers[0][posOf('A')]).toBe(0x04);
+    expect(v.layers[1][posOf('A')]).toBe(WR_DEFAULT);
+    expect(v.layers[1][posOf('F2')]).toBe(0xaa);
+    expect(v.locked).toEqual([[posOf('Fn')], [posOf('Fn')]]);
+    expect(v.cats).not.toContain('mouse');
+    expect(v.cats).not.toContain('layers');
+    const q = v.layers[0][posOf('Q')];
+    expect(q).toBe(WR_OPAQUE + slotOf('Q'));
+    expect(label(q, v.codes, v.extra)).toBe('M3');
+    expect(describeKc(q, v.codes, v.extra)).toMatch(/kept as it is/);
+    expect(label(v.layers[1][posOf('E')], v.codes, v.extra)).toBe('Adv');
+    expect(label(v.layers[0][posOf('Fn')], v.codes, v.extra)).toBe('Fn');
+    // C365 (gamepad off): no gamepad keys in the picker
+    expect(categories(v.codes, 2, 0x2c, 0, { extra: v.extra, cats: v.cats }).map((c) => c.id)).toEqual([...WRAITH_KEY_CATS, 'default']);
+  });
+
+  it('writes the whole changed layer, keeps every other entry byte for byte, round-trips', async () => {
+    const [f, d] = await connect();
+    setEntry(f.keymaps[0], slotOf('Q'), [0x10, 0x14, 0x02, 0]);
+    setEntry(f.keymaps[0], 16, [0x07, 0x12, 0, 0]); // knob slots (not on the layout)
+    setEntry(f.keymaps[0], 17, [0x02, 0x02, 0, 0]);
+    setEntry(f.keymaps[1], slotOf('E'), [0x17, 0x05, 0x01, 0x02]);
+    const before = f.keymaps.map((t) => new Uint8Array(t));
+    const [s, v] = km(await d.read());
+    f.sent = [];
+    const layers = v.layers.map((l) => l.slice());
+    layers[0][posOf('A')] = 0x05; // A -> B
+    layers[0][posOf('Caps')] = 0x0106; // Caps -> Ctrl+C
+    await d.write(withValue(s, { ...v, layers }));
+    // only the base layer was written: 10 pages, then read back
+    expect(f.wrote([0x18, 0x00]).length).toBe(10);
+    expect(f.wrote([0x18, 0x02]).length).toBe(0);
+    expect(f.sent[f.sent.length - 1].slice(0, 2)).toEqual([0x18, 0x80]);
+    expect(entry(f.keymaps[0], slotOf('A'))).toEqual([0, 0x05, 0, 0]);
+    expect(entry(f.keymaps[0], slotOf('Caps'))).toEqual([0x13, 0xe0, 0x06, 0]);
+    const expected = new Uint8Array(before[0]);
+    expected.set([0, 0x05, 0, 0], slotOf('A') * 4);
+    expected.set([0x13, 0xe0, 0x06, 0], slotOf('Caps') * 4);
+    expect(f.keymaps[0]).toEqual(expected); // macro, knob slots and Fn untouched
+    expect(f.keymaps[1]).toEqual(before[1]);
+
+    // Fn layer: F1 -> Vol+, then a re-read shows exactly what we wrote
+    const [s2, v2] = km(await d.read());
+    expect(v2.layers[0]).toEqual(layers[0]);
+    const l2 = v2.layers.map((l) => l.slice());
+    l2[1][posOf('F1')] = 0xa9;
+    l2[0][posOf('A')] = 0x04; // A back to default -> all zero
+    f.sent = [];
+    await d.write(withValue(s2, { ...v2, layers: l2 }));
+    expect(f.wrote([0x18, 0x00]).length).toBe(10);
+    expect(f.wrote([0x18, 0x02]).length).toBe(10);
+    expect(entry(f.keymaps[1], slotOf('F1'))).toEqual([0x07, 0x10, 0, 0]);
+    expect(entry(f.keymaps[0], slotOf('A'))).toEqual([0, 0, 0, 0]);
+    expect(entry(f.keymaps[1], slotOf('E'))).toEqual([0x17, 0x05, 0x01, 0x02]);
+    const [, v3] = km(await d.read());
+    expect(v3.layers).toEqual(l2);
+
+    // nothing changed: nothing sent
+    f.sent = [];
+    await d.write(withValue(s2, { ...v3 }));
+    expect(f.sent).toEqual([]);
+  });
+
+  it('refuses what it can not encode before sending anything', async () => {
+    const [f, d] = await connect();
+    setEntry(f.keymaps[0], slotOf('Q'), [0x10, 0x14, 0x02, 0]);
+    const [s, v] = km(await d.read());
+    f.sent = [];
+    const tryWrite = (layer: number, label: string, code: number) => {
+      const layers = v.layers.map((l) => l.slice());
+      layers[layer][posOf(label)] = code;
+      return d.write(withValue(s, { ...v, layers }));
+    };
+    await expect(tryWrite(0, 'Fn', 0x04)).rejects.toThrow(/Fn can't be changed/);
+    await expect(tryWrite(1, 'Fn', 0x04)).rejects.toThrow(/Fn \(Fn layer\) can't be changed/);
+    await expect(tryWrite(0, 'A', 0x00)).rejects.toThrow(/can't be disabled/);
+    await expect(tryWrite(1, 'A', 0x01)).rejects.toThrow(/transparent/);
+    await expect(tryWrite(0, 'A', 0xd1)).rejects.toThrow(/can't send keycode 0x00d1/); // mouse button
+    await expect(tryWrite(0, 'A', v.layers[0][posOf('Q')])).rejects.toThrow(/can't send/); // a macro entry moved elsewhere
+    await expect(d.write(withValue(s, { ...v, layers: [v.layers[0]] }))).rejects.toThrow(/Re-read/);
+    expect(f.sent).toEqual([]);
+  });
+
+  it('reports a write the board did not take, naming sent vs read-back', async () => {
+    const [, d0] = await connect({ ignoreWrites: true });
+    const [s0, v0] = km(await d0.read());
+    const l0 = v0.layers.map((l) => l.slice());
+    l0[0][posOf('A')] = 0x05;
+    await expect(d0.write(withValue(s0, { ...v0, layers: l0 }))).rejects.toThrow(/didn't take the key map change: A sent 00 05 00 00, reads back 00 00 00 00/);
+
+    // a board that clobbers another entry is reported too
+    // Q (slot 45) is on page 3, A (slot 68) on page 4
+    const [f, d] = await connect({ storeKeymap: (_l, pg, b) => (pg === 3 ? b.map(() => 0) : b) });
+    setEntry(f.keymaps[0], slotOf('Q'), [0x10, 0x14, 0x02, 0]);
+    const [s, v] = km(await d.read());
+    const layers = v.layers.map((l) => l.slice());
+    layers[0][posOf('A')] = 0x05;
+    await expect(d.write(withValue(s, { ...v, layers }))).rejects.toThrow(/Q sent 10 14 02 00, reads back 00 00 00 00 \(not changed\)/);
+  });
+
+  it('leaves the key map out when the board does not answer', async () => {
+    const [, d] = await connect({ noKeymapRead: true });
+    expect((await d.read()).some((s) => s.key === 'keymap')).toBe(false);
+  });
+
+  it('unknown products stay read-only (no key map, no gamepad mode), in every PID', async () => {
+    for (const productId of [0xc365, 0xc366]) {
+      const [f, d] = await connect({ product: 'OTHERKB', gamepad: true, productId });
+      const ss = await d.read();
+      expect(ss.map((x) => x.key)).toEqual(['model', 'product_id', 'fw', 'unsupported']);
+      f.sent = [];
+      await expect(d.write({ key: 'gamepad_mode', label: '', group: '', value: { kind: 'choice', options: [], current: 1 } })).rejects.toThrow(/read-only/);
+      await expect(d.write({ key: 'keymap', label: '', group: '', value: { kind: 'keymap', keys: [], layers: [], codes: 'qmk-v2' } })).rejects.toThrow(/read-only/);
+      expect(f.sent).toEqual([]);
+    }
+  });
+});
+
+describe('gamepad mode', () => {
+  type Choice = Extract<Value, { kind: 'choice' }>;
+  type Keymap = Extract<Value, { kind: 'keymap' }>;
+  const gp = (ss: Setting[]) => ss.find((s) => s.key === 'gamepad_mode');
+
+  it('is hidden unless the status flag F[13] & 0x04 is set', async () => {
+    const [, d] = await connect();
+    expect(gp(await d.read())).toBeUndefined();
+    const [, d2] = await connect({ gamepad: true });
+    const s = gp(await d2.read())!;
+    expect(s).toBeDefined();
+    expect(s.hint).toBe('The keyboard restarts and reconnects');
+    expect(s.value).toEqual({ kind: 'choice', options: [['Off', 0], ['Xbox', 1], ['Classic', 2]], current: 0 });
+  });
+
+  it('sends exactly 14 03 00 00 01 <mode>, waits for nothing, then reports the restart', async () => {
+    const [f, d] = await connect({ gamepad: true });
+    const s = gp(await d.read())!;
+    f.sent = [];
+    await d.write(withValue(s, { ...(s.value as Choice), current: 1 }));
+    expect(f.sent).toEqual([[...hex('14 03 00 00 01 01'), ...new Array(57).fill(0)]]);
+    expect(f.gamepadMode).toBe(1);
+    await expect(d.read()).rejects.toThrow(/restarting/);
+    await expect(d.write(s)).rejects.toThrow(/restarting/);
+    expect(f.sent.length).toBe(1);
+  });
+
+  it('writing the current mode sends nothing; other modes are refused', async () => {
+    const [f, d] = await connect({ gamepad: true });
+    const s = gp(await d.read())!;
+    const v = s.value as Choice;
+    f.sent = [];
+    await d.write(withValue(s, { ...v, current: 0 }));
+    await expect(d.write(withValue(s, { ...v, current: 3 }))).rejects.toThrow(/unknown gamepad mode/);
+    expect(f.sent).toEqual([]);
+    // no capability bit: refused even if asked
+    const [f2, d2] = await connect();
+    await d2.read();
+    f2.sent = [];
+    await expect(d2.write(withValue(s, { ...v, current: 1 }))).rejects.toThrow(/doesn't have a gamepad mode/);
+    expect(f2.sent).toEqual([]);
+  });
+
+  it('Xbox PID (C366): mode from the PID, Xbox keys in the palette, decoded on read, writable', async () => {
+    const [f, d] = await connect({ gamepad: true, productId: 0xc366 });
+    expect(d.id).toBe('2e3c:c366');
+    expect(wraithFactory.match(f.asDevice())).toBe(true);
+    f.keymaps[0].set([0x19, 0x0a, 0, 0], 46 * 4); // W = A button
+    f.keymaps[0].set([0x18, 0x11, 0, 0], 68 * 4); // A = Classic button 1 (other mode)
+    const ss = await d.read();
+    expect((gp(ss)!.value as Choice).current).toBe(1);
+    const s = find(ss, 'keymap');
+    const v = s.value as Keymap;
+    expect(label(v.layers[0][pos(46)], v.codes, v.extra)).toBe('A');
+    expect(describeKc(v.layers[0][pos(46)], v.codes, v.extra)).toBe('Gamepad (Xbox): A button');
+    expect(label(v.layers[0][pos(68)], v.codes, v.extra)).toBe('B1');
+    const opts = { extra: v.extra, cats: v.cats };
+    const pad = categories(v.codes, 2, 0x2c, 0, opts).find((c) => c.id === 'gamepad')!;
+    expect(pad.name).toBe('Gamepad');
+    expect(pad.codes.length).toBe(25);
+    expect(pad.codes.every((k) => k.code >= WR_GP_XBOX && k.code <= WR_GP_XBOX + 0x18)).toBe(true);
+    expect(search('right bumper', v.codes, 2, 0x2c, 0, opts).map((k) => k.code)).toEqual([WR_GP_XBOX + 0x18]);
+    const layers = v.layers.map((l) => l.slice());
+    layers[0][pos(69)] = WR_GP_XBOX + 0x08; // S = LT
+    await d.write(withValue(s, { ...v, layers }));
+    expect(Array.from(f.keymaps[0].subarray(69 * 4, 69 * 4 + 4))).toEqual([0x19, 0x08, 0, 0]);
+    expect(Array.from(f.keymaps[0].subarray(68 * 4, 68 * 4 + 4))).toEqual([0x18, 0x11, 0, 0]);
+  });
+
+  it('Classic PID (C367) offers the Classic keys; C368 is gamepad-capable with an unknown mode', async () => {
+    const [, d] = await connect({ gamepad: true, productId: 0xc367 });
+    const ss = await d.read();
+    expect((gp(ss)!.value as Choice).current).toBe(2);
+    const v = find(ss, 'keymap').value as Keymap;
+    const pad = categories(v.codes, 2, 0x2c, 0, { extra: v.extra, cats: v.cats }).find((c) => c.id === 'gamepad')!;
+    expect(pad.codes.length).toBe(33);
+    expect(pad.codes[0]).toMatchObject({ code: WR_GP_CLASSIC, label: 'X-' });
+
+    const [f3, d3] = await connect({ gamepad: true, productId: 0xc368 });
+    expect(wraithFactory.match(f3.asDevice())).toBe(true);
+    const s3 = await d3.read();
+    const g3 = gp(s3)!;
+    expect(g3.value).toEqual({ kind: 'choice', options: [['Off', 0], ['Xbox', 1], ['Classic', 2], ['Unknown (PID C368)', -1]], current: -1 });
+    const v3 = find(s3, 'keymap').value as Keymap;
+    expect(categories(v3.codes, 2, 0x2c, 0, { extra: v3.extra, cats: v3.cats }).some((c) => c.id === 'gamepad')).toBe(false);
+    f3.sent = [];
+    await d3.write(withValue(g3, { ...(g3.value as Choice), current: 2 }));
+    expect(f3.sent.map((p) => p.slice(0, 6))).toEqual([hex('14 03 00 00 01 02')]);
   });
 });

@@ -214,12 +214,12 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
   let boardKeys = keys
   if (onKeys) {
     interactive = true
-    boardKeys = km!.keys.map((k, i) => ({ ...k, label: kcLabel(effective(km!, layer, i).code, km!.codes) }))
+    boardKeys = km!.keys.map((k, i) => ({ ...k, label: kcLabel(effective(km!, layer, i).code, km!.codes, km!.extra) }))
     looks = km!.keys.map((_, i) => {
       const code = km!.layers[layer][i]
       const was = origLayers?.[layer]?.[i]
-      if (locked(i)) return { dim: true, title: `${kcLabel(code, km!.codes) || 'None'}: can't be changed on this keyboard` }
-      return { dot: was !== undefined && was !== code, dim: code === 1 && layer > 0, title: `${kcLabel(code, km!.codes) || 'None'}: ${describeKc(code, km!.codes)}` }
+      if (locked(i)) return { dim: true, title: `${kcLabel(code, km!.codes, km!.extra) || 'None'}: can't be changed on this keyboard` }
+      return { dot: was !== undefined && was !== code, dim: code === 1 && layer > 0, title: `${kcLabel(code, km!.codes, km!.extra) || 'None'}: ${describeKc(code, km!.codes, km!.extra)}` }
     })
   } else if (onAdv) {
     interactive = true
@@ -520,12 +520,12 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
       onEdit('keymap', { ...m, layers })
     }
     const code = keySel !== undefined ? m.layers[layer][keySel] : undefined
-    const legend = code === undefined ? undefined : kcLabel(code, m.codes) || 'None'
+    const legend = code === undefined ? undefined : kcLabel(code, m.codes, m.extra) || 'None'
     const changed = origLayers ? m.layers.reduce((n, l, li) => n + l.filter((c, i) => origLayers[li]?.[i] !== undefined && origLayers[li][i] !== c).length, 0) : 0
     const h = (
       <Hero brand={brand} label={`Keymap · layer ${layer}`} value={legend ?? `${m.layers.length}`} unit={legend ? undefined : m.layers.length === 1 ? 'layer' : 'layers'}
         size={legend && legend.length > 6 ? Math.max(30, Math.round(400 / legend.length)) : 64}
-        sub={code !== undefined ? describeKc(code, m.codes) : changed ? `${changed} key${changed === 1 ? '' : 's'} remapped this session` : 'Click a key to remap it.'} />
+        sub={code !== undefined ? describeKc(code, m.codes, m.extra) : changed ? `${changed} key${changed === 1 ? '' : 's'} remapped this session` : 'Click a key to remap it.'} />
     )
     const c = (
       <>

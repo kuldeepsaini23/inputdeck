@@ -81,6 +81,7 @@ export function SettingControl({ s, onEdit }: { s: Setting; onEdit: Edit }) {
           ) : (
             <ChoiceSelect label={s.label} v={v} onChange={(c) => onEdit(s.key, { ...v, current: c })} />
           )}
+          {s.hint && <p className="hint mt-2 mb-0">{s.hint}</p>}
         </div>
       )
     case 'number':

@@ -56,6 +56,13 @@ export type Value =
        * (e.g. the Fn key, or Fn-layer system keys). The driver refuses changes to them.
        */
       locked?: number[][];
+      /**
+       * optional driver-specific keycodes outside the QMK numbering (e.g. gamepad buttons), as their own
+       * picker categories. `hidden` categories only name codes the keymap may hold (never offered).
+       */
+      extra?: ExtraCategory[];
+      /** optional: the QMK picker categories (keycodes.ts ids, e.g. 'basic', 'media') this device can send; default all */
+      cats?: string[];
     }
   | {
       /**
@@ -220,6 +227,25 @@ export type MacroStep =
  * DAREU TG firmware event records (class 6 macro memory).
  */
 export type MacroFormat = 'qmk' | 'qmk-legacy' | 'wlmouse' | 'pulsar' | 'dareu';
+
+/** A driver-specific keycode (see the keymap value's `extra`). */
+export interface ExtraKeycode {
+  code: number;
+  /** name accepted by the picker search, e.g. GP_XBOX_A */
+  id: string;
+  /** short keycap legend */
+  label: string;
+  /** what it does */
+  name: string;
+}
+
+export interface ExtraCategory {
+  id: string;
+  name: string;
+  codes: ExtraKeycode[];
+  /** names only: not shown in the picker */
+  hidden?: boolean;
+}
 
 /** Keycode numberings: QMK keycodes v2 (QMK 0.19+, VIA protocol 12+) and the older v1. */
 /** QMK keycode numbering: v1 = VIA protocol <= 10, v11 = protocol 11 (v2 layout, macros at 0x7702), v2 = protocol 12+ */

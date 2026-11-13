@@ -29,11 +29,12 @@ export function KeyPicker({ km, layer, keyIndex, onPick, macros = 0, className }
   const base = sel ? km.layers[0][keyIndex] : KC_SPC
   // layer-tap keys tap what the key sends on layer 0 (or Space)
   const tap = base > KC_TRNS && base < 0x100 ? base : KC_SPC
-  const cats = useMemo(() => categories(km.codes, km.layers.length, tap, macros), [km.codes, km.layers.length, tap, macros])
+  const opts = useMemo(() => ({ extra: km.extra, cats: km.cats }), [km.extra, km.cats])
+  const cats = useMemo(() => categories(km.codes, km.layers.length, tap, macros, opts), [km.codes, km.layers.length, tap, macros, opts])
   const [cat, setCat] = useState(cats[0].id)
   const [target, setTarget] = useState(Math.min(1, km.layers.length - 1))
   const [q, setQ] = useState('')
-  const found = useMemo(() => search(q, km.codes, km.layers.length, tap, macros).slice(0, 48), [q, km.codes, km.layers.length, tap, macros])
+  const found = useMemo(() => search(q, km.codes, km.layers.length, tap, macros, opts).slice(0, 48), [q, km.codes, km.layers.length, tap, macros, opts])
   const inCat = cats.find((c) => c.id === cat) ?? cats[0]
   const shown: Keycode[] = q.trim() ? found : inCat.id === 'layers' ? inCat.codes.filter((k) => k.layer === target) : inCat.codes
   const keyName = sel ? km.keys[keyIndex].label || hexCode(base) : ''
@@ -98,18 +99,18 @@ export function KeyCard({ km, layer, keyIndex, original, onPick }: {
   const eff = effective(km, layer, keyIndex)
   return (
     <Card title={`Key · layer ${layer}`}>
-      <div className="display truncate text-[22px] font-semibold">{label(code, km.codes) || 'None'}</div>
-      <p className="hint mt-1 mb-0">{describe(code, km.codes)}</p>
-      {code === KC_TRNS && layer > 0 && <p className="hint mt-1 mb-0">Falls through to layer {eff.from}: {describe(eff.code, km.codes)}</p>}
+      <div className="display truncate text-[22px] font-semibold">{label(code, km.codes, km.extra) || 'None'}</div>
+      <p className="hint mt-1 mb-0">{describe(code, km.codes, km.extra)}</p>
+      {code === KC_TRNS && layer > 0 && <p className="hint mt-1 mb-0">Falls through to layer {eff.from}: {describe(eff.code, km.codes, km.extra)}</p>}
       <dl className="m-0 mt-3">
-        {([['Keycode', hexCode(code)], ['On layer 0', label(km.layers[0][keyIndex], km.codes) || 'None'], ...(was !== undefined && was !== code ? [['Was', label(was, km.codes) || hexCode(was)]] : [])] as [string, string][]).map(([k, v]) => (
+        {([['Keycode', hexCode(code)], ['On layer 0', label(km.layers[0][keyIndex], km.codes, km.extra) || 'None'], ...(was !== undefined && was !== code ? [['Was', label(was, km.codes, km.extra) || hexCode(was)]] : [])] as [string, string][]).map(([k, v]) => (
           <div key={k} className="flex justify-between border-b border-white/5 py-1.5 last:border-0">
             <dt className="eyebrow">{k}</dt>
             <dd className="display m-0 text-[11px]">{v}</dd>
           </div>
         ))}
       </dl>
-      {!known(code, km.codes) && <p className="hint mt-2 mb-0">We don't know this code. It stays as it is unless you pick a new one.</p>}
+      {!known(code, km.codes, km.extra) && <p className="hint mt-2 mb-0">We don't know this code. It stays as it is unless you pick a new one.</p>}
       <div className="mt-3 flex flex-wrap gap-1.5">
         {layer > 0 && <button type="button" className="chip" aria-pressed={code === KC_TRNS} onClick={() => onPick(KC_TRNS)}>Transparent</button>}
         <button type="button" className="chip" aria-pressed={code === KC_NO} onClick={() => onPick(KC_NO)}>Disable</button>

@@ -1,5 +1,5 @@
 // Simulated Wraith W75 V2 HE. Used by the tests and the demo mode.
-import { COLOR_TABLE, TRIG_FIXED, W75_KEYS, allowed, setColorsPkts, type KeyTrig } from '../wraith';
+import { COLOR_TABLE, FN_KEY, KEYMAP_TABLE, TRIG_FIXED, W75_KEYS, allowed, setColorsPkts, setKeymapPkts, type KeyTrig } from '../wraith';
 
 const hex = (s: string) => s.split(/\s+/).filter(Boolean).map((b) => parseInt(b, 16));
 
@@ -19,6 +19,14 @@ export interface FakeOpts {
   socd?: boolean;
   /** firmware quirk: how a received trigger is stored (default: as sent) */
   storeTrig?: (k: KeyTrig) => KeyTrig;
+  /** firmware with a gamepad mode (status F[13] bit 0x04) */
+  gamepad?: boolean;
+  /** USB PID (C365 normal, C366 Xbox, C367 Classic, C368) */
+  productId?: number;
+  /** don't answer keymap reads */
+  noKeymapRead?: boolean;
+  /** firmware quirk: how a received keymap page is stored (layer, page, bytes) */
+  storeKeymap?: (layer: number, page: number, bytes: number[]) => number[];
 }
 
 export class FakeKeyboard {
@@ -37,11 +45,17 @@ export class FakeKeyboard {
   /** SOCD switch and the raw pair table (20 x [valid, mode, hid1, hid2]) */
   socdOn = 0;
   socdTable = new Array<number>(80).fill(0);
+  /** raw keymap layers [base, Fn], 132 x [code1, hid, code3, code4] (base: Fn key = 01 00 00 00) */
+  keymaps = [new Uint8Array(KEYMAP_TABLE), new Uint8Array(KEYMAP_TABLE)];
+  /** last gamepad mode received (14 03 .. mode) */
+  gamepadMode: number | undefined;
   private listeners = new Set<(e: HIDInputReportEvent) => void>();
 
   constructor(private o: FakeOpts = {}) {
     for (const k of W75_KEYS) this.keys.set(k, { mode: TRIG_FIXED, travel: 85, press: 5, release: 5 });
     for (let i = 0; i < COLOR_TABLE; i++) this.table[i] = i & 0xff;
+    this.keymaps[0][FN_KEY * 4] = 0x01;
+    if (o.productId !== undefined) this.productId = o.productId;
   }
 
   async open() {
@@ -102,6 +116,7 @@ export class FakeKeyboard {
       const f = new Array(20).fill(0);
       f[12] = this.flags;
       if (this.o.socd) f[9] = 1;
+      if (this.o.gamepad) f[13] = 0x04;
       this.reply([0x01, 0, 0, 0, 20, ...f]);
     } else if (c === 0x0a) {
       this.reply(hex('0a 00 00 00 12 02 01 03 09 04 00 0e 0f 06 07 0b 0c 10 08 a5 5a 04 04'));
@@ -137,6 +152,17 @@ export class FakeKeyboard {
       for (let pg = 0; pg < 2; pg++) this.reply([0x24, 0x01, 0, pg, 0x28, ...this.socdTable.slice(pg * 40, pg * 40 + 40)]);
     } else if (c === 0x24 && s1 === 0x00) {
       if (w) this.socdTable.splice(p[3] * 40, 40, ...p.slice(5, 45));
+    } else if (c === 0x18 && (s1 === 0x80 || s1 === 0x82)) {
+      if (this.o.noKeymapRead) return;
+      for (const pk of setKeymapPkts(s1 === 0x82 ? 1 : 0, this.keymaps[s1 === 0x82 ? 1 : 0])) this.reply([0x18, s1, ...pk.slice(2)]);
+    } else if (c === 0x18 && (s1 === 0x00 || s1 === 0x02)) {
+      if (!w) return;
+      const layer = s1 === 0x02 ? 1 : 0;
+      const bytes = p.slice(5, 5 + p[4]);
+      this.keymaps[layer].set(this.o.storeKeymap ? this.o.storeKeymap(layer, p[3], bytes) : bytes, p[3] * 56);
+    } else if (c === 0x14 && s1 === 0x03) {
+      // the real board restarts with a new PID and never answers
+      this.gamepadMode = p[5];
     } else if (c === 0x09 && s1 === 0x20) {
       this.reply([0x09, this.slot]);
     } else if (c === 0x09 && (s1 === 0x80 || s1 === 0x81)) {

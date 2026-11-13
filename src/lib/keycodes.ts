@@ -5,9 +5,9 @@
 // (0x00-0xE7) is the same in both; media/mouse keys and layer keys moved.
 // Codes we don't know are shown as hex and never changed.
 
-import type { KeycodeSet } from '../drivers/types';
+import type { ExtraCategory, ExtraKeycode, KeycodeSet } from '../drivers/types';
 
-export type { KeycodeSet };
+export type { ExtraCategory, ExtraKeycode, KeycodeSet };
 
 export interface Keycode {
   code: number;
@@ -330,18 +330,37 @@ function decode(kc: number, set: KeycodeSet): Decoded | undefined {
   return undefined;
 }
 
+/** A driver-specific code from a keymap's `extra` categories (they win over the QMK meaning). */
+function extraCode(kc: number, extra?: ExtraCategory[]): ExtraKeycode | undefined {
+  if (!extra) return undefined;
+  for (const c of extra) {
+    const k = c.codes.find((x) => x.code === kc);
+    if (k) return k;
+  }
+  return undefined;
+}
+
 /** Short keycap legend. Unknown codes come back as hex. */
-export function label(kc: number, set: KeycodeSet = 'qmk-v2'): string {
-  return decode(kc, set)?.label ?? hexCode(kc);
+export function label(kc: number, set: KeycodeSet = 'qmk-v2', extra?: ExtraCategory[]): string {
+  return (extraCode(kc, extra) ?? decode(kc, set))?.label ?? hexCode(kc);
 }
 
 /** One-line description of what the key does. */
-export function describe(kc: number, set: KeycodeSet = 'qmk-v2'): string {
-  return decode(kc, set)?.name ?? `Keycode ${hexCode(kc)} (not in our list, kept as it is)`;
+export function describe(kc: number, set: KeycodeSet = 'qmk-v2', extra?: ExtraCategory[]): string {
+  return (extraCode(kc, extra) ?? decode(kc, set))?.name ?? `Keycode ${hexCode(kc)} (not in our list, kept as it is)`;
 }
 
-/** Is this a code the catalogue understands? */
-export const known = (kc: number, set: KeycodeSet = 'qmk-v2') => decode(kc, set) !== undefined;
+/** Is this a code the catalogue (or the keymap's own extra codes) understands? */
+export const known = (kc: number, set: KeycodeSet = 'qmk-v2', extra?: ExtraCategory[]) =>
+  extraCode(kc, extra) !== undefined || decode(kc, set) !== undefined;
+
+/** What a keymap offers beyond / instead of the full QMK catalogue. */
+export interface PickerOpts {
+  /** driver-specific categories (hidden ones are left out of the picker) */
+  extra?: ExtraCategory[];
+  /** QMK category ids to offer (default all) */
+  cats?: string[];
+}
 
 /**
  * Keycode from text: a QMK name (KC_A, A, KC_EXLM, MO(1), LT(2, KC_SPC)) or hex (0x7C00).
@@ -387,7 +406,7 @@ export function idOf(kc: number, set: KeycodeSet = 'qmk-v2'): string {
  * (a basic keycode, e.g. what the key sends on layer 0). A 'Macros' category lists M0..M(macros-1)
  * when the keyboard has macro slots.
  */
-export function categories(set: KeycodeSet = 'qmk-v2', layers = 4, tap = KC_SPC, macros = 0): Category[] {
+export function categories(set: KeycodeSet = 'qmk-v2', layers = 4, tap = KC_SPC, macros = 0, opts: PickerOpts = {}): Category[] {
   const { list } = table(set);
   const t = tap > KC_TRNS && tap < 0x100 && table(set).byCode.has(tap) ? tap : KC_SPC;
   const layerCodes: Keycode[] = [];
@@ -412,11 +431,15 @@ export function categories(set: KeycodeSet = 'qmk-v2', layers = 4, tap = KC_SPC,
     }
     out.push({ id: 'macros', name: 'Macros', codes });
   }
-  return out;
+  const shown = opts.cats ? out.filter((c) => opts.cats!.includes(c.id) || c.id === 'macros') : out;
+  for (const c of opts.extra ?? []) {
+    if (!c.hidden && c.codes.length) shown.push({ id: c.id, name: c.name, codes: c.codes.map((k) => ({ ...k })) });
+  }
+  return shown;
 }
 
 /** Search every category (name, legend or QMK id); a typed hex code or QMK name is offered too. */
-export function search(query: string, set: KeycodeSet = 'qmk-v2', layers = 4, tap = KC_SPC, macros = 0): Keycode[] {
+export function search(query: string, set: KeycodeSet = 'qmk-v2', layers = 4, tap = KC_SPC, macros = 0, opts: PickerOpts = {}): Keycode[] {
   const q = query.trim().toLowerCase();
   if (!q) return [];
   const seen = new Set<number>();
@@ -426,14 +449,17 @@ export function search(query: string, set: KeycodeSet = 'qmk-v2', layers = 4, ta
     seen.add(k.code);
     out.push(k);
   };
+  const cats = categories(set, layers, tap, macros, opts);
   const exact = parse(query, set);
-  if (exact !== undefined) push({ code: exact, id: idOf(exact, set), label: label(exact, set), name: describe(exact, set) });
-  for (const c of categories(set, layers, tap, macros)) {
+  // a typed QMK name / hex code is only offered when the device can send that kind of key
+  const offered = exact !== undefined && (!opts.cats || cats.some((c) => c.codes.some((k) => k.code === exact)));
+  if (exact !== undefined && offered) push({ code: exact, id: idOf(exact, set), label: label(exact, set, opts.extra), name: describe(exact, set, opts.extra) });
+  for (const c of cats) {
     for (const k of c.codes) {
-      if (k.label.toLowerCase() === q) push(k);
+      if (k.label.toLowerCase() === q || k.id.toLowerCase() === q) push(k);
     }
   }
-  for (const c of categories(set, layers, tap, macros)) {
+  for (const c of cats) {
     for (const k of c.codes) {
       if (k.name.toLowerCase().includes(q) || k.id.toLowerCase().includes(q) || k.label.toLowerCase().includes(q)) push(k);
     }

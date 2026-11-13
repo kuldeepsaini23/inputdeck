@@ -12,11 +12,12 @@ import { orbitalFactory } from './drivers/orbital';
 import { dareuFactory } from './drivers/dareu';
 import { lofreeFactory } from './drivers/lofree';
 import { viaFactory } from './drivers/via';
+import { vgnFactory } from './drivers/vgn';
 
 const ALLOW_KEY = 'inputdeck.allowChanges';
 
 // VIA last: it matches any raw-HID keyboard the brand drivers above don't claim
-export const FACTORIES: DriverFactory[] = [wlmouseFactory, wraithFactory, pulsarFactory, compxbFactory, logitechFactory, razerFactory, orbitalFactory, dareuFactory, lofreeFactory, viaFactory];
+export const FACTORIES: DriverFactory[] = [wlmouseFactory, wraithFactory, pulsarFactory, compxbFactory, logitechFactory, razerFactory, orbitalFactory, dareuFactory, lofreeFactory, vgnFactory, viaFactory];
 
 export interface DeviceState {
   id: string;

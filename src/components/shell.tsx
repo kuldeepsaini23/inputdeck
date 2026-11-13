@@ -80,13 +80,11 @@ export function TopBar({ activeId, profile, onProfile }: { activeId?: string; pr
           </button>
         )}
       </nav>
-      <div className="flex min-w-0 items-center gap-3">
+      <div className="relative z-10 flex shrink-0 items-center gap-3">
         <LanguagePicker />
-        {profile && onProfile ? (
+        {profile && onProfile && (
           <Segmented label={t('Profile')} className="pill-glass !p-[3px]" value={profile.current}
             options={profile.options.map(([, v], i) => [`P${i + 1}`, v] as const)} onChange={onProfile} />
-        ) : (
-          <span className="hidden whitespace-nowrap text-[12px] text-[var(--text-3)] xl:inline">{t('Works in Chrome, Edge & Opera')}</span>
         )}
       </div>
     </header>

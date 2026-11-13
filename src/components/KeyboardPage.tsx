@@ -4,6 +4,10 @@ import type { DeviceState } from '#/devices'
 import type { KeyCap, Setting, Value } from '#/drivers/types'
 import { cn } from '#/lib/utils'
 import { useT } from '#/lib/i18n'
+import {
+  availableRegions, common, copyColor, copyLayer, copyTrigger, defaultCode, invert, pasteColor, pasteTrigger, planLayerPaste,
+  regionKeys, regionOf, sameColorKeys, sameRtKeys, sameTriggerKeys, type KeyClip, type LayerClip, type Region,
+} from '#/lib/key-select'
 import { decodeMacroKey, describe as describeKc, label as kcLabel } from '#/lib/keycodes'
 import { usedBytes, type Macros } from '#/lib/macros'
 import { KeyboardView, type KeyLook } from './KeyboardView'
@@ -44,19 +48,13 @@ const GROUP_TAB: Record<string, string> = { Switches: 'Performance', Info: 'Sett
 const TAB_ALIAS: Record<string, string> = { Switches: 'Performance' }
 /** lighting settings drawn by the Lighting cards */
 const LIGHT_OWN = new Set(['light_mode', 'light_power', 'light_bri', 'light_speed', 'light_color', 'light_rainbow'])
-const PRESET_SEL: [string, (l: string) => boolean][] = [
-  ['All', () => true],
-  ['WASD', (l) => ['W', 'A', 'S', 'D'].includes(l)],
-  ['Letters', (l) => /^[A-Z]$/.test(l)],
-  ['None', () => false],
-]
 const PRESETS: [string, number][] = [['Speed', 0.4], ['Gaming', 1.2], ['Balanced', 1.7], ['Typing', 2.4]]
 
 type T = ReturnType<typeof useT>
 /** Tab names are English ids (some come from driver groups); this is what the dock shows. */
 const tabLabel = (t: T, id: string) =>
   ({ Performance: t('Performance'), 'Rapid Trigger': t('Rapid Trigger'), SOCD: 'SOCD', Gamepad: t('Gamepad'), Keys: t('Keys'), Lighting: t('Lighting'), Macros: t('Macros'), Settings: t('Settings') })[id] ?? t(id)
-const presetSelName = (t: T, n: string) => ({ All: t('All'), WASD: 'WASD', Letters: t('Letters'), None: t('None') })[n] ?? n
+const regionName = (t: T, n: Region) => ({ All: t('All'), WASD: 'WASD', Letters: t('Letters'), 'Number row': t('Number row'), Arrows: t('Arrows'), Mods: t('Mods'), None: t('None') })[n]
 const presetName = (t: T, n: string) => ({ Speed: t('Speed'), Gaming: t('Gaming'), Balanced: t('Balanced'), Typing: t('Typing') })[n] ?? n
 
 const choiceLabel = (s?: Setting) => (s?.value.kind === 'choice' ? s.value.options.find((o) => o[1] === (s.value as Choice).current)?.[0] : undefined)
@@ -87,6 +85,10 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
   /** generic settings that belong on a tab (not drawn by a dedicated card) */
   const extras = (t: string) => (edit ?? []).filter((s) => !OWN.has(s.key) && s.group !== 'Per-key' && (GROUP_TAB[s.group] ?? s.group) === t)
   const [sel, setSel] = useState<Set<number>>(new Set())
+  // copied per-key settings (Performance / Rapid Trigger: trigger; Lighting: colour) and a note about the last copy / paste
+  const [clip, setClip] = useState<KeyClip | undefined>(undefined)
+  const [selMsg, setSelMsg] = useState<string | undefined>(undefined)
+  useEffect(() => setSelMsg(undefined), [sel, active])
   // size the board so the cards below still fit above the dock
   const [vh, setVh] = useState(900)
   useEffect(() => {
@@ -146,6 +148,11 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
   const [kSel, setKSel] = useState<number | undefined>(undefined)
   const layer = km ? Math.min(layerPick, km.layers.length - 1) : 0
   const keySel = km && kSel !== undefined && kSel < km.keys.length ? kSel : undefined
+  // a copied keymap layer (for this device and layout only) and a note about the last paste
+  const [layerClipAt, setLayerClip] = useState<{ id: string; n: number; clip: LayerClip } | undefined>(undefined)
+  const layerClip = km && layerClipAt?.id === dev.id && layerClipAt.n === km.keys.length ? layerClipAt.clip : undefined
+  const [kmMsg, setKmMsg] = useState<string | undefined>(undefined)
+  useEffect(() => setKmMsg(undefined), [layerPick, kSel, active, dev.id])
   // the keymap as first read for this device, for the "changed" dots and Restore
   const [original, setOriginal] = useState<{ id: string; n: number; layers: number[][] } | undefined>(undefined)
   useEffect(() => {
@@ -294,9 +301,83 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     looks = pkC.colors.map((c) => (on ? { color: hex(c) } : {}))
   }
   const selIdx = keys ? [...sel].filter((i) => i < keys.length) : []
-  const pickBy = (pred: (l: string) => boolean) => new Set((keys ?? []).map((k, i) => (pred(k.label) ? i : -1)).filter((i) => i >= 0))
-  const presetNow = PRESET_SEL.find(([, f]) => { const want = pickBy(f); return want.size === sel.size && [...want].every((i) => sel.has(i)) })?.[0]
-  const presetSel = (pred: (l: string) => boolean) => setSel(new Set((keys ?? []).map((k, i) => (pred(k.label) ? i : -1)).filter((i) => i >= 0)))
+  const regions = keys ? availableRegions(keys) : []
+  const regionNow = keys ? regionOf(keys, sel, regions) : undefined
+  const pickRegion = (r: Region) => setSel(new Set(keys ? regionKeys(keys, r) : []))
+
+  // ---- multi-key tabs: same-config double-click, copy / paste of one key's settings
+  const multiTab = !testing && ((active === 'Performance' || active === 'Rapid Trigger') && !!pkT ? 'trigger' : active === 'Lighting' && (lp.on || !!pkC) ? 'color' : undefined)
+  const colorsNow = lp.on ? lp.colors : pkC?.colors
+  /** double-click on a key: every key set up like it (added to the selection with a modifier) */
+  const selectSame = (i: number, add: boolean) => {
+    const same = multiTab === 'trigger' ? (active === 'Rapid Trigger' ? sameRtKeys(pkT!, i) : sameTriggerKeys(pkT!, i)) : multiTab === 'color' && colorsNow ? sameColorKeys(colorsNow, i) : [i]
+    setSel(new Set(add ? [...sel, ...same] : same))
+  }
+  /** the selection's settings, when every selected key has the same (copy needs one value) */
+  const selConfig = (): KeyClip | undefined => {
+    if (!selIdx.length) return undefined
+    if (multiTab === 'trigger') {
+      const same = sameTriggerKeys(pkT!, selIdx[0])
+      return selIdx.every((i) => same.includes(i)) ? copyTrigger(pkT!, selIdx[0]) : undefined
+    }
+    if (multiTab === 'color' && colorsNow) return common(selIdx, (i) => colorsNow[i]) === 'mixed' ? undefined : copyColor(keys, colorsNow, selIdx[0])
+    return undefined
+  }
+  const canCopy = !!selConfig()
+  const canPaste = !!clip && !!multiTab && clip.kind === multiTab && selIdx.length > 0
+  const keyName = (c: KeyClip) => c.label || t('Key')
+  const doCopy = () => {
+    const c = selConfig()
+    if (!c) return false
+    setClip(c)
+    setSelMsg(selIdx.length === 1 ? t('Copied {key}', { key: keyName(c) }) : t('Copied the settings of {n} keys', { n: selIdx.length }))
+    return true
+  }
+  const doPaste = () => {
+    if (!canPaste || !clip) return false
+    if (clip.kind === 'trigger') onEdit('per_key_trigger', pasteTrigger(pkT!, selIdx, clip))
+    else if (lp.on) lp.paint(selIdx, clip.rgb)
+    else if (pkC) onEdit('per_key_color', { ...pkC, colors: pasteColor(pkC.colors, selIdx, clip.rgb) })
+    const msg = selIdx.length === 1 ? t('Pasted {key} onto {n} key', { key: keyName(clip), n: selIdx.length }) : t('Pasted {key} onto {n} keys', { key: keyName(clip), n: selIdx.length })
+    setSelMsg(msg)
+    return true
+  }
+  // Ctrl/Cmd+C, Ctrl/Cmd+V on the board (not while typing, not when text is selected)
+  const clipKeys = useRef<{ copy: () => boolean; paste: () => boolean; on: boolean }>({ copy: () => false, paste: () => false, on: false })
+  clipKeys.current = { copy: doCopy, paste: doPaste, on: !!multiTab }
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!clipKeys.current.on || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return
+      const k = e.key.toLowerCase()
+      if (k !== 'c' && k !== 'v') return
+      const el = e.target as HTMLElement | null
+      if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return
+      if (k === 'c' && window.getSelection()?.toString()) return
+      if ((k === 'c' ? clipKeys.current.copy : clipKeys.current.paste)()) e.preventDefault()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+  /** what the selection (or the whole board) is set to, for the bar under the board */
+  const selValue = (() => {
+    const idx = selIdx.length ? selIdx : keys ? keys.map((_, i) => i) : []
+    if (multiTab === 'trigger') {
+      if (active === 'Rapid Trigger') {
+        const on = common(idx, (i) => pkT!.rapid[i])
+        if (on === 'mixed') return t('RT mixed')
+        if (!on) return t('RT off')
+        const s = common(idx, (i) => pkT!.sens[i], (a, b) => Math.abs(a - b) < 1e-6)
+        return s === 'mixed' || s === undefined ? t('RT ±mixed') : t('RT ±{mm} mm', { mm: s.toFixed(2) })
+      }
+      const v = common(idx, (i) => pkT!.travel[i], (a, b) => Math.abs(a - b) < 1e-6)
+      return v === 'mixed' || v === undefined ? t('Mixed') : `${v.toFixed(2)} mm`
+    }
+    if (multiTab === 'color' && colorsNow) {
+      const c = common(idx, (i) => colorsNow[i] ?? 0)
+      return c === 'mixed' || c === undefined ? t('Mixed') : hex(c)
+    }
+    return undefined
+  })()
 
   let hero: React.ReactNode = null
   let cards: React.ReactNode = null
@@ -583,7 +664,7 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
     const c = (
       <>
         <KeyPicker km={m} layer={layer} keyIndex={keySel} onPick={assign} macros={mac?.slots} className="col-span-2" />
-        <KeyCard km={m} layer={layer} keyIndex={keySel} original={origLayers} onPick={assign} />
+        <KeyCard km={m} layer={layer} keyIndex={keySel} original={origLayers} onPick={assign} defaultCode={defaultCode(m)} />
       </>
     )
     return [h, c]
@@ -728,6 +809,20 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
   }
 
   const showBar = (interactive || testing) && boardKeys
+  const copyKmLayer = () => {
+    if (!km) return
+    setLayerClip({ id: dev.id, n: km.keys.length, clip: copyLayer(km, layer) })
+    setKmMsg(t('Copied layer {layer}', { layer }))
+  }
+  const pasteKmLayer = () => {
+    if (!km || !layerClip) return
+    const r = planLayerPaste(km, layerClip, layer)
+    if (r.changed) onEdit('keymap', { ...km, layers: r.layers })
+    const names = r.skipped.map((s) => km.keys[s.pos]?.label || '?')
+    const list = names.slice(0, 6).join(', ') + (names.length > 6 ? '…' : '')
+    const done = r.changed === 1 ? t('Pasted layer {from} onto layer {to}: {n} key changed.', { from: layerClip.layer, to: layer, n: r.changed }) : t('Pasted layer {from} onto layer {to}: {n} keys changed.', { from: layerClip.layer, to: layer, n: r.changed })
+    setKmMsg(r.skipped.length ? `${done} ${t('Skipped (locked, raw or transparent on layer 0): {keys}', { keys: list })}` : done)
+  }
   // keys tab: one key at a time; a click (or drag) picks the newly added key
   const pickKey = (next: Set<number>) => {
     const k = [...next].find((i) => i !== keySel)
@@ -746,18 +841,28 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
           <div className="pointer-events-none absolute -inset-x-20 -top-10 h-[120%] rounded-full bg-[radial-gradient(ellipse_at_center,rgb(230_232_236/0.08),transparent_65%)]" />
           {boardKeys ? (
             <KeyboardView keys={boardKeys} looks={looks} selected={onKeys ? new Set(keySel === undefined ? [] : [keySel]) : onAdv ? new Set(advSel === undefined ? [] : [advSel]) : onGamepad ? new Set(gpSel === undefined ? [] : [gpSel]) : onSocd ? socdBoardSel : interactive ? sel : new Set()}
-              onSelect={onKeys ? pickKey : onAdv ? pickAdv : onGamepad ? pickGp : onSocd ? socdClick : setSel} interactive={interactive} knob={dev.driver.knob} maxWidth={kbMax} />
+              onSelect={onKeys ? pickKey : onAdv ? pickAdv : onGamepad ? pickGp : onSocd ? socdClick : setSel} interactive={interactive} knob={dev.driver.knob} maxWidth={kbMax}
+              multi={!!multiTab && !onKeys && !onAdv && !onGamepad && !onSocd} onDouble={multiTab && !onKeys && !onAdv && !onGamepad && !onSocd ? selectSame : undefined} />
           ) : (
             <div className="grid h-64 place-items-center"><KeyboardIcon className="size-40 text-white/10" strokeWidth={0.6} /></div>
           )}
           {onKeys ? (
-            <div className="mt-3 flex h-9 items-center justify-between gap-4">
-              <span className="text-[12px] text-[var(--text-3)]">
-                {keySel !== undefined
+            <div className="mt-3 flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-2">
+              <span className={cn('min-w-0 text-[12px] text-[var(--text-3)]', kmMsg && 'text-[var(--text-2)]')} aria-live="polite">
+                {kmMsg ? kmMsg : keySel !== undefined
                   ? <><span className="display mr-1.5 text-[13px] font-semibold text-[var(--text)]">{km!.keys[keySel].label || t('Key')}</span>{t('selected · pick what it sends below')}</>
                   : t('click a key to remap it · dot = remapped this session · faded = from the layer below')}
               </span>
               {viewSwitch}
+              {km!.layers.length > 1 && (
+                <span className="flex shrink-0 gap-1.5">
+                  <button type="button" className="chip !px-3 !py-1.5 !text-[11px]" onClick={copyKmLayer} title={t('Copy every key of layer {layer}', { layer })}>{t('Copy layer')}</button>
+                  <button type="button" className="chip !px-3 !py-1.5 !text-[11px]" disabled={!layerClip} onClick={pasteKmLayer}
+                    title={layerClip ? t('Put the keys copied from layer {from} on layer {to}. Locked keys and keys only valid where they are stay as they are.', { from: layerClip.layer, to: layer }) : t('Copy a layer first')}>
+                    {layerClip ? t('Paste layer {n}', { n: layerClip.layer }) : t('Paste layer')}
+                  </button>
+                </span>
+              )}
               {km!.layers.length > 1 && (
                 <span className="flex shrink-0 items-center gap-2.5">
                   <span className="eyebrow whitespace-nowrap">{t('Layer')}</span>
@@ -810,19 +915,32 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
               )}
             </div>
           ) : (
-          <div className={cn('mt-3 flex h-9 items-center justify-between', !showBar && 'invisible')}>
-            <span className="text-[12px] text-[var(--text-3)]">{!testing && <span className="display mr-1.5 text-[13px] font-semibold text-[var(--text)]">{selIdx.length}</span>}
-              {testing ? t('live test · press keys on your keyboard') : <>{selIdx.length === 1 ? t('key selected') : t('keys selected')} · {selIdx.length === 0 ? t('editing all keys, click or drag to pick some') : t('click or drag over keys')}</>}</span>
-            <span className="flex shrink-0 gap-1.5">
+          <div className={cn('mt-3 flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-2', !showBar && 'invisible')}>
+            <span className="min-w-0 text-[12px] text-[var(--text-3)]" aria-live="polite">{!testing && <span className="display mr-1.5 text-[13px] font-semibold text-[var(--text)]">{selIdx.length}</span>}
+              {testing ? t('live test · press keys on your keyboard') : <>{selIdx.length === 1 ? t('key selected') : t('keys selected')}
+                {selValue !== undefined && <> · <span className="display text-[11.5px] text-[var(--text-2)]">{selValue}</span></>}
+                {' · '}{selMsg ?? (selIdx.length === 0 ? t('editing all keys, click or drag to pick some') : multiTab ? t('Shift+click: range · Ctrl+click: toggle · double-click: same settings') : t('click or drag over keys'))}</>}</span>
+            <span className="flex shrink-0 flex-wrap items-center gap-1.5">
+              {multiTab && (
+                <>
+                  <button type="button" className="chip !px-3 !py-1.5 !text-[11px]" disabled={!canCopy} onClick={doCopy}
+                    title={canCopy ? t('Copy the selected key’s settings (Ctrl+C)') : t('Select one key (or keys set up the same) to copy')}>{t('Copy')}</button>
+                  <button type="button" className="chip !px-3 !py-1.5 !text-[11px]" disabled={!canPaste} onClick={doPaste}
+                    title={clip && clip.kind === multiTab ? t('Paste {key}’s settings to the selected keys (Ctrl+V)', { key: keyName(clip) }) : t('Copy a key first')}>{t('Paste to selected')}</button>
+                </>
+              )}
               {canTest && active === 'Performance' && (
                 <button type="button" className={cn('chip display whitespace-nowrap !text-[11px] font-semibold', testing && 'plat !border-transparent')} aria-pressed={testing} onClick={() => setTesting((on) => !on)}>
                   {testing ? '● ' + t('Testing') : t('Test keys')}
                 </button>
               )}
               {!testing && (
-                <Segmented label={t('Select keys')} className="[&_button]:!px-3.5 [&_button]:!py-1.5 [&_button]:!text-[11px]"
-                  value={presetNow} options={PRESET_SEL.map(([n]) => [presetSelName(t, n), n] as const)}
-                  onChange={(n) => { const f = PRESET_SEL.find(([x]) => x === n)![1]; presetSel(f) }} />
+                <>
+                  <Segmented label={t('Select keys')} className="[&_button]:!px-2.5 [&_button]:!py-1.5 [&_button]:!text-[11px]"
+                    value={regionNow} options={regions.map((n) => [regionName(t, n), n] as const)} onChange={pickRegion} />
+                  <button type="button" className="chip !px-3 !py-1.5 !text-[11px]" onClick={() => setSel(invert(keys?.length ?? 0, new Set(selIdx)))}
+                    title={t('Select every key that is not selected')}>{t('Invert')}</button>
+                </>
               )}
             </span>
           </div>

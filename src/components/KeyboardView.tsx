@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import type { KeyCap } from '#/drivers/types'
 import { useT } from '#/lib/i18n'
+import { clickSelect } from '#/lib/key-select'
 
 const U = 44 // px per key unit before scaling
 const PAD = 22
@@ -26,9 +27,10 @@ export interface KeyLook {
 
 /**
  * The real key layout from the driver, drawn as sculpted keycaps and scaled to fit.
- * Click toggles a key, dragging selects a box of keys.
+ * Click toggles a key, dragging selects a box of keys. With `multi`, Shift+click adds the keys between the
+ * last clicked key and this one, Ctrl/Cmd+click toggles one key, and a double-click calls `onDouble`.
  */
-export function KeyboardView({ keys, looks, selected, onSelect, interactive, knob, maxWidth }: {
+export function KeyboardView({ keys, looks, selected, onSelect, interactive, knob, maxWidth, multi, onDouble }: {
   keys: KeyCap[]
   looks: KeyLook[]
   selected: Set<number>
@@ -36,12 +38,17 @@ export function KeyboardView({ keys, looks, selected, onSelect, interactive, kno
   interactive: boolean
   knob?: { x: number; y: number }
   maxWidth: number
+  /** multi-key selection: Shift / Ctrl / Cmd modifiers on clicks */
+  multi?: boolean
+  /** double-click on key `i` (`add`: Shift / Ctrl / Cmd held) */
+  onDouble?: (i: number, add: boolean) => void
 }) {
   const t = useT()
   const wrap = useRef<HTMLDivElement>(null)
   const board = useRef<HTMLDivElement>(null)
   const [fit, setFit] = useState(maxWidth)
-  const [box, setBox] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
+  const [box, setBox] = useState<{ x0: number; y0: number; x1: number; y1: number; shift: boolean; toggle: boolean } | null>(null)
+  const anchor = useRef<number | undefined>(undefined)
 
   const cols = Math.max(...keys.map((k) => k.x + k.w))
   const rows = Math.max(...keys.map((k) => k.y + k.h))
@@ -65,7 +72,7 @@ export function KeyboardView({ keys, looks, selected, onSelect, interactive, kno
   const onDown = (e: React.PointerEvent) => {
     if (!interactive || e.button !== 0) return
     const p = local(e)
-    setBox({ x0: p.x, y0: p.y, x1: p.x, y1: p.y })
+    setBox({ x0: p.x, y0: p.y, x1: p.x, y1: p.y, shift: !!multi && e.shiftKey, toggle: !!multi && (e.ctrlKey || e.metaKey) })
     board.current!.setPointerCapture(e.pointerId)
   }
   const onMove = (e: React.PointerEvent) => {
@@ -73,19 +80,20 @@ export function KeyboardView({ keys, looks, selected, onSelect, interactive, kno
     const p = local(e)
     setBox({ ...box, x1: p.x, y1: p.y })
   }
+  const keyAt = (x: number, y: number) =>
+    keys.findIndex((k) => {
+      const r = keyRect(k)
+      return x >= r.left && x <= r.left + r.width && y >= r.top && y <= r.top + r.height
+    })
   const onUp = () => {
     if (!box || !onSelect) return setBox(null)
     const [x0, x1] = [Math.min(box.x0, box.x1), Math.max(box.x0, box.x1)]
     const [y0, y1] = [Math.min(box.y0, box.y1), Math.max(box.y0, box.y1)]
-    const next = new Set(selected)
+    let next = new Set(selected)
     if (x1 - x0 < 4 && y1 - y0 < 4) {
-      const i = keys.findIndex((k) => {
-        const r = keyRect(k)
-        return x0 >= r.left && x0 <= r.left + r.width && y0 >= r.top && y0 <= r.top + r.height
-      })
-      if (i < 0) next.clear()
-      else if (next.has(i)) next.delete(i)
-      else next.add(i)
+      const r = clickSelect(keys, selected, keyAt(x0, y0), anchor.current, { shift: box.shift, toggle: box.toggle })
+      next = r.sel
+      anchor.current = r.anchor
     } else {
       keys.forEach((k, i) => {
         const r = keyRect(k)
@@ -113,6 +121,15 @@ export function KeyboardView({ keys, looks, selected, onSelect, interactive, kno
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
+        onDoubleClick={(e) => {
+          if (!interactive || !onDouble) return
+          const r = board.current!.getBoundingClientRect()
+          const i = keyAt((e.clientX - r.left) / scale, (e.clientY - r.top) / scale)
+          if (i >= 0) {
+            anchor.current = i
+            onDouble(i, e.shiftKey || e.ctrlKey || e.metaKey)
+          }
+        }}
         role={interactive ? 'group' : undefined}
         aria-label={interactive ? t('Keyboard keys, select keys to edit') : t('Keyboard')}
       >

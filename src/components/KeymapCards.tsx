@@ -79,13 +79,15 @@ export function KeyPicker({ km, layer, keyIndex, onPick, macros = 0, className }
 }
 
 /** What the selected key does now, with quick actions. */
-export function KeyCard({ km, layer, keyIndex, original, onPick }: {
+export function KeyCard({ km, layer, keyIndex, original, onPick, defaultCode }: {
   km: Keymap
   layer: number
   keyIndex: number | undefined
   /** codes as first read this session (for "Restore") */
   original?: number[][]
   onPick: (code: number) => void
+  /** the driver's "keyboard default" keycode, when it has one (adds Reset to default) */
+  defaultCode?: number
 }) {
   const t = useT()
   if (keyIndex === undefined) {
@@ -117,6 +119,10 @@ export function KeyCard({ km, layer, keyIndex, original, onPick }: {
       <div className="mt-3 flex flex-wrap gap-1.5">
         {layer > 0 && <button type="button" className="chip" aria-pressed={code === KC_TRNS} onClick={() => onPick(KC_TRNS)}>{t('Transparent')}</button>}
         <button type="button" className="chip" aria-pressed={code === KC_NO} onClick={() => onPick(KC_NO)}>{t('Disable')}</button>
+        {defaultCode !== undefined && (
+          <button type="button" className="chip" aria-pressed={code === defaultCode} disabled={code === defaultCode} onClick={() => onPick(defaultCode)}
+            title={t(describe(defaultCode, km.codes, km.extra))}>{t('Reset to default')}</button>
+        )}
         {was !== undefined && was !== code && <button type="button" className="chip" onClick={() => onPick(was)}>{t('Restore')}</button>}
       </div>
     </Card>

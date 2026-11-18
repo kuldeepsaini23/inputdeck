@@ -156,11 +156,20 @@ describe('logitech factory', () => {
     const f = new FakeLogitech()
     expect(logitechFactory.match(f.asHid())).toBe(true)
     expect(logitechFactory.match(new FakeLogitech({ wired: true }).asHid())).toBe(true)
-    f.productId = 0xc52b // Unifying receiver: not ours
-    expect(logitechFactory.match(f.asHid())).toBe(false)
+    f.productId = 0xc5ff // a receiver id we haven't listed (newer LIGHTSPEED dongles): create() probes it
+    expect(logitechFactory.match(f.asHid())).toBe(true)
     const g = new FakeLogitech()
     g.collections = []
     expect(logitechFactory.match(g.asHid())).toBe(false)
+  })
+
+  it('finds the mouse behind a receiver whose product id is new to us', async () => {
+    const f = new FakeLogitech()
+    f.productId = 0xc5ff
+    const d = (await logitechFactory.create(f.asHid())) as unknown as { index: number; viaReceiver: boolean } | null
+    expect(d).not.toBeNull()
+    expect(d!.viaReceiver).toBe(true)
+    expect(d!.index).toBeGreaterThanOrEqual(1)
   })
 
   it('creates a driver for a mouse and declines a keyboard', async () => {

@@ -1,7 +1,8 @@
 import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { isDemo, useDeviceManager, webHidSupported } from '#/devices'
+import { FACTORIES, isDemo, useDeviceManager, webHidSupported } from '#/devices'
 import { ConnectSheet } from '#/components/ConnectSheet'
+import { UnknownDevice, unknownInfo, type UnknownInfo } from '#/components/UnknownDevice'
 
 type Manager = ReturnType<typeof useDeviceManager>
 
@@ -39,10 +40,25 @@ export function DeviceProvider({ children }: { children: React.ReactNode }) {
     if (added.length) void navigate({ to: '/d/$id', params: { id: slug(added[added.length - 1]) } })
   }, [mgr.devices, mgr.scanning, navigate])
   const requestConnect = () => (isDemo() ? void mgr.connect() : setSheet(true))
+  // "my device isn't in the list": the browser's full device list; ones no driver knows get a request-support card
+  const [unknown, setUnknown] = useState<UnknownInfo[]>([])
+  const connectAny = async () => {
+    let picked: HIDDevice[] = []
+    try {
+      picked = await navigator.hid.requestDevice({ filters: [] })
+    } catch {
+      /* closed the list */
+    }
+    const strangers = picked.filter((d) => !FACTORIES.some((f) => f.match(d)))
+    if (strangers.length) setUnknown(strangers.map(unknownInfo))
+    await mgr.scan()
+  }
   return (
     <Ctx.Provider value={{ ...mgr, supported, demo, requestConnect }}>
       {children}
-      <ConnectSheet open={sheet} onOpenChange={setSheet} onContinue={() => { setSheet(false); void mgr.connect() }} />
+      <ConnectSheet open={sheet} onOpenChange={setSheet} onContinue={() => { setSheet(false); void mgr.connect() }}
+        onShowAll={() => { setSheet(false); void connectAny() }} />
+      <UnknownDevice info={unknown} onClose={() => setUnknown([])} />
     </Ctx.Provider>
   )
 }

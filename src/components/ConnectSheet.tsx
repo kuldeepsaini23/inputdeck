@@ -14,7 +14,7 @@ const guide = (t: (s: string, v?: Record<string, string>) => string): { icon: Re
  * Shown before Chrome's own device list (which no website can restyle):
  * tells people which name to pick, then opens that list.
  */
-export function ConnectSheet({ open, onOpenChange, onContinue }: { open: boolean; onOpenChange: (o: boolean) => void; onContinue: () => void }) {
+export function ConnectSheet({ open, onOpenChange, onContinue, onShowAll }: { open: boolean; onOpenChange: (o: boolean) => void; onContinue: () => void; onShowAll?: () => void }) {
   const t = useT()
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -42,6 +42,11 @@ export function ConnectSheet({ open, onOpenChange, onContinue }: { open: boolean
         <button type="button" onClick={onContinue} className="plat display flex items-center justify-center gap-2 rounded-full py-3 text-[13px] font-semibold">
           <Usb className="size-4" /> {t('Continue')}
         </button>
+        {onShowAll && (
+          <button type="button" onClick={onShowAll} className="self-center text-[12px] text-[var(--text-3)] underline-offset-2 hover:text-[var(--text)] hover:underline">
+            {t("My device isn't in the list")}
+          </button>
+        )}
       </DialogContent>
     </Dialog>
   )

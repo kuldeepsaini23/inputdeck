@@ -289,7 +289,7 @@ export class LogitechDriver implements Driver {
   readonly kind: DeviceKind = 'mouse';
   readonly verified = false;
   private link: Link;
-  private readonly receiver: boolean;
+  private receiver: boolean;
   private devIndex = -1;
   private features = new Map<number, number>();
   private name = '';
@@ -322,6 +322,10 @@ export class LogitechDriver implements Driver {
   get index(): number {
     return this.devIndex;
   }
+  /** true when the mouse is reached through a LIGHTSPEED / Bolt / Unifying receiver */
+  get viaReceiver(): boolean {
+    return this.receiver;
+  }
   /** HID++ device type from 0x0005 (3 = mouse), -1 if unknown */
   get type(): number {
     return this.deviceType;
@@ -338,6 +342,20 @@ export class LogitechDriver implements Driver {
   /** Find the mouse: 0xFF when wired, else the first receiver slot that answers a HID++ 2.0 ping. */
   async init(): Promise<void> {
     if (this.devIndex >= 0) return;
+    // a product id we don't know: ask it as a wired mouse first; if nothing HID++ 2.0 answers there it's
+    // probably a newer receiver, so look behind it
+    if (!this.receiver && !isWiredMousePid(this.device.productId)) {
+      try {
+        const proto = await this.ping(WIRED_INDEX, 400);
+        await this.identify(WIRED_INDEX, proto);
+        if (MOUSE_TYPES.includes(this.deviceType)) return;
+      } catch {
+        // not a wired HID++ 2.0 device
+      }
+      this.devIndex = -1;
+      this.deviceType = -1;
+      this.receiver = true;
+    }
     const slots = this.receiver ? [1, 2, 3, 4, 5, 6] : [WIRED_INDEX];
     let last: unknown = null;
     const found: { idx: number; proto: string }[] = [];
@@ -595,21 +613,20 @@ export const logitechFactory: DriverFactory = {
   name: 'Logitech G (HID++)',
   filters: [{ vendorId: VID, usagePage: 0xff00 }],
   match(d: HIDDevice): boolean {
-    if (d.vendorId !== VID) return false;
-    if (!RECEIVER_PIDS.includes(d.productId) && !isWiredMousePid(d.productId)) return false;
-    return hasHidpp(d);
+    // any Logitech HID++ interface: new mice and receivers (e.g. the PRO X2 SUPERSTRIKE) have product ids we
+    // haven't listed yet; create() pings it and only keeps mice, trackballs and trackpads
+    return d.vendorId === VID && hasHidpp(d);
   },
   async create(device: HIDDevice): Promise<Driver | null> {
     if (!logitechFactory.match(device)) return null;
     const openedHere = !device.opened;
     if (openedHere) await device.open();
     const drv = new LogitechDriver(device);
-    const receiver = RECEIVER_PIDS.includes(device.productId);
     try {
       await drv.init();
     } catch {
       // a receiver may be plugged in with the mouse off: keep it, read() says so
-      if (receiver) return drv;
+      if (drv.viaReceiver) return drv;
       drv.release();
       if (openedHere) await device.close().catch(() => undefined);
       return null;

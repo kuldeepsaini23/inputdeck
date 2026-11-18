@@ -2,6 +2,7 @@
 // configurator's), never a retailer / review site. Walks the same ids each driver detects.
 import { describe, expect, it } from 'vitest';
 import { ATK_MICE, atkPhoto } from './compxb-atk';
+import { photoOf as finalmousePhoto, PRODUCTS as FINALMOUSE } from './finalmouse';
 import { MODELS as LOGITECH } from './logitech';
 import { PHOTO as ORBITAL_PHOTO } from './orbital';
 import { resolveVariant } from './pulsar';
@@ -21,6 +22,7 @@ const BRAND_HOSTS = [
   'resource.logitechg.com',
   'medias-p1.phoenix.razer.com',
   'orbitalworks.co',
+  'xpanel.finalmouse.com', // Finalmouse Xpanel
 ];
 
 function allPhotos(): [string, string][] {
@@ -41,6 +43,7 @@ function allPhotos(): [string, string][] {
   for (const m of Object.values(RAZER)) add(`Razer ${m.name}`, m.image);
   for (const [re, url] of LOGITECH) add(`Logitech ${re}`, url);
   add('Orbital', ORBITAL_PHOTO);
+  for (const pid of Object.keys(FINALMOUSE)) add(`Finalmouse ${pid}`, finalmousePhoto(Number(pid)));
   return out;
 }
 

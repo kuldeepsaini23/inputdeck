@@ -83,7 +83,7 @@ export function SettingControl({ s, onEdit: edit }: { s: Setting; onEdit: Edit }
     case 'toggle':
       return <Row label={label} hint={hint}><Toggle label={label} checked={v.on} onChange={(on) => onEdit(s.key, { ...v, on })} /></Row>
     case 'text':
-      return <Row label={label}><span className="text-right text-[12.5px] text-[var(--text-2)]">{v.text}</span></Row>
+      return <Row label={label} hint={hint}><span className="text-right text-[12.5px] text-[var(--text-2)]">{v.text}</span></Row>
     case 'choice':
       return (
         <div className="border-b border-white/5 py-3 last:border-0">

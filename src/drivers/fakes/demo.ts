@@ -10,6 +10,7 @@ import { FakeDareu } from './fake-dareu'
 import { FakeAtkKb } from './fake-atk-kb'
 import { FakeFinalmouse } from './fake-finalmouse'
 import { FakeWooting } from './fake-wooting'
+import { FakeSteelSeries } from './fake-steelseries'
 
 let devices: HIDDevice[] | undefined
 
@@ -26,6 +27,7 @@ export function demoDevices(): HIDDevice[] {
     new FakeAtkKb().asDevice(),
     new FakeFinalmouse().asHid(),
     new FakeWooting().asHid(),
+    new FakeSteelSeries().asHid(),
   ]
   return devices
 }

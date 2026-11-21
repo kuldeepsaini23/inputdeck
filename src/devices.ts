@@ -17,11 +17,12 @@ import { viaFactory } from './drivers/via';
 import { vgnFactory } from './drivers/vgn';
 import { finalmouseFactory } from './drivers/finalmouse';
 import { wootingFactory } from './drivers/wooting';
+import { steelseriesFactory } from './drivers/steelseries';
 
 const ALLOW_KEY = 'inputdeck.allowChanges';
 
 // VIA last: it matches any raw-HID keyboard the brand drivers above don't claim
-export const FACTORIES: DriverFactory[] = [wlmouseFactory, wraithFactory, pulsarFactory, compxbFactory, logitechFactory, razerFactory, orbitalFactory, dareuFactory, lofreeFactory, vgnFactory, finalmouseFactory, wootingFactory, atkKbFactory, viaFactory];
+export const FACTORIES: DriverFactory[] = [wlmouseFactory, wraithFactory, pulsarFactory, compxbFactory, logitechFactory, razerFactory, orbitalFactory, dareuFactory, lofreeFactory, vgnFactory, finalmouseFactory, wootingFactory, steelseriesFactory, atkKbFactory, viaFactory];
 
 export interface DeviceState {
   id: string;

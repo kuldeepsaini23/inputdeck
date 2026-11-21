@@ -41,7 +41,7 @@ const ICON: Record<string, React.ReactNode> = {
   Settings: <Settings2 className="size-4" />,
 }
 /** settings with their own place in a tab (everything else in their group shows as a generic card) */
-const OWN = new Set(['rt_adaptive', 'advanced_keys', 'actuation', 'rapid_trigger', 'rt_sens', 'per_key_trigger', 'per_key_color', 'socd', 'keymap', 'macros', 'polling', 'profile', 'fw', 'model', 'gp_map', 'gp_curve_ls', 'gp_curve_rs', 'gp_curve_lt', 'gp_curve_rt'])
+const OWN = new Set(['rt_adaptive', 'advanced_keys', 'actuation', 'rapid_trigger', 'rt_sens', 'per_key_trigger', 'per_key_color', 'socd', 'keymap', 'macros', 'polling', 'profile', 'fw', 'model', 'gp_map', 'gp_curve', 'gp_curve_ls', 'gp_curve_rs', 'gp_curve_lt', 'gp_curve_rt'])
 /** driver groups that feed a tab of another name */
 const GROUP_TAB: Record<string, string> = { Switches: 'Performance', Info: 'Settings', Profile: 'Settings', Profiles: 'Settings' }
 /** old ?tab= values */
@@ -423,7 +423,7 @@ export function KeyboardPage({ dev, tab, setTab, onEdit }: { dev: DeviceState; t
           {wide && <Pulse rate={rate || 1000} width={240} />}
         </div>
         <Segmented className="mt-4" label={t('Polling rate')} options={poll.value.options.map(([l, v]) => [shortHz(l), v] as const)} value={poll.value.current}
-          onChange={(c) => onEdit('polling', { ...(poll.value as Choice), current: c })} />
+          onChange={(c) => { if (poll.confirm && !window.confirm(t(poll.confirm))) return; onEdit('polling', { ...(poll.value as Choice), current: c }) }} />
         <p className="hint mt-3 mb-0">{rate ? t('Reports every {ms} ms.', { ms: (1000 / rate).toFixed(3).replace(/0+$/, '').replace(/\.$/, '') }) + ' ' : ''}{t('Higher rates report presses sooner and use a little more CPU.')}</p>
       </Card>
     )

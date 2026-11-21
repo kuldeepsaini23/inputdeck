@@ -90,7 +90,7 @@ describe('wooting allowlist', () => {
   });
 
   it('refuses bootloader, resets, deletes, device config and other reports', () => {
-    for (const cmd of [2, 25, 43, 44, 63, 64, 42, 47, 53, 21, 0])
+    for (const cmd of [2, 25, 43, 44, 63, 64, 42, 47, 21, 0])
       expect(allowedCommand([0xd1, 0xda, cmd, 0, 0, 0, 0])).toBe(false);
     expect(allowedCommand([0xd1, 0xda, 39, 4, 0, 0, 0])).toBe(false); // slot 5
     expect(allowedCommand([0xd1, 0xda, 1, 0, 0, 1, 0])).toBe(false);
@@ -98,6 +98,7 @@ describe('wooting allowlist', () => {
     // DeviceConfig (restarts the board), mapping, gamepad, global settings, metadata
     for (const type of [0x07, 0x12, 0x13, 0x14, 0x17, 0x18, 0x1a, 0x1b, 0x28, 0x0b, 0x0e])
       expect(allowedReport(...frameReport(type, 0, KB_DEFAULT))).toBe(false);
+    expect(allowedCommand([0xd1, 0xda, 25, 0, 0, 0, 0], true)).toBe(true);
     // actuation out of range / not 14-bit
     const bad = pbEncode([{ no: 1, wt: 2, v: 0, b: pbEncode(setField(kbBase(KB_DEFAULT), 1, 0x4000)) }]);
     expect(allowedReport(...frameReport(REPORT.keyboardProfile, 0, bad))).toBe(false);
@@ -172,7 +173,7 @@ describe('wooting driver', () => {
     expect(pk.keys.filter((_, i) => pk.rapid[i]).map((k) => k.label)).toEqual(['W', 'A', 'S', 'D']);
     expect(pk.sens[pos('W')]).toBe(0.4);
     expect(find(ss, 'light_bri').value).toMatchObject({ current: 100 });
-    expect(find(ss, 'usb_speed').value).toEqual({ kind: 'text', text: '8000 Hz' });
+    expect(find(ss, 'polling').value).toMatchObject({ kind: 'choice', current: 0 });
     expect(ss.some((s) => s.key === 'unsupported')).toBe(false);
   });
 

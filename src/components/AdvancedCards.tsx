@@ -106,8 +106,12 @@ export function AdvancedCards({ v, pos, onChange }: { v: AdvancedKeys; pos: numb
     editor = (
       <Card title={t('Toggle')} className="col-span-2">
         <HidSelect label={t('Key to latch')} kc={e.kc} onChange={(kc) => set({ ...e, kc })} />
-        <div className="mt-4 flex items-baseline justify-between"><span className="eyebrow">{t('Counts as a hold after')}</span><span className="display text-[12px]">{e.delay} ms</span></div>
-        <Range className="mt-1.5" label={t('Toggle hold time')} min={r.min} max={r.max} step={r.step} value={e.delay} onChange={(delay) => set({ ...e, delay })} />
+        {r.max > r.min && (
+          <>
+            <div className="mt-4 flex items-baseline justify-between"><span className="eyebrow">{t('Counts as a hold after')}</span><span className="display text-[12px]">{e.delay} ms</span></div>
+            <Range className="mt-1.5" label={t('Toggle hold time')} min={r.min} max={r.max} step={r.step} value={e.delay} onChange={(delay) => set({ ...e, delay })} />
+          </>
+        )}
       </Card>
     )
   } else {

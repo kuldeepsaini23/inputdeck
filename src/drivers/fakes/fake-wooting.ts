@@ -71,6 +71,7 @@ export class FakeWooting {
   fw: [number, number, number];
   slot: number;
   names: string[];
+  metas: Uint8Array[];
   slots: Slot[];
   ram: Slot;
   config = h('00 00 00 00 11 00 0c');
@@ -88,6 +89,7 @@ export class FakeWooting {
     this.fw = o.fw ?? [2, 14, 2];
     this.slot = o.slot ?? 0;
     this.names = o.profiles ?? ['Typing Profile', 'Rapid Profile', 'Racing Profile', 'Mixed Movement'];
+    this.metas = this.names.map((n) => meta(n));
     this.slots = this.names.map((_, i) => ({ kb: KB_DEFAULT.slice(), pk: i === 0 ? PK_A.slice() : new Uint8Array(0), rt: i === 0 ? RT_WASD.slice() : new Uint8Array(0), core: CORE.slice(), gpMap: new Uint8Array(0), gpProf: GP_PROFILE.slice(), maps: [0, 1, 2, 3].map(() => new Uint8Array(0)), akc: i === 0 ? AKC_MT.slice() : new Uint8Array(0), c1: COLORS.slice(), c2: COLORS.slice() }));
     this.ram = { ...this.slots[this.slot], maps: [...this.slots[this.slot].maps] };
   }
@@ -136,7 +138,7 @@ export class FakeWooting {
       case 19:
         return this.reply(cmd, this.config);
       case 55:
-        return this.reply(cmd, slot < this.names.length ? meta(this.names[slot]) : []);
+        return this.reply(cmd, slot < this.names.length ? this.metas[slot] : []);
       case 62:
         return this.reply(cmd, [], 0x66);
       case 39:
@@ -169,6 +171,11 @@ export class FakeWooting {
         return this.reply(cmd, s.c1);
       case 36:
         return this.reply(cmd, s.c2);
+      case 63:
+        check(slot === this.names.length - 1 && slot !== this.slot, 'delete of a profile that is not the last one');
+        this.names.pop();
+        this.metas.pop();
+        return this.reply(cmd, []);
       case 25:
         this.resets++;
         return;
@@ -210,6 +217,10 @@ export class FakeWooting {
     }
     const len = d[4] | (d[5] << 8);
     const p = d.slice(6, 6 + len);
+    if (type === 0x1a) {
+      if (flags) this.metas[flags >> 1] = p;
+      return;
+    }
     if (type === 0x17) {
       this.global = p;
       return;

@@ -62,7 +62,8 @@ for (const file of files) {
   if (isDriver) {
     const pats = [
       String.raw`\b(?:label|hint|confirm|group|title)\s*:\s*` + LIT,
-      String.raw`\[\s*` + LIT + String.raw`\s*,\s*-?(?:0x[0-9a-fA-F]+|\d+)\s*\]`,
+      String.raw`\[\s*` + LIT + String.raw`\s*,\s*-?(?:0x[0-9a-fA-F]+|\d+)\s*[\],]`, // ['Label', n] and ['Label', n, ...]
+      String.raw`\[\s*0x[0-9a-fA-F]+\s*,\s*` + LIT + String.raw`\s*\]`, // [code, 'Label']
       String.raw`new Error\(\s*` + LIT + String.raw`\s*\)`,
       String.raw`\berror\s*:\s*` + LIT,
     ]

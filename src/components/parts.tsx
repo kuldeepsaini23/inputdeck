@@ -83,6 +83,15 @@ export function SettingControl({ s, onEdit: edit }: { s: Setting; onEdit: Edit }
     case 'toggle':
       return <Row label={label} hint={hint}><Toggle label={label} checked={v.on} onChange={(on) => onEdit(s.key, { ...v, on })} /></Row>
     case 'text':
+      if (v.max)
+        return (
+          <Row label={label} hint={hint}>
+            <input key={v.text} defaultValue={v.text} maxLength={v.max} aria-label={label}
+              className="w-[160px] rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-right text-[12.5px]"
+              onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+              onBlur={(e) => { const text = e.currentTarget.value.trim(); if (text && text !== v.text) onEdit(s.key, { ...v, text }) }} />
+          </Row>
+        )
       return <Row label={label} hint={hint}><span className="text-right text-[12.5px] text-[var(--text-2)]">{v.text}</span></Row>
     case 'choice':
       return (

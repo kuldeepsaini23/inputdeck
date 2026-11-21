@@ -13,7 +13,8 @@ export interface KeyCap {
 }
 
 export type Value =
-  | { kind: 'text'; text: string }
+  /** `max` set: the user may edit it (a name, at most `max` characters) */
+  | { kind: 'text'; text: string; max?: number }
   | { kind: 'choice'; options: [label: string, value: number][]; current: number }
   | { kind: 'number'; min: number; max: number; current: number; unit: string }
   | { kind: 'float'; min: number; max: number; step: number; current: number; unit: string }

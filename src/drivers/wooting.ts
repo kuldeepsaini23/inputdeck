@@ -48,6 +48,7 @@
 // lighting, calibration.
 import type { AdvancedKey, Driver, DriverFactory, ExtraCategory, KeyCap, Setting, SocdEntry, Value } from './types';
 import { sleep } from './types';
+import { label as labelOf } from '../lib/keycodes';
 
 export const VID = 0x31e3;
 /** configuration interface of the ARM ("v3") firmware */
@@ -119,6 +120,7 @@ export const CMD = {
   getProfileMetadata: 55,
   getRtKeys: 61,
   getProfileCount: 62,
+  deleteProfile: 63,
 } as const;
 /** commands taking a profile slot in data[3] (the rest send all-zero parameters) */
 const SLOT_CMDS = new Set<number>([
@@ -138,6 +140,7 @@ const SLOT_CMDS = new Set<number>([
   CMD.getMappingProfile,
   CMD.getAkcProfile,
   CMD.saveAkcProfile,
+  CMD.deleteProfile,
 ]);
 const ZERO_CMDS = new Set<number>([CMD.getVersion, CMD.getProfileIndex, CMD.getDeviceConfig, CMD.wootDevInit, CMD.getGlobalSettings, CMD.getProfileCount, CMD.getAnalogValues]);
 /** key-mapping layers 0 (main), 1..3 (Fn 1..3) */
@@ -155,6 +158,7 @@ export const REPORT = {
   rgbCore: 0x16,
   global: 0x17,
   akc: 0x18,
+  metadata: 0x1a,
   rtKeys: 0x1d,
 } as const;
 /** flags of device-wide reports (GlobalSettings) */
@@ -803,6 +807,7 @@ export function from565(v: number): number {
 export const EFFECTS: [no: number, name: string, params: [number, number][]][] = [
   [1, 'Wave', [[1, 0], [2, 16], [3, 0]]],
   [3, 'Breathing', [[1, 15], [3, 0]]],
+  [4, 'Colour cycle', [[1, 0], [2, 16]]],
   [5, 'Ripple', [[1, 0], [2, 20], [3, 30], [4, 30]]],
   [6, 'Trail', [[1, 30], [2, 4], [3, 0], [4, 0xffff]]],
   [7, 'Reactive', [[1, 30], [2, 0], [3, 0], [4, 0], [5, 1]]],
@@ -833,6 +838,40 @@ export function effectLayer(no: number): Uint8Array {
   if (!e) throw new Error('unknown effect');
   return pbEncode([mf(no, pbEncode(e[2].map(([f, v]) => vf(f, v))))]);
 }
+
+// ---------------------------------------------------------------- profile metadata (0x1A)
+
+export interface Meta {
+  name: string;
+  /** 0xRRGGBB badge colour */
+  color?: number;
+  icon?: string;
+  rest: PbField[];
+}
+/** ProfileMetadata { 1 name, 2 colour { 1 r, 2 g, 3 b }, 3 icon } */
+export function parseMeta(b: Uint8Array): Meta {
+  const fs = pbDecode(b);
+  const dec = (n: number) => {
+    const x = bytesOf(fs, n);
+    return x ? new TextDecoder().decode(x) : undefined;
+  };
+  const c = bytesOf(fs, 2);
+  const cf = c ? pbDecode(c) : undefined;
+  return {
+    name: dec(1) ?? '',
+    color: cf ? ((getV(cf, 1) ?? 0) << 16) | ((getV(cf, 2) ?? 0) << 8) | (getV(cf, 3) ?? 0) : undefined,
+    icon: dec(3),
+    rest: fs.filter((f) => f.no > 3),
+  };
+}
+export function encodeMeta(m: Meta): Uint8Array {
+  const enc = (t: string) => new TextEncoder().encode(t);
+  const fs: PbField[] = [mf(1, enc(m.name))];
+  if (m.color !== undefined) fs.push(mf(2, pbEncode([vf(1, (m.color >> 16) & 0xff), vf(2, (m.color >> 8) & 0xff), vf(3, m.color & 0xff)])));
+  if (m.icon !== undefined) fs.push(mf(3, enc(m.icon)));
+  return pbEncode([...fs, ...m.rest]);
+}
+export const NAME_MAX = 24;
 
 // ---------------------------------------------------------------- global settings (0x17) and DeviceConfig (0x07)
 
@@ -884,6 +923,8 @@ export function allowedCommand(d: ArrayLike<number>, reset = false): boolean {
   if (d[4] !== 0 || d[6] !== 0) return false;
   if (d[5] !== 0 && !(cmd === CMD.getMappingProfile && d[5] < LAYERS)) return false;
   if (cmd === CMD.softReset) return reset && d[3] === 0 && d[5] === 0;
+  // the default profile (slot 0) is never deleted
+  if (cmd === CMD.deleteProfile) return d[3] >= 1 && d[3] < SLOTS;
   if (SLOT_CMDS.has(cmd)) return d[3] < SLOTS;
   if (ZERO_CMDS.has(cmd)) return d[3] === 0;
   return false;
@@ -1056,6 +1097,18 @@ function okAkcPayload(p: Uint8Array): boolean {
   if (getV(fs, 3) !== undefined && getV(fs, 3) !== entries.length) return false;
   return entries.every((e) => okAkcEntry(e.b!));
 }
+function okMetaPayload(p: Uint8Array): boolean {
+  const fs = safe(() => pbDecode(p));
+  if (!fs || !fs.every((f) => f.no >= 1 && f.no <= 3 && f.wt === 2)) return false;
+  const name = bytesOf(fs, 1);
+  const text = name ? safe(() => new TextDecoder('utf-8', { fatal: true }).decode(name)) : undefined;
+  if (text === undefined || !text.trim() || [...text].length > NAME_MAX || /[ -]/.test(text)) return false;
+  const icon = bytesOf(fs, 3);
+  if (icon && (icon.length > 40 || !/^[ -~]*$/.test(new TextDecoder().decode(icon)))) return false;
+  const c = bytesOf(fs, 2);
+  const cf = c ? safe(() => pbDecode(c)) : [];
+  return !!cf && varintsOnly(cf) && cf.every((f) => f.no <= 3 && f.v <= 255);
+}
 function okGlobalPayload(p: Uint8Array): boolean {
   const fs = safe(() => pbDecode(p));
   if (!fs || !fs.every((f) => (f.no === 1 && f.wt === 2) || ((f.no === 2 || f.no === 3) && f.wt === 0 && isBool(f.v)))) return false;
@@ -1111,6 +1164,8 @@ export function allowedReport(id: number, d: ArrayLike<number>): boolean {
       return flags === 0 && okAkcPayload(p);
     case REPORT.global:
       return flags === FLAGS_GLOBAL && okGlobalPayload(p);
+    case REPORT.metadata:
+      return profileFlags && okMetaPayload(p);
     default:
       return false;
   }
@@ -1270,7 +1325,8 @@ const SIXTY: [number, number, string, number, number, number][] = [
   [5, 10, 'Alt', 10, 4, 1.25], [5, 11, 'Menu', 11.25, 4, 1.25], [5, 12, 'Ctrl', 12.5, 4, 1.25], [5, 13, 'Fn', 13.75, 4, 1.25],
 ];
 /** the space bar spans three matrix cells (eng1n88r mapping dump: 29 at (5,4), (5,6), (5,8)) */
-const EXTRA_CELLS = new Map<number, number[]>([[mid(5, 4), [mid(5, 6), mid(5, 8)]]]);
+/** keys that span several matrix cells (the 60HE space bar: (5,4), (5,6), (5,8), eng1n88r mapping dump) */
+const EXTRA_CELLS = new WeakMap<KeyCap, number[]>();
 export const SIXTY_ANSI: KeyCap[] = SIXTY.map(([r, c, label, x, y, w]) => ({ index: mid(r, c), label, x, y, w, h: 1 }));
 /** ISO (DeviceConfig layout 1 / 4): the extra keys left of Z and left of Enter */
 export const SIXTY_ISO: KeyCap[] = SIXTY_ANSI.flatMap((k): KeyCap[] => {
@@ -1278,7 +1334,87 @@ export const SIXTY_ISO: KeyCap[] = SIXTY_ANSI.flatMap((k): KeyCap[] => {
   if (k.index === mid(3, 13)) return [{ index: mid(3, 12), label: '#', x: 12.75, y: 2, w: 1, h: 1 }, { ...k, x: 13.75, w: 1.25 }];
   return [k];
 });
-export const cellsOf = (k: KeyCap) => [k.index, ...(EXTRA_CELLS.get(k.index) ?? [])];
+for (const k of [...SIXTY_ANSI, ...SIXTY_ISO]) if (k.index === mid(5, 4)) EXTRA_CELLS.set(k, [mid(5, 6), mid(5, 8)]);
+export const cellsOf = (k: KeyCap) => [k.index, ...(EXTRA_CELLS.get(k) ?? [])];
+
+/** ANSI full-size positions by HID usage: [x, y, w] (y 0 = F row) */
+const POS = new Map<number, [number, number, number]>();
+{
+  const row = (y: number, x0: number, codes: number[], w = 1) => codes.forEach((c, i) => POS.set(c, [x0 + i * w, y, w]));
+  POS.set(0x29, [0, 0, 1]);
+  row(0, 2, [0x3a, 0x3b, 0x3c, 0x3d]);
+  row(0, 6.5, [0x3e, 0x3f, 0x40, 0x41]);
+  row(0, 11, [0x42, 0x43, 0x44, 0x45]);
+  row(0, 15.25, [0x46, 0x47, 0x48]);
+  row(1.25, 0, [0x35, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x2d, 0x2e]);
+  POS.set(0x2a, [13, 1.25, 2]);
+  row(1.25, 15.25, [0x49, 0x4a, 0x4b]);
+  POS.set(0x2b, [0, 2.25, 1.5]);
+  row(2.25, 1.5, [0x14, 0x1a, 0x08, 0x15, 0x17, 0x1c, 0x18, 0x0c, 0x12, 0x13, 0x2f, 0x30]);
+  POS.set(0x31, [13.5, 2.25, 1.5]);
+  row(2.25, 15.25, [0x4c, 0x4d, 0x4e]);
+  POS.set(0x39, [0, 3.25, 1.75]);
+  row(3.25, 1.75, [0x04, 0x16, 0x07, 0x09, 0x0a, 0x0b, 0x0d, 0x0e, 0x0f, 0x33, 0x34]);
+  POS.set(0x28, [12.75, 3.25, 2.25]);
+  POS.set(0xe1, [0, 4.25, 2.25]);
+  row(4.25, 2.25, [0x1d, 0x1b, 0x06, 0x19, 0x05, 0x11, 0x10, 0x36, 0x37, 0x38]);
+  POS.set(0xe5, [12.25, 4.25, 2.75]);
+  POS.set(0x52, [16.25, 4.25, 1]);
+  POS.set(0xe0, [0, 5.25, 1.25]);
+  POS.set(0xe3, [1.25, 5.25, 1.25]);
+  POS.set(0xe2, [2.5, 5.25, 1.25]);
+  POS.set(0x2c, [3.75, 5.25, 6.25]);
+  POS.set(0xe6, [10, 5.25, 1.25]);
+  POS.set(0xe7, [11.25, 5.25, 1.25]);
+  POS.set(0x65, [12.5, 5.25, 1.25]);
+  POS.set(0xe4, [13.75, 5.25, 1.25]);
+  row(5.25, 15.25, [0x50, 0x51, 0x4f]);
+  row(1.25, 18.5, [0x53, 0x54, 0x55, 0x56]);
+  row(2.25, 18.5, [0x5f, 0x60, 0x61]);
+  POS.set(0x57, [21.5, 2.25, 1]);
+  row(3.25, 18.5, [0x5c, 0x5d, 0x5e]);
+  row(4.25, 18.5, [0x59, 0x5a, 0x5b]);
+  POS.set(0x58, [21.5, 4.25, 1]);
+  POS.set(0x62, [18.5, 5.25, 2]);
+  POS.set(0x63, [20.5, 5.25, 1]);
+}
+
+/**
+ * The board picture of a keyboard we have no drawing for (80HE, Two HE, UwU), from its stored main
+ * layer: every matrix cell holding a key becomes that key, placed where the key sits on a full-size
+ * board. Cells that hold the same key (a space bar on several switches) become one key.
+ */
+export function layoutFromMapping(rows: number[][]): KeyCap[] {
+  const out: KeyCap[] = [];
+  const byCode = new Map<number, KeyCap>();
+  const taken = new Set<string>();
+  const iso = rows.some((r) => r.includes(0x61));
+  const fnAt: [number, number, number] = [rows.some((r) => r.includes(0x6a)) ? 12.5 : 11.25, 5.25, 1.25];
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++) {
+      const w = rows[r]?.[c] ?? W_NONE;
+      if (w === W_NONE) continue;
+      const m = mid(r, c);
+      const prev = byCode.get(w);
+      if (prev && w === 0x29) {
+        EXTRA_CELLS.set(prev, [...(EXTRA_CELLS.get(prev) ?? []), m]);
+        continue;
+      }
+      const hid = wootToHid(w);
+      let p = hid !== undefined ? POS.get(hid) : w === W_FN1 ? fnAt : undefined;
+      if (p && iso && hid === 0xe1) p = [0, 4.25, 1.25];
+      if (iso && hid === 0x64) p = [1.25, 4.25, 1];
+      const at = p ? `${p[0]},${p[1]}` : '';
+      if (!p || taken.has(at)) p = [c, 7 + r, 1];
+      taken.add(`${p[0]},${p[1]}`);
+      const q = wootToQmk(w);
+      const own = W_OWN.find(([x]) => x === w);
+      const cap: KeyCap = { index: m, label: own ? own[2] : hid !== undefined ? labelOf(q) : hex2(w), x: p[0], y: p[1], w: p[2], h: 1 };
+      out.push(cap);
+      byCode.set(w, cap);
+    }
+  return out;
+}
 
 export const LAYOUT_NAMES = ['ANSI', 'ISO', 'JIS', 'ANSI (split space)', 'ISO (split space)'];
 const GAMEPAD_NAMES = ['Xbox', 'Classic', 'Off'];
@@ -1311,6 +1447,7 @@ interface State {
   /** colour rows 0..5, RGB565 per matrix column */
   colors?: number[][];
   globalRaw?: Uint8Array;
+  meta?: Meta;
 }
 
 const text = (key: string, label: string, t: string): Setting => ({ key, label, group: 'Info', value: { kind: 'text', text: t } });
@@ -1435,9 +1572,14 @@ export class WootingDriver implements Driver {
   private st: State | null = null;
   /** set once a DeviceConfig write made the keyboard restart */
   private restarting = false;
-  /** the board picture (60% boards only) */
-  readonly layout?: () => KeyCap[];
-  readonly travelTest?: (onSample: (pos: number, mm: number) => void) => Promise<() => Promise<void>>;
+  /** the board picture: drawn for the 60% boards, built from the stored key map on the others */
+  get layout(): (() => KeyCap[]) | undefined {
+    const caps = this.st?.caps ?? (this.m.sixty ? SIXTY_ANSI : undefined);
+    return caps ? () => caps : undefined;
+  }
+  get travelTest(): ((onSample: (pos: number, mm: number) => void) => Promise<() => Promise<void>>) | undefined {
+    return this.layout ? (cb) => this.runTravel(cb) : undefined;
+  }
 
   constructor(
     private readonly device: HIDDevice,
@@ -1446,10 +1588,6 @@ export class WootingDriver implements Driver {
     this.id = `${device.vendorId.toString(16).padStart(4, '0')}:${device.productId.toString(16).padStart(4, '0')}`;
     this.m = modelOf(device.productId) ?? { pid: device.productId, name: 'keyboard' };
     this.link = new Link(device, o.timeoutMs ?? 1500);
-    if (this.m.sixty) {
-      this.layout = () => this.st?.caps ?? SIXTY_ANSI;
-      this.travelTest = (cb) => this.runTravel(cb);
-    }
   }
 
   brand() {
@@ -1493,15 +1631,21 @@ export class WootingDriver implements Driver {
     const slot = await this.readSlot();
 
     const names: string[] = [];
+    let meta: Meta | undefined;
     for (let s = 0; s < SLOTS; s++) {
       const r = await this.link.cmd(CMD.getProfileMetadata, s).catch(() => undefined);
       if (!r || r.status !== STATUS_OK || !r.body.length) break;
-      const name = safe(() => pbDecode(r.body).find((f) => f.no === 1 && f.wt === 2));
-      names.push(name?.b ? new TextDecoder().decode(name.b) : '');
+      const m = safe(() => parseMeta(r.body));
+      names.push(m?.name ?? '');
+      if (s === slot && m && okMetaPayload(encodeMeta(m))) meta = m;
     }
     if (names.length > slot) {
       const options = names.map((n, i) => [n || `Profile ${i + 1}`, i] as [string, number]);
       out.push({ key: 'profile', label: 'Profile', group: 'Profile', value: { kind: 'choice', options, current: slot } });
+      // only the last profile, never the active one or the default (slot 0), like Wootility's delete of the last slot
+      const last = names.length - 1;
+      if (last > 0 && last !== slot)
+        out.push({ key: 'profile_delete', label: 'Delete a profile', group: 'Profile', value: { kind: 'choice', options: [['Keep all', -1], [options[last][0], last]], current: -1 }, hint: 'Only the last profile can be deleted, and not while it is active', confirm: "Delete this profile from the keyboard? This can't be undone." });
     } else out.push(text('profile_n', 'Active profile', String(slot + 1)));
 
     const cfg = await this.ok(CMD.getDeviceConfig).catch(() => undefined);
@@ -1519,7 +1663,7 @@ export class WootingDriver implements Driver {
     const rtRaw = rtGot ?? new Uint8Array(0);
     const groups = parsed ?? [];
     let perKey: Map<number, number> | undefined;
-    if (caps) {
+    if (caps && this.m.sixty) {
       const pk = parsePerKey(await this.ok(CMD.getActuationProfile, slot));
       if (pk.form === 'legacy' || pk.form === 'unknown') writable = false;
       perKey = pk.map;
@@ -1530,16 +1674,30 @@ export class WootingDriver implements Driver {
     const gpMap = gpMapRaw ? safe(() => parseGpMap(gpMapRaw)) : undefined;
     const gpProfRaw = await this.ok(CMD.getGamepadProfile, slot).catch(() => undefined);
     const gpProf = gpProfRaw && okGpProfilePayload(gpProfRaw) ? safe(() => parseGpProfile(gpProfRaw)) : undefined;
-    let maps: (number[][] | null)[] | undefined;
+    let maps: (number[][] | null)[] | undefined = [];
+    for (let l = 0; l < LAYERS && maps; l++) {
+      const r = await this.link.cmd(CMD.getMappingProfile, slot, undefined, l).catch(() => undefined);
+      const m = r && r.status === STATUS_OK ? safe(() => parseMapping(r.body)) : undefined;
+      if (m === undefined) maps = undefined;
+      else maps.push(m);
+    }
+    // no drawing for this board: build it from the stored main layer (only stored Fn layers are shown,
+    // their factory defaults aren't known)
+    if (!caps && maps?.[0]) {
+      caps = layoutFromMapping(maps[0]);
+      const stored = maps.findIndex((m) => m === null);
+      maps = maps.slice(0, stored < 0 ? LAYERS : stored);
+      if (caps.length < 10) caps = undefined;
+    }
+    if (!caps) maps = undefined;
+    if (caps && !perKey) {
+      const got = await this.ok(CMD.getActuationProfile, slot).catch(() => undefined);
+      const parsedPk = got ? safe(() => parsePerKey(got)) : undefined;
+      if (!parsedPk || parsedPk.form === 'legacy' || parsedPk.form === 'unknown') caps = maps = undefined;
+      else perKey = parsedPk.map;
+    }
     let akc: Akc | undefined;
     if (caps) {
-      maps = [];
-      for (let l = 0; l < LAYERS && maps; l++) {
-        const r = await this.link.cmd(CMD.getMappingProfile, slot, undefined, l).catch(() => undefined);
-        const m = r && r.status === STATUS_OK ? safe(() => parseMapping(r.body)) : undefined;
-        if (m === undefined) maps = undefined;
-        else maps.push(m);
-      }
       const akcRaw = await this.ok(CMD.getAkcProfile, slot).catch(() => undefined);
       akc = akcRaw && (!akcRaw.length || okAkcPayload(akcRaw)) ? safe(() => parseAkc(akcRaw)) : undefined;
     }
@@ -1547,8 +1705,13 @@ export class WootingDriver implements Driver {
     const c2 = c1 ? await this.ok(CMD.getRgbColors2, slot).catch(() => undefined) : undefined;
     const colors = c1 && c2 ? safe(() => [...parseRows(c1), ...parseRows(c2)]) : undefined;
     const globalRaw = await this.ok(CMD.getGlobalSettings).catch(() => undefined);
-    this.st = { slot, fw, writable, kbTop, base, kb, rtRaw, groups, perKey, coreRaw, caps, cfg, maps, gpMap, gpProf, akc, colors: colors?.length === ROWS ? colors : undefined, globalRaw };
+    this.st = { slot, fw, writable, kbTop, base, kb, rtRaw, groups, perKey, coreRaw, caps, cfg, maps, gpMap, gpProf, akc, colors: colors?.length === ROWS ? colors : undefined, globalRaw, meta };
     const st = this.st;
+
+    if (meta) {
+      out.push({ key: 'profile_name', label: 'Profile name', group: 'Profile', value: { kind: 'text', text: meta.name, max: NAME_MAX } });
+      if (meta.color !== undefined) out.push({ key: 'profile_color', label: 'Profile colour', group: 'Profile', value: { kind: 'color', rgb: meta.color } });
+    }
 
     // ---- device config: polling, rollover, controller
     const cfgOk = !!cfg && cfg.length >= 7 && okConfigBody(configBody(cfg));
@@ -1748,6 +1911,20 @@ export class WootingDriver implements Driver {
         return this.writeGpProf((p) => (p.square = want('toggle').on));
       case 'gp_extreme_snappy':
         return this.writeGpProf((p) => (p.snappy = want('toggle').on));
+      case 'profile_delete': {
+        const n = want('choice').current;
+        if (n === -1) return;
+        return this.deleteProfile(n);
+      }
+      case 'profile_name': {
+        const name = want('text').text.trim();
+        if (!name || [...name].length > NAME_MAX) throw new Error(`A profile name has 1 to ${NAME_MAX} characters.`);
+        return this.writeMeta((m) => (m.name = name));
+      }
+      case 'profile_color': {
+        const rgb = want('color').rgb;
+        return this.writeMeta((m) => (m.color = rgb & 0xffffff));
+      }
       case 'numlock_inv':
         return this.writeGlobal((g) => (g.numlock = want('toggle').on));
       case 'debounce':
@@ -2036,6 +2213,35 @@ export class WootingDriver implements Driver {
       if (same) st.colors = got;
       return same;
     }, "the keyboard didn't keep the colours");
+  }
+
+  private async deleteProfile(n: number): Promise<void> {
+    const st = this.st!;
+    const r = await this.link.cmd(CMD.getProfileMetadata, n + 1).catch(() => undefined);
+    const lastOne = n + 1 >= SLOTS || !r || r.status !== STATUS_OK || !r.body.length;
+    if (!Number.isInteger(n) || n <= 0 || n >= SLOTS || n === st.slot || !lastOne) throw new Error('Only the last profile can be deleted, and not while it is active.');
+    const d = await this.link.cmd(CMD.deleteProfile, n);
+    if (d.status !== STATUS_OK) throw new Error(`the keyboard refused to delete the profile (status ${hex2(d.status)})`);
+    await this.verify(async () => {
+      const got = await this.link.cmd(CMD.getProfileMetadata, n);
+      return got.status !== STATUS_OK || !got.body.length;
+    }, "the keyboard didn't delete the profile");
+  }
+
+  /** ProfileMetadata to the active slot and RAM (Wootility: 1a slot, then 1a 00), read back */
+  private async writeMeta(change: (m: Meta) => void): Promise<void> {
+    const st = this.st!;
+    if (!st.meta) throw new Error('no profile name');
+    const m: Meta = { ...st.meta };
+    change(m);
+    const payload = encodeMeta(m);
+    for (const flags of [flagsFor(st.slot), 0]) await this.link.report(REPORT.metadata, flags, payload);
+    await this.verify(async () => {
+      const got = parseMeta(await this.ok(CMD.getProfileMetadata, st.slot));
+      const same = got.name === m.name && got.color === m.color;
+      if (same) st.meta = got;
+      return same;
+    }, "the keyboard didn't keep the profile name");
   }
 
   private async writeGlobal(change: (g: Global) => void): Promise<void> {

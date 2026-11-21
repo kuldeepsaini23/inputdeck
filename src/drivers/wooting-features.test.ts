@@ -201,4 +201,57 @@ describe('wooting driver: everything Wootility does', () => {
     fake.analogOk = false;
     await expect(drv.travelTest!(() => undefined)).rejects.toThrow();
   });
+
+  it('renames the profile and sets its colour', async () => {
+    const { drv, ss } = await open();
+    expect(find(ss, 'profile_name').value).toMatchObject({ text: 'Typing Profile', max: 24 });
+    await drv.write({ ...find(ss, 'profile_name'), value: { kind: 'text', text: 'Valorant', max: 24 } });
+    await drv.write({ ...find(ss, 'profile_color'), value: { kind: 'color', rgb: 0xff8800 } });
+    const r = await drv.read();
+    expect(find(r, 'profile_name').value).toMatchObject({ text: 'Valorant' });
+    expect(find(r, 'profile_color').value).toEqual({ kind: 'color', rgb: 0xff8800 });
+    expect((find(r, 'profile').value as V<'choice'>).options[0][0]).toBe('Valorant');
+  });
+
+  it('builds the picture of an 80HE from its stored main layer', async () => {
+    const fake = new FakeWooting({ productId: 0x1400 });
+    // an 80HE-like main layer: Esc F1.. on row 0, numbers on row 1, arrows on row 5
+    const rows = Array.from({ length: 6 }, () => Array.from({ length: 21 }, () => 0xff));
+    rows[0][0] = 0x26;
+    for (let i = 0; i < 12; i++) rows[0][1 + i] = 0x37 + i;
+    for (let i = 0; i < 10; i++) rows[1][1 + i] = 0x1b + i;
+    for (const c of [4, 6, 8]) rows[5][c] = 0x29;
+    rows[5][14] = 0x4d;
+    rows[5][13] = 0xe7;
+    fake.slots[0].maps[0] = encodeMapping(rows);
+    await fake.open();
+    const drv = new WootingDriver(fake.asHid(), { timeoutMs: 50 });
+    const ss = await drv.read();
+    const caps = drv.layout!();
+    expect(caps.length).toBe(26);
+    const space = caps.find((k) => k.label === 'Space')!;
+    expect(space).toMatchObject({ x: 3.75, w: 6.25 });
+    expect(find(ss, 'per_key_trigger')).toBeTruthy();
+    const km = find(ss, 'keymap').value as V<'keymap'>;
+    expect(km.layers.length).toBe(1); // Fn layers aren't stored, their defaults are unknown
+    // per-key actuation on the space bar goes to all three switches
+    const pk = find(ss, 'per_key_trigger').value as Extract<Value, { kind: 'perKeyTrigger' }>;
+    const travel = pk.travel.slice();
+    travel[caps.indexOf(space)] = 3;
+    await drv.write({ ...find(ss, 'per_key_trigger'), value: { ...pk, travel } });
+    const { parsePerKey } = await import('./wooting');
+    const got = parsePerKey(fake.slots[0].pk).map;
+    expect([got.get(mid(5, 4)), got.get(mid(5, 6)), got.get(mid(5, 8))]).toEqual([0x6fff, 0x6fff, 0x6fff]);
+  });
+
+  it('deletes only the last, inactive profile', async () => {
+    const { drv, fake, ss } = await open();
+    const del = find(ss, 'profile_delete');
+    expect(del.confirm).toBeTruthy();
+    expect((del.value as V<'choice'>).options).toEqual([['Keep all', -1], ['Mixed Movement', 3]]);
+    await expect(drv.write({ ...del, value: { ...(del.value as V<'choice'>), current: 2 } })).rejects.toThrow(/last profile/);
+    await drv.write({ ...del, value: { ...(del.value as V<'choice'>), current: 3 } });
+    expect(fake.names.length).toBe(3);
+    expect((find(await drv.read(), 'profile').value as V<'choice'>).options.length).toBe(3);
+  });
 });
